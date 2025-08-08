@@ -1,0 +1,7 @@
+.patched
+.metals/
+.cache/
+.vscode/
+install/
+regression-test-logs/
+

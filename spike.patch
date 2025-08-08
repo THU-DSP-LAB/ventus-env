@@ -1,0 +1,12 @@
+diff --git a/fesvr/device.h b/fesvr/device.h
+index 1387b745..0db784b6 100644
+--- a/fesvr/device.h
++++ b/fesvr/device.h
+@@ -4,6 +4,7 @@
+ #include <vector>
+ #include <queue>
+ #include <cstring>
++#include <cstdint>
+ #include <string>
+ #include <functional>
+ 

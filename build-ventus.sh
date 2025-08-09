@@ -182,7 +182,7 @@ build_gpgpu_cyclesim() {
 
 # Build ventus cpp cycle-level simulator
 build_gpgpu_rtlsim() {
-  cd ${GPGPU_DIR}/sim-verilator
+  cd ${GPGPU_DIR}/sim-verilator-nocache
   echo "====================="
   echo make -j${BUILD_PARALLEL} RELEASE=1
   echo "====================="

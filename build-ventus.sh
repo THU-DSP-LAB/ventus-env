@@ -248,7 +248,9 @@ build_libclc() {
 build_icd_loader() {
   cd ${OCL_ICD_DIR}
   ./bootstrap
-  ./configure --prefix=${VENTUS_INSTALL_PREFIX}
+  mkdir -p ${OCL_ICD_DIR}/build
+  cd ${OCL_ICD_DIR}/build
+  ../configure --prefix=${VENTUS_INSTALL_PREFIX}
   make -j${BUILD_PARALLEL} && make install
 }
 

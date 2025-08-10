@@ -22,3 +22,6 @@
 [submodule "llvm"]
 	path = llvm
 	url = https://github.com/THU-DSP-LAB/llvm-project.git
+[submodule "systemc"]
+	path = systemc
+	url = https://github.com/accellera-official/systemc.git

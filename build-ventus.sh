@@ -4,8 +4,8 @@ set -euo pipefail
 
 DIR=$(cd "$(dirname "${0}")" &> /dev/null && (pwd -W 2> /dev/null || pwd))
 VENTUS_INSTALL_PREFIX=${DIR}/install
-PROGRAMS_TOBUILD_DEFAULT=(llvm ocl-icd libclc spike driver pocl rodinia test-pocl)
-PROGRAMS_TOBUILD_DEFAULT_FULL=(llvm ocl-icd libclc spike rtlsim cyclesim driver pocl rodinia test-pocl)
+PROGRAMS_TOBUILD_DEFAULT=(systemc llvm ocl-icd libclc spike driver pocl rodinia test-pocl)
+PROGRAMS_TOBUILD_DEFAULT_FULL=(systemc llvm ocl-icd libclc spike rtlsim cyclesim driver pocl rodinia test-pocl)
 PROGRAMS_TOBUILD=(${PROGRAMS_TOBUILD_DEFAULT_FULL[@]})
 
 BUILD_PARALLEL=$(( $(nproc) * 2 / 3 ))
@@ -14,7 +14,7 @@ BUILD_PARALLEL=$(( $(nproc) * 2 / 3 ))
 help() {
   cat <<END
 
-Build [llvm, pocl, ocl-icd, libclc, driver, spike, rtlsim, cyclesim] programs.
+Build [systemc llvm, pocl, ocl-icd, libclc, driver, spike, rtlsim|gpgpu, cyclesim|simulator] programs.
 Run the rodinia and test-pocl test suites.
 Read ${DIR}/llvm/README.md to get started.
 
@@ -78,6 +78,11 @@ done
 # Get build type from env, otherwise use default value 'Release'
 BUILD_TYPE=${BUILD_TYPE:-Release}
 
+# Need to get the systemc folder from enviroment variables
+SYSTEMC_DIR=${SYSTEMC_DIR:-${DIR}/systemc}
+SYSTEMC_INSTALL_DIR=${SYSTEMC_INSTALL_DIR:-${VENTUS_INSTALL_PREFIX}/systemc}
+check_if_program_exits $SYSTEMC_DIR "lib systemc"
+
 # Need to get the ventus-llvm folder from enviroment variables
 LLVM_DIR=${LLVM_DIR:-${DIR}/llvm}
 check_if_program_exits $LLVM_DIR "ventus-llvm"
@@ -117,6 +122,18 @@ OCL_ICD_BUILD_DIR=${OCL_ICD_DIR}/build
 # Need to get the gpu-rodinia folder from enviroment variables
 RODINIA_DIR=${RODINIA_DIR:-${DIR}/rodinia}
 check_if_program_exits ${RODINIA_DIR} "gpu-rodinia"
+
+# Build library systemc: depended by cyclesim
+build_systemc() {
+  cd ${SYSTEMC_DIR}
+  ./config/bootstrap
+  mkdir -p ${SYSTEMC_DIR}/build
+  cd ${SYSTEMC_DIR}/build
+  ../configure 'CXXFLAGS=-std=c++20' --prefix=${SYSTEMC_INSTALL_DIR} --enable-debug
+  make -j${BUILD_PARALLEL}
+  make check
+  make install
+}
 
 # Build llvm
 build_llvm() {
@@ -279,12 +296,21 @@ export_elements() {
   export VENTUS_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX}
   export POCL_DEVICES="ventus"
   export OCL_ICD_VENDORS=${VENTUS_INSTALL_PREFIX}/lib/libpocl.so
+  export SYSTEMC_HOME=${SYSTEMC_INSTALL_DIR}
 }
 
 # When no need to build llvm, export needed elements
 if [[ ! "${PROGRAMS_TOBUILD[*]}" =~ "llvm" ]];then
   export_elements
 fi
+
+# Check dep-library systemc is built or not
+check_if_systemc_built() {
+  if [ ! -d "${SYSTEMC_INSTALL_DIR}/lib-linux64/libsystemc.so" ];then
+    echo "Please build library systemc first!"
+    exit 1
+  fi
+}
 
 # Check llvm is built or not
 check_if_ventus_llvm_built() {
@@ -334,7 +360,9 @@ check_if_ocl_icd_built() {
 # Process build options
 for program in "${PROGRAMS_TOBUILD[@]}"
 do
-  if [ "${program}" == "llvm" ];then
+  if [ "${program}" == "systemc" ];then
+    build_systemc
+  elif [ "${program}" == "llvm" ];then
     build_llvm
     export_elements
   elif [ "${program}" == "ocl-icd" ];then
@@ -344,9 +372,10 @@ do
     build_libclc
   elif [ "${program}" == "spike" ]; then
     build_spike
-  elif [ "${program}" == "rtlsim" ]; then
+  elif [ "${program}" == "rtlsim" || "${program}" == "gpgpu" ]; then
     build_gpgpu_rtlsim
-  elif [ "${program}" == "cyclesim" ]; then
+  elif [ "${program}" == "cyclesim" || "${program}" == "simulator" ]; then
+    check_if_systemc_built
     build_gpgpu_cyclesim
   elif [ "${program}" == "driver" ]; then
     check_if_spike_built

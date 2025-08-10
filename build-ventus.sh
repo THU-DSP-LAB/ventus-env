@@ -372,9 +372,9 @@ do
     build_libclc
   elif [ "${program}" == "spike" ]; then
     build_spike
-  elif [ "${program}" == "rtlsim" || "${program}" == "gpgpu" ]; then
+  elif [ "${program}" == "rtlsim" ] || [ "${program}" == "gpgpu" ]; then
     build_gpgpu_rtlsim
-  elif [ "${program}" == "cyclesim" || "${program}" == "simulator" ]; then
+  elif [ "${program}" == "cyclesim" ] || [ "${program}" == "simulator" ]; then
     check_if_systemc_built
     build_gpgpu_cyclesim
   elif [ "${program}" == "driver" ]; then

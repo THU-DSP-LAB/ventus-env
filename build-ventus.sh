@@ -306,7 +306,7 @@ fi
 
 # Check dep-library systemc is built or not
 check_if_systemc_built() {
-  if [ ! -d "${SYSTEMC_INSTALL_DIR}/lib-linux64/libsystemc.so" ];then
+  if [ ! -f "${SYSTEMC_INSTALL_DIR}/lib-linux64/libsystemc.so" ];then
     echo "Please build library systemc first!"
     exit 1
   fi

@@ -12,7 +12,11 @@ SCRIPT_DIR = Path(__file__).parent
 LOG_DIR = SCRIPT_DIR / "regression-test-logs"
 POCL_DIR = SCRIPT_DIR / "pocl"
 RODINIA_DIR = SCRIPT_DIR / "rodinia"
+
+# If your computer is not fast enough, change this value larger
 TIMEOUT_SCALE = 1
+# Run how many test processes simultaneously
+MULTIPROCESS_NUM = 8
 
 @dataclass
 class TestCase:
@@ -101,7 +105,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
 
     # 创建进程池，控制并行度
-    pool = multiprocessing.Pool(processes=8)  # 可根据需要调整并行进程数
+    pool = multiprocessing.Pool(processes=MULTIPROCESS_NUM)  # 可根据需要调整并行进程数
 
     results: List[Optional[int]] = [None] * len(test_cases)
     total = len(test_cases)

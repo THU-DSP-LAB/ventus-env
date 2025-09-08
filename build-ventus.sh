@@ -26,7 +26,7 @@ Options:
   --build <build programs>
     Chosen programs to build : [${PROGRAMS_TOBUILD}]
     Option format : "llvm;pocl", string are separated by semicolon
-    Default : "llvm;ocl-icd;libclc;spike;driver;pocl;rodinia;test-pocl"
+    Default : "llvm;ocl-icd;libclc;spike;rtlsim;cyclesim;driver;pocl;rodinia;test-pocl"
     'BUILD_TYPE' is default 'Release' which can be changed by enviroment variable
 
   --help | -h

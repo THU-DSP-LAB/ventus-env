@@ -25,4 +25,4 @@
 	url = https://github.com/accellera-official/systemc.git
 [submodule "cyclesim"]
 	path = cyclesim
-	url = git@github.com:THU-DSP-LAB/ventus-gpgpu-cpp-simulator.git
+	url = https://github.com/THU-DSP-LAB/ventus-gpgpu-cpp-simulator.git

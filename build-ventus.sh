@@ -3,7 +3,7 @@
 set -euo pipefail
 
 DIR=$(cd "$(dirname "${0}")" &> /dev/null && (pwd -W 2> /dev/null || pwd))
-VENTUS_INSTALL_PREFIX=${DIR}/install
+VENTUS_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX:-${DIR}/install}
 PROGRAMS_TOBUILD_DEFAULT=(systemc llvm ocl-icd libclc spike driver pocl rodinia test-pocl)
 PROGRAMS_TOBUILD_DEFAULT_FULL=(systemc llvm ocl-icd libclc spike rtlsim cyclesim driver pocl rodinia test-pocl)
 PROGRAMS_TOBUILD=(${PROGRAMS_TOBUILD_DEFAULT_FULL[@]})
@@ -25,7 +25,8 @@ Usage: ${DIR}/$(basename ${0})
 Options:
   --build <build programs>
     Chosen programs to build : [${PROGRAMS_TOBUILD}]
-    Option format : "llvm;pocl", string are separated by semicolon
+    Option format : "llvm;pocl", string are separated by semicolon.
+    ( Note that quotation marks are necessary, or bash will parse the semicolon as command ending )
     Default : "llvm;ocl-icd;libclc;spike;rtlsim;cyclesim;driver;pocl;rodinia;test-pocl"
     'BUILD_TYPE' is default 'Release' which can be changed by enviroment variable
 
@@ -200,9 +201,6 @@ build_gpgpu_cyclesim() {
 # Build ventus cpp cycle-level simulator
 build_gpgpu_rtlsim() {
   cd ${GPGPU_DIR}/sim-verilator-nocache
-  echo "====================="
-  echo make -j${BUILD_PARALLEL} RELEASE=1
-  echo "====================="
   make -j${BUILD_PARALLEL} RELEASE=1
   make install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX}
 }
@@ -218,7 +216,8 @@ build_pocl() {
     -DDEFAULT_ENABLE_ICD=ON \
     -DENABLE_TESTS=OFF \
     -DSTATIC_LLVM=OFF \
-    -DCMAKE_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX}
+    -DCMAKE_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX} \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
     # -DCMAKE_C_COMPILER=clang \
     # -DCMAKE_CXX_COMPILER=clang++ \
   ninja -C ${POCL_BUILD_DIR}
@@ -237,6 +236,7 @@ build_libclc() {
   fi
   cd ${LIBCLC_BUILD_DIR}
   cmake -G Ninja -B ${LIBCLC_BUILD_DIR} -S ${LLVM_DIR}/libclc \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DCMAKE_CLC_COMPILER=clang \
     -DCMAKE_LLAsm_COMPILER_WORKS=ON \
     -DCMAKE_CLC_COMPILER_WORKS=ON \
@@ -372,7 +372,7 @@ do
     build_libclc
   elif [ "${program}" == "spike" ]; then
     build_spike
-  elif [ "${program}" == "rtlsim" ] || [ "${program}" == "gpgpu" ]; then
+  elif [ "${program}" == "rtlsim" ] || [ "${program}" == "rtl" ] || [ "${program}" == "gpgpu" ]; then
     build_gpgpu_rtlsim
   elif [ "${program}" == "cyclesim" ] || [ "${program}" == "simulator" ]; then
     check_if_systemc_built

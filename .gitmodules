@@ -1,9 +1,6 @@
 [submodule "spike"]
 	path = spike
 	url = https://github.com/THU-DSP-LAB/ventus-gpgpu-isa-simulator.git
-[submodule "simulator"]
-	path = simulator
-	url = https://github.com/THU-DSP-LAB/ventus-gpgpu-cpp-simulator.git
 [submodule "gpgpu"]
 	path = gpgpu
 	url = https://github.com/THU-DSP-LAB/ventus-gpgpu.git
@@ -25,3 +22,6 @@
 [submodule "systemc"]
 	path = systemc
 	url = https://github.com/accellera-official/systemc.git
+[submodule "cyclesim"]
+	path = cyclesim
+	url = git@github.com:THU-DSP-LAB/ventus-gpgpu-cpp-simulator.git

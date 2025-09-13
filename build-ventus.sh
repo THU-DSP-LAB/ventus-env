@@ -92,7 +92,7 @@ LLVM_BUILD_DIR=${LLVM_DIR}/build
 LIBCLC_BUILD_DIR=${LLVM_DIR}/build-libclc
 
 # Need to get the cpp-cycle-level-simulator folder from enviroment variables
-CYCLESIM_DIR=${CYCLESIM_DIR:-${DIR}/simulator}
+CYCLESIM_DIR=${CYCLESIM_DIR:-${DIR}/cyclesim}
 check_if_program_exits $CYCLESIM_DIR "ventus-gpgpu cpp cycle-level simulator"
 CYCLESIM_BUILD_DIR=${CYCLESIM_DIR}/build
 
@@ -132,7 +132,7 @@ build_systemc() {
   cd ${SYSTEMC_DIR}/build
   ../configure 'CXXFLAGS=-std=c++20' --prefix=${SYSTEMC_INSTALL_DIR} --enable-debug
   make -j${BUILD_PARALLEL}
-  make check
+  make -j${BUILD_PARALLEL} check
   make install
 }
 
@@ -192,6 +192,7 @@ build_spike() {
 build_gpgpu_cyclesim() {
   cd ${CYCLESIM_DIR}
   cmake -G Ninja -B ${CYCLESIM_BUILD_DIR} -S ${CYCLESIM_DIR} \
+    -DSYSTEMC_HOME=${SYSTEMC_INSTALL_DIR} \
     -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
     -DCMAKE_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX}
   ninja -C ${CYCLESIM_BUILD_DIR}
@@ -296,7 +297,6 @@ export_elements() {
   export VENTUS_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX}
   export POCL_DEVICES="ventus"
   export OCL_ICD_VENDORS=${VENTUS_INSTALL_PREFIX}/lib/libpocl.so
-  export SYSTEMC_HOME=${SYSTEMC_INSTALL_DIR}
 }
 
 # When no need to build llvm, export needed elements

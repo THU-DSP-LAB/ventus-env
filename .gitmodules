@@ -1,21 +1,27 @@
 [submodule "spike"]
 	path = spike
 	url = https://github.com/THU-DSP-LAB/ventus-gpgpu-isa-simulator.git
+	shallow = true
 [submodule "gpgpu"]
 	path = gpgpu
 	url = https://github.com/THU-DSP-LAB/ventus-gpgpu.git
+	shallow = true
 [submodule "driver"]
 	path = driver
 	url = https://github.com/THU-DSP-LAB/ventus-driver.git
+	shallow = true
 [submodule "pocl"]
 	path = pocl
 	url = https://github.com/THU-DSP-LAB/pocl.git
+	shallow = true
 [submodule "ocl-icd"]
 	path = ocl-icd
 	url = https://github.com/OCL-dev/ocl-icd.git
+	shallow = true
 [submodule "rodinia"]
 	path = rodinia
 	url = https://github.com/THU-DSP-LAB/gpu-rodinia.git
+	shallow = true
 [submodule "llvm"]
 	path = llvm
 	url = https://github.com/THU-DSP-LAB/llvm-project.git
@@ -23,6 +29,8 @@
 [submodule "systemc"]
 	path = systemc
 	url = https://github.com/accellera-official/systemc.git
+	shallow = true
 [submodule "cyclesim"]
 	path = cyclesim
 	url = https://github.com/THU-DSP-LAB/ventus-gpgpu-cpp-simulator.git
+	shallow = true

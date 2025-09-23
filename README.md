@@ -72,6 +72,51 @@ VENTUS_BACKEND=cyclesim python3 ./regression-test.py # 使用周期仿真器
 * `TIMEOUT_SCALE`：依据您的计算机运行速度调整测例的运行时间限制，运行速度慢需要调大此参数
 * `MULTIPROCESS_NUM`：并行运行的测试进程数量，使用RTL仿真时每个测试进程又是多线程的（默认8线程），依据您的计算机具体情况调整
 
+#### OpenCL-CTS 测试
+
+编译（确保已 `source env.sh`，并已初始化 `OpenCL-CTS` 子模块）：
+```bash
+cd OpenCL-CTS && git checkout dev-ventus
+mkdir -p build
+cmake -S . -B ./build \
+    -DCL_INCLUDE_DIR=${VENTUS_INSTALL_PREFIX}/include \
+    -DCL_LIB_DIR=${VENTUS_INSTALL_PREFIX}/lib \
+    -DOPENCL_LIBRARIES=OpenCL
+cmake --build ./build --config Release -j $(nproc)
+```
+
+调试：将 `--config` 改为 `Debug`，可使用 VS Code + gdb 进行断点调试。
+
+
+运行某测例（以 compiler 为例）：
+```bash
+cd OpenCL-CTS/build/test_conformance/compiler
+./test_compiler    # 运行 compiler 下的全部测试
+```
+
+只运行某个 kernel（以 atomics/atomic_add 为例）：
+```bash
+cd OpenCL-CTS/build/test_conformance/atomics
+./test_atomics atomic_add
+```
+
+提示：`atomic_add` 等 kernel 名称可在 `OpenCL-CTS/test_conformance/atomics` 目录下搜索，通常由 CMake 中的 `ADD_TEST` 添加。
+
+推荐将终端输出同时写入日志，便于后续检索：
+```bash
+./test_compiler |& tee output.log
+```
+
+批量运行脚本（并行执行全部/大批量测试）：
+```bash
+cd OpenCL-CTS
+python3 run_test_parallel.py --json test_list_new.json --max-workers 20
+```
+- `--json`: 测试列表（示例为 `test_list_new.json`）。
+- `--max-workers`: 并发工作进程数，按机器核心数与负载酌情设置。
+- 运行时会显示“准备执行 N 个测试任务，最大并发数 = K”，随后打印每个测试的结果行（如 `[  OK  ] basic_intmath_long2`）。
+- 建议在高并发下同时将标准输出落盘：`python3 run_test_parallel.py ... |& tee cts_parallel.log`。
+
 ### 开发环境
 
 Chisel RTL使用scala开发环境，可以使用vscode scala metals插件导入mill配置（`build.sc`），或者使用Makefile提供的`make idea`后使用IntelliJ IDEA打开，详见README

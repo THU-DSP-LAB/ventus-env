@@ -5,7 +5,6 @@ start_time=$(date +%s)
 echo "Start time: $(date +'%Y-%m-%d %H:%M:%S')"
 DIR=$(cd "$(dirname "${0}")" &> /dev/null && (pwd -W 2> /dev/null || pwd))
 VENTUS_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX:-${DIR}/install}
-PROGRAMS_TOBUILD_DEFAULT=(systemc llvm ocl-icd libclc spike driver pocl rodinia test-pocl)
 PROGRAMS_TOBUILD_DEFAULT_FULL=(systemc llvm ocl-icd libclc spike rtlsim cyclesim driver pocl rodinia test-pocl)
 PROGRAMS_TOBUILD=(${PROGRAMS_TOBUILD_DEFAULT_FULL[@]})
 
@@ -405,6 +404,7 @@ if [ "$REMOVE_BUILD_FOLDER" -ne 0 ]; then
     [ -d "$dir" ] && rm -rf "$dir"
     mkdir -p "$dir"
   done
+fi
 
 # Process build options
 for program in "${PROGRAMS_TOBUILD[@]}"
@@ -451,7 +451,6 @@ do
   fi
 done
 
-fi
 end_time=$(date +%s)
 total_duration=$((end_time - start_time))
 echo -e "\n----------------------------------------"

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+start_time=$(date +%s)
+echo "Start time: $(date +'%Y-%m-%d %H:%M:%S')"
 DIR=$(cd "$(dirname "${0}")" &> /dev/null && (pwd -W 2> /dev/null || pwd))
 VENTUS_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX:-${DIR}/install}
 PROGRAMS_TOBUILD_DEFAULT=(systemc llvm ocl-icd libclc spike driver pocl rodinia test-pocl)
@@ -93,12 +95,14 @@ done
 
 
 
-# Step1 : downloads every repositories.
-echo -e "\n=== downloads every repositories ==="
+# Step1 : Clone each repository.
+echo -e "\n=== Cloning each repository! ==="
+stage1_start=$(date +%s)
 chmod +x clone_repos.sh
 ./clone_repos.sh $([ $FORCE -eq 1 ] && echo "-f")
-
-echo -e "\n=== downloads all ==="
+stage1_end=$(date +%s)
+stage1_duration=$((stage1_end - stage1_start))
+echo -e "\n=== Cloning complete! Time taken:${stage1_duration} seconds ==="
 
 # Get build type from env, otherwise use default value 'Release'
 BUILD_TYPE=${BUILD_TYPE:-Release}
@@ -448,3 +452,8 @@ do
 done
 
 fi
+end_time=$(date +%s)
+total_duration=$((end_time - start_time))
+echo -e "\n----------------------------------------"
+echo "End time: $(date +'%Y-%m-%d %H:%M:%S')"
+echo "Time taken: ${total_duration} seconds"

@@ -8,14 +8,14 @@ all_success=1  # Track if all repositories were processed successfully.
 
 # Repository list: The format is "[repository URL] [local directory name] [branch name]".
 REPOS=(
-  "https://github.com/THU-DSP-LAB/ventus-gpgpu-cpp-simulator.git systemc test_env"
   "https://github.com/THU-DSP-LAB/llvm-project.git llvm test_env"
-  "https://github.com/OCL-dev/ocl-icd.git ocl-icd"
-  "https://github.com/THU-DSP-LAB/ventus-gpgpu-isa-simulator.git spike test_env"
-  "https://github.com/THU-DSP-LAB/ventus-gpgpu.git rtlsim test_env"
-  "https://github.com/accellera-official/systemc.git cyclesim 2.3.4"
-  "https://github.com/THU-DSP-LAB/ventus-driver.git driver test_env"
   "https://github.com/THU-DSP-LAB/pocl.git pocl test_env"
+  "https://github.com/OCL-dev/ocl-icd.git ocl-icd"
+  "https://github.com/THU-DSP-LAB/ventus-driver.git driver test_env"
+  "https://github.com/THU-DSP-LAB/ventus-gpgpu-isa-simulator.git spike test_env"
+  "https://github.com/THU-DSP-LAB/ventus-gpgpu.git gpgpu test_env"
+  "https://github.com/accellera-official/systemc.git systemc 2.3.4"
+  "https://github.com/THU-DSP-LAB/ventus-gpgpu-cpp-simulator.git cyclesim test_env"
   "https://github.com/THU-DSP-LAB/gpu-rodinia.git rodinia test_env"
 )
 

@@ -41,7 +41,7 @@ process_repo() {
   [ -n "$branch" ] && echo "Specified branch: $branch"
 
   # Build clone command.
-  local clone_cmd="git clone --depth $depth --progress"
+  local clone_cmd="git clone --recursive --depth $depth --progress"
   [ -n "$branch" ] && clone_cmd="$clone_cmd -b $branch"
   clone_cmd="$clone_cmd \"$url\" \"$dir\""
 

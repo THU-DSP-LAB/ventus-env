@@ -4,7 +4,7 @@ RUN env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY apt-get update
     && env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY apt-get install -y sudo vim neovim \
        mold ccache ninja-build cmake clang clangd clang-format gdb bash-completion \
        help2man perl perl-doc flex bison libfl2 libfl-dev zlib1g zlib1g-dev libgoogle-perftools-dev numactl \
-       libfmt-dev libspdlog-dev libelf-dev libyaml-cpp-dev device-tree-compiler bsdmainutils ruby default-jdk \
+       libfmt-dev libspdlog-dev libelf-dev libyaml-cpp-dev nlohmann-json3-dev device-tree-compiler bsdmainutils ruby default-jdk \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
     && adduser ubuntu sudo
 
@@ -28,9 +28,10 @@ USER ubuntu
 WORKDIR /home/ubuntu
 ENV PATH="/opt/verilator/5.034/bin:/opt/firtool-1.62.0/bin:${PATH}"
 RUN echo "export PATH=\"/opt/verilator/5.034/bin:/opt/firtool-1.62.0/bin:\${PATH}\"" >> /home/ubuntu/.bashrc \
-    && git clone https://github.com/THU-DSP-LAB/ventus-env.giti -b test_env --depth=1 ventus \
+    && git clone https://github.com/THU-DSP-LAB/ventus-env.git -b test_env --depth=1 ventus \
     && cd ventus \
     && chmod +x build-ventus.sh
 
-
+WORKDIR /home/ubuntu/ventus
 ENTRYPOINT ["/bin/bash", "/home/ubuntu/ventus/build-ventus.sh"]
+

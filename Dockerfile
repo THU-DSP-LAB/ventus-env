@@ -30,49 +30,7 @@ WORKDIR /home/ubuntu
 ENV PATH="/opt/verilator/5.034/bin:/opt/firtool-1.62.0/bin:${PATH}"
 RUN echo "export PATH=\"/opt/verilator/5.034/bin:/opt/firtool-1.62.0/bin:\${PATH}\"" >> /home/ubuntu/.bashrc \
     && git clone https://github.com/Humber-186/ventus-env.git ventus \
-    && cd ventus \
-    && make init
-COPY --chown=ubuntu:ubuntu ./rodinia/data /home/ubuntu/ventus/rodinia/data
+    && cd ventus
 
-# FROM ventus-dev-repo-clone AS ventus-dev-llvm
-# USER ubuntu
-# WORKDIR /home/ubuntu/ventus
-# COPY --chown=ubuntu:ubuntu ./build-ventus.sh /home/ubuntu/ventus/build-ventus.sh
-# RUN bash build-ventus.sh --build systemc \
-#     && bash build-ventus.sh --build llvm
 
-# FROM ventus-dev-llvm AS ventus-dev-spike
-# USER ubuntu
-# WORKDIR /home/ubuntu/ventus
-# RUN bash build-ventus.sh --build ocl-icd \
-#     && bash build-ventus.sh --build libclc \
-#     && bash build-ventus.sh --build spike
-
-# FROM ventus-dev-spike AS ventus-dev-rtlsim
-# USER ubuntu
-# WORKDIR /home/ubuntu/ventus
-# ENV SHELL=/bin/bash
-# RUN bash build-ventus.sh --build rtlsim
-
-# FROM ventus-dev-rtlsim AS ventus-dev-cyclesim
-# USER ubuntu
-# WORKDIR /home/ubuntu/ventus
-# RUN bash build-ventus.sh --build cyclesim
-
-# FROM ventus-dev-cyclesim AS ventus-dev
-# USER ubuntu
-# WORKDIR /home/ubuntu/ventus
-# RUN bash build-ventus.sh --build driver \
-#     && bash build-ventus.sh --build pocl \
-#     && bash build-ventus.sh --build rodinia \
-#     && bash build-ventus.sh --build test-pocl
-
-FROM ventus-dev-repo-clone AS ventus-dev
-USER ubuntu
-WORKDIR /home/ubuntu/ventus
-RUN bash build-ventus.sh
-
-FROM ventus-dev-os AS ventus
-USER ubuntu
-WORKDIR /home/ubuntu/ventus
-COPY --chown=ubuntu:ubuntu --from=ventus-dev /home/ubuntu/ventus/install /home/ubuntu/ventus/install
+ENTRYPOINT ["/bin/bash", "/home/ubuntu/ventus/build-ventus.sh"]

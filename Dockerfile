@@ -10,9 +10,8 @@ RUN env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY apt-get update
 
 FROM ventus-dev-os-base AS builder_verilator
 WORKDIR /tmp/verilator
-RUN git clone https://github.com/verilator/verilator \
+RUN git clone https://github.com/verilator/verilator.git -b v5.034 --depth=1 \
     && cd verilator \
-    && git checkout v5.034 \
     && autoconf \
     && ./configure --prefix=/opt/verilator/5.034 \
     && make -j$(nproc) \
@@ -29,8 +28,9 @@ USER ubuntu
 WORKDIR /home/ubuntu
 ENV PATH="/opt/verilator/5.034/bin:/opt/firtool-1.62.0/bin:${PATH}"
 RUN echo "export PATH=\"/opt/verilator/5.034/bin:/opt/firtool-1.62.0/bin:\${PATH}\"" >> /home/ubuntu/.bashrc \
-    && git clone https://github.com/Humber-186/ventus-env.git ventus \
-    && cd ventus
+    && git clone https://github.com/THU-DSP-LAB/ventus-env.giti -b test_env --depth=1 ventus \
+    && cd ventus \
+    && chmod +x build-ventus.sh
 
 
 ENTRYPOINT ["/bin/bash", "/home/ubuntu/ventus/build-ventus.sh"]

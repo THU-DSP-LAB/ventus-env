@@ -1,5 +1,5 @@
 _init: 
-	git submodule update --init --recursive
+	git submodule update --init --recursive --filter=blob:none
 
 init: _init .patched
 

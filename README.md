@@ -22,10 +22,11 @@ apt-get install \
 clone本仓库到本地路径（假如为`ventus-env/`）后：
 ```bash
 cd ventus-env/
-make init # 从github拉取所有需要的仓库，注意llvm仓库较大，保持网络环境畅通
+make init # 从github拉取所有需要的仓库与数据，耗时较长，请保持网络环境畅通
 ```
 
-gpu-rodinia所使用的数据集需要额外[下载](https://cloud.tsinghua.edu.cn/d/ad60a4502fbb43daa45e/)rodinia_data.tar.xz并解压
+gpu-rodinia所使用的数据集会自动[下载](http://dspdev.ime.tsinghua.edu.cn/images/ventus_dataset/ventus_rodinia_data.tar.xz)并解压   
+您也可以手动从[备用网址](https://cloud.tsinghua.edu.cn/d/ad60a4502fbb43daa45e/)下载rodinia_data.tar.xz并用如下命令解压
 ```bash
 tar -xf rodinia_data.tar.xz
 ```
@@ -81,27 +82,24 @@ Chisel RTL使用scala开发环境，可以使用vscode scala metals插件导入m
 
 ## 构建Docker
 
-gpu-rodinia所使用的数据集需要额外[下载](https://cloud.tsinghua.edu.cn/d/ad60a4502fbb43daa45e/)rodinia_data.tar.xz并解压
-```bash
-cd ventus-env/
-tar -xf rodinia_data.tar.xz
-```
-
-> 注意，若您先`make init`再解压rodinia_data.tar.xz，没有问题   
-> 若您先解压rodinia_data.tar.xz导致`ventus-env/rodinia/`非空，之后再`make init`会导致rodinia子仓库clone异常   
-> 需要将`ventus-env/rodinia/`路径清空再`make init`
-
-构建docker image
+构建docker image：
 ```bash
 docker build --target ventus-dev -t ventus-dev:latest .
 docker build --target ventus -t ventus:latest .
 ```
+其中`ventus-dev`包含所有代码仓库、编译产物与测试用例，适合开发人员使用   
+`ventus`只包含最终编译产物与部分测试用例，适合尝鲜
 
 ## Trouble Shoot
 
-运行RTL verilator仿真时出现类似如下报错：
+1. 运行RTL verilator仿真时出现类似如下报错：
 ```txt
 %Error: /opt/verilator/5.034/share/verilator/include/verilated.cpp:2729: VerilatedContext has 8 threads but model 'Vdut' (instantiated as 'TOP') was Verilated with --threads 11.
 ```
 这是因为构建Verilated模型时选择的并行度过大，可能大于本机CPU逻辑线程数量   
 可以将`ventus-env/gpgpu/sim-verilator/verilate.mk`与`ventus-env/gpgpu/sim-verilator-nocache/verilate.mk`中`VLIB_NPROC_DUT`的数值改小，重新编译`bash build-ventus.sh --build gpgpu`
+
+2. 有时运行spike运行测例或回归测试后，命令行中输入字符无显示，可尝试盲输并运行`stty echo`
+
+3. 有时Verilator报错类似`%Error: Internal Error: ../V3FuncOpt.cpp:162: Inconsitent terms`.   
+这可能是未知的Verilator问题，但出现频率较低，一般来说重新运行即可

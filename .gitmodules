@@ -25,3 +25,6 @@
 [submodule "cyclesim"]
 	path = cyclesim
 	url = https://github.com/THU-DSP-LAB/ventus-gpgpu-cpp-simulator.git
+[submodule "OpenCL-CTS"]
+	path = OpenCL-CTS
+	url = https://github.com/THU-DSP-LAB/OpenCL-CTS.git

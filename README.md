@@ -62,6 +62,8 @@ VENTUS_BACKEND=cyclesim ./run # 使用周期仿真器
 
 ### 测试
 
+#### GPU-Rodinia测试集
+
 本仓库的`regression-test.py`包含了一些rodinia测试集的回归测试
 ```bash
 python3 ./regression-test.py  # 默认使用spike
@@ -74,9 +76,63 @@ VENTUS_BACKEND=cyclesim python3 ./regression-test.py # 使用周期仿真器
 * `TIMEOUT_SCALE`：依据您的计算机运行速度调整测例的运行时间限制，运行速度慢需要调大此参数
 * `MULTIPROCESS_NUM`：并行运行的测试进程数量，使用RTL仿真时每个测试进程又是多线程的（默认8线程），依据您的计算机具体情况调整
 
+如果希望运行rodinia中指定的单个测例，需进入到对应路径（`rodinia/opencl/*`）下手工处理  
+* 运行`make`编译测例
+* 使用`./run`脚本运行测例。很多测例需要命令行参数，`run`脚本中提供了示例，`regression-test.py`中支持的测例都提供了`run`脚本
+```bash
+source env.sh
+cd rodinia/opencl/backprop  # for example
+make
+VENTUS_BACKEND=rtl ./run
+```
+
+#### OpenCL-CTS 测试
+运行`bash build-ventus.sh --build cts`编译OpenCL CTS测试套件
+
+运行某主题下的全部测例（以 compiler 为例）：
+```bash
+cd OpenCL-CTS/build/test_conformance/compiler
+# 运行compiler主题下的全部测试并保存输出到日志文件
+./test_compiler |& tee output.log
+```
+
+只运行某个指定测试kernel
+```bash
+cd OpenCL-CTS/build/test_conformance/basic
+./test_basic --help  # check what testcase is support
+./test_basic intmath_int4  # testcase name got from previous cmd
+```
+
+提供批量运行脚本，并行执行全部/大批量测试：
+```bash
+cd OpenCL-CTS
+python3 run_test_parallel.py --json test_list_new.json --max-workers 20
+```
+- `--json`: 测试列表（示例为 `test_list_new.json`）。
+- `--max-workers`: 并发工作进程数，按机器核心数与负载酌情设置。
+- 运行时会显示“准备执行 N 个测试任务，最大并发数 = K”，随后打印每个测试的结果行（如 `[  OK  ] basic_intmath_long2`）。
+- 建议在高并发下同时将标准输出落盘：`python3 run_test_parallel.py ... |& tee cts_parallel.log`。
+
+Note:   
+* OpenCL-CTS对于仿真来说规模偏大，运行时间较长，我们仅在spike仿真器上运行以检验软件栈的正确性
+* spike仿真器默认会导出指令粒度的日志，运行CTS可能会产生极大量的日志文件。推荐大规模运行CTS测试前先修改build-ventus.sh中的spike编译选项，关闭日志输出：
+```diff
+--- a/build-ventus.sh
++++ b/build-ventus.sh
+@@ -183,7 +183,7 @@ build_spike() {
+   # rm -rf ${SPIKE_BUILD_DIR} || true
+   mkdir -p ${SPIKE_BUILD_DIR}
+   cd ${SPIKE_BUILD_DIR}
+-  ../configure --prefix=${VENTUS_INSTALL_PREFIX} --enable-commitlog
++  ../configure --prefix=${VENTUS_INSTALL_PREFIX}
+   make -j${BUILD_PARALLEL}
+   make install
+ }
+```
+
 ### 开发环境
 
-Chisel RTL使用scala开发环境，可以使用vscode scala metals插件导入mill配置（`build.sc`），或者使用Makefile提供的`make idea`后使用IntelliJ IDEA打开，详见README
+Chisel RTL使用scala开发环境，可以使用vscode scala metals插件导入mill配置（`build.sc`），或者使用Makefile提供的`make idea`后使用IntelliJ IDEA打开，详见对应仓库的README
 
 其它项目均为C++开发环境，使用`cmake`或`bear`导出compile_commands.json文件后即可导入并使vscode插件或其它IDE正常工作
 

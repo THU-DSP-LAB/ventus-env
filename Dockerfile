@@ -4,15 +4,14 @@ RUN env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY apt-get update
     && env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY apt-get install -y sudo vim neovim \
        mold ccache ninja-build cmake clang clangd clang-format gdb bash-completion \
        help2man perl perl-doc flex bison libfl2 libfl-dev zlib1g zlib1g-dev libgoogle-perftools-dev numactl \
-       libfmt-dev libspdlog-dev libelf-dev libyaml-cpp-dev device-tree-compiler bsdmainutils ruby default-jdk \
+       libfmt-dev libspdlog-dev libelf-dev libyaml-cpp-dev nlohmann-json3-dev device-tree-compiler bsdmainutils ruby default-jdk \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
     && adduser ubuntu sudo
 
 FROM ventus-dev-os-base AS builder_verilator
 WORKDIR /tmp/verilator
-RUN git clone https://github.com/verilator/verilator \
+RUN git clone https://github.com/verilator/verilator.git -b v5.034 --depth=1 \
     && cd verilator \
-    && git checkout v5.034 \
     && autoconf \
     && ./configure --prefix=/opt/verilator/5.034 \
     && make -j$(nproc) \
@@ -32,7 +31,6 @@ RUN echo "export PATH=\"/opt/verilator/5.034/bin:/opt/firtool-1.62.0/bin:\${PATH
     && git clone https://github.com/Humber-186/ventus-env.git ventus \
     && cd ventus \
     && make init
-COPY --chown=ubuntu:ubuntu ./rodinia/data /home/ubuntu/ventus/rodinia/data
 
 # FROM ventus-dev-repo-clone AS ventus-dev-llvm
 # USER ubuntu
@@ -75,4 +73,8 @@ RUN bash build-ventus.sh
 FROM ventus-dev-os AS ventus
 USER ubuntu
 WORKDIR /home/ubuntu/ventus
-COPY --chown=ubuntu:ubuntu --from=ventus-dev /home/ubuntu/ventus/install /home/ubuntu/ventus/install
+COPY --chown=ubuntu:ubuntu --from=ventus-dev \
+     /home/ubuntu/ventus/env.sh /home/ubuntu/ventus/install \
+     /home/ubuntu/ventus/regression-test.py \
+     /home/ubuntu/ventus/pocl /home/ubuntu/ventus/rodinia \
+     /home/ubuntu/ventus/

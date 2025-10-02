@@ -120,6 +120,11 @@ OCL_ICD_DIR=${OCL_ICD_DIR:-${DIR}/ocl-icd}
 check_if_program_exits ${OCL_ICD_DIR} "ocl-icd"
 OCL_ICD_BUILD_DIR=${OCL_ICD_DIR}/build
 
+# Need to get the OpenCL-CTS folder from enviroment variables
+OPENCL_CTS_DIR=${OPENCL_CTS_DIR:-${DIR}/OpenCL-CTS}
+check_if_program_exits ${OPENCL_CTS_DIR} "OpenCL Conformance Test Suite (CTS)"
+OPENCL_CTS_BUILD_DIR=${OPENCL_CTS_DIR}/build
+
 # Need to get the gpu-rodinia folder from enviroment variables
 RODINIA_DIR=${RODINIA_DIR:-${DIR}/rodinia}
 check_if_program_exits ${RODINIA_DIR} "gpu-rodinia"
@@ -272,6 +277,16 @@ build_icd_loader() {
   make -j${BUILD_PARALLEL} && make install
 }
 
+build_opencl_cts() {
+    cd ${OPENCL_CTS_DIR}
+    cmake -S ${OPENCL_CTS_DIR} -B ${OPENCL_CTS_BUILD_DIR} -G Ninja \
+        -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
+        -DCL_INCLUDE_DIR=${VENTUS_INSTALL_PREFIX}/include \
+        -DCL_LIB_DIR=${VENTUS_INSTALL_PREFIX}/lib \
+        -DOPENCL_LIBRARIES=OpenCL
+    cmake --build ${OPENCL_CTS_BUILD_DIR} -j ${BUILD_PARALLEL}
+}
+
 # Test the rodinia test suit
 test_rodinia() {
    cd ${RODINIA_DIR}
@@ -357,6 +372,13 @@ check_if_ocl_icd_built() {
   fi
 }
 
+check_if_pocl_built() {
+  if [ ! -f "${VENTUS_INSTALL_PREFIX}/lib/pocl/libpocl-devices-ventus.so" ];then
+    echo "Please build POCL first!"
+    exit 1
+  fi
+}
+
 # Process build options
 for program in "${PROGRAMS_TOBUILD[@]}"
 do
@@ -391,6 +413,10 @@ do
     check_if_ocl_icd_built
     check_if_spike_built
     test_rodinia
+  elif [ "${program}" == "cts" ] || [ "${program}" == "opencl-cts" ] || [ "${program}" == "OpenCL-CTS" ]; then
+    check_if_pocl_built
+    check_if_spike_built
+    build_opencl_cts
   elif [ "${program}" == "test-pocl" ]; then
     check_if_ventus_llvm_built
     check_if_ocl_icd_built

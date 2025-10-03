@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Tuple, Optional, List, Type
+from tqdm import tqdm
 
 SCRIPT_DIR = Path(__file__).parent
 LOG_DIR = SCRIPT_DIR / "regression-test-logs"
@@ -25,6 +26,12 @@ class TestCase:
     cmd: list
     timeout: int = 120 # seconds
     need_make: bool = True  # 是否需要编译
+
+# 约定的结果标签
+TAG_OK = "ok"
+TAG_FAIL = "failed"
+TAG_TIMEOUT = "timeout"
+TAG_COMPILE_FAIL = "compile_failed"
 
 test_cases = [
     TestCase(name="matadd"       , path=POCL_DIR/"build/examples/matadd", cmd=["./matadd"], need_make=False),
@@ -53,8 +60,8 @@ def get_compile_path_lock(path: Path):
         compile_path_locks[path] = manager.Lock()
     return compile_path_locks[path]
 
-def run_test_case(arg: Tuple[int, TestCase]) -> Tuple[int, int]:
-    """运行单个测试用例，并返回结果"""
+def run_test_case(arg: Tuple[int, TestCase]) -> Tuple[int, Tuple[int, str]]:
+    """运行单个测试用例，返回 (索引, (返回码, 标签))"""
     index, testcase = arg
     log_file = LOG_DIR/f"{testcase.name}.log"
     
@@ -69,15 +76,15 @@ def run_test_case(arg: Tuple[int, TestCase]) -> Tuple[int, int]:
                         result = subprocess.run(["make"], stdout=f, stderr=f, timeout=60, cwd=testcase.path)
                         if result.returncode != 0:
                             f.write("Compile Failed\n")
-                            return index, 2  # 编译失败用返回码2表示
+                            return index, (2, TAG_COMPILE_FAIL)
                         f.write("Compile OK\n")
                         compile_paths[testcase.path] = True  # 标记为已编译
                     except subprocess.TimeoutExpired:
-                        f.write("Compile Timeout , Failed\n")
-                        return index, 2
+                        f.write("Compile Timeout, Failed\n")
+                        return index, (2, TAG_COMPILE_FAIL)
                     except Exception as e:
                         f.write(f"Compile Failed: {e}\n")
-                        return index, 2
+                        return index, (2, TAG_COMPILE_FAIL)
                 else:
                     f.write("Already Compiled, Skipping...\n")
         
@@ -85,16 +92,20 @@ def run_test_case(arg: Tuple[int, TestCase]) -> Tuple[int, int]:
         f.write("=== Run Test ===\n")
         f.flush()
         try:
-            print(f"TestCase {index}: {testcase.name} begin...")
+            f.write(f"TestCase {index}: {testcase.name} begin...\n")
+            f.flush()
             result = subprocess.run(testcase.cmd, stdout=f, stderr=f, timeout=testcase.timeout * TIMEOUT_SCALE, cwd=testcase.path)
-            return index, result.returncode
+            rc = result.returncode
+            tag = TAG_OK if rc == 0 else TAG_FAIL
+            return index, (rc, tag)
         except subprocess.TimeoutExpired:
             f.write("\nTestcase execution timeout, Failed\n")
-            return index, 1  # 超时视为失败
+            # 用一个超出常规范围的返回码以避免与被测程序冲突
+            return index, (9999, TAG_TIMEOUT)
 
 def signal_handler(signum, frame):
     """处理外部中断信号，终止所有子进程"""
-    print("收到中断信号，正在终止所有测试用例...")
+    print("Interrupt received, terminating all test cases...")
     pool.terminate()
     exit(1)
 
@@ -109,33 +120,42 @@ if __name__ == "__main__":
     # 创建进程池，控制并行度
     pool = multiprocessing.Pool(processes=MULTIPROCESS_NUM)  # 可根据需要调整并行进程数
 
-    results: List[Optional[int]] = [None] * len(test_cases)
+    results: List[Optional[Tuple[int, str]]] = [None] * len(test_cases)
     total = len(test_cases)
-    completed = 0
 
-    # 并行运行测试用例并监控进度
-    for index, result in pool.imap_unordered(run_test_case, enumerate(test_cases)):
-        results[index] = result
-        completed += 1
-        print(f"已完成 {completed}/{total} 个测试用例")
+    # 并行运行测试用例并用进度条显示
+    with tqdm(total=total, desc="Running tests", unit="test") as pbar:
+        for index, payload in pool.imap_unordered(run_test_case, enumerate(test_cases)):
+            rc, tag = payload
+            results[index] = (rc, tag)
+            # 更新进度条（统计通过/失败）
+            pass_count = sum(1 for r in results if (r is not None and r[0] == 0))
+            fail_count = sum(1 for r in results if (r is not None and r[0] != 0))
+            pbar.set_postfix_str(f"pass={pass_count}, fail={fail_count}")
+            pbar.update(1)
 
     # 等待所有进程完成并关闭进程池
     pool.close()
     pool.join()
 
     # 打印每个测试用例的结果
-    print("\n测试结果：")
+    print("\nTest result: ")
     for i, testcase in enumerate(test_cases):
-        if results[i] == 0:
+        rc, tag = results[i] if results[i] is not None else (-1, "not_run")
+        if rc == 0:
             status = "\033[92mPassed\033[0m"  # 绿
-        elif results[i] == 2:
+        elif tag == TAG_COMPILE_FAIL:
             status = "\033[93mCompile Failed\033[0m"  # 黄
+        elif tag == TAG_TIMEOUT:
+            status = "\033[91mTime Exceeded\033[0m"  # 红
         else:
             status = "\033[91mFailed\033[0m"  # 红
         print(f"{i:2d} {testcase.name}: {status}")
 
-    # 打印总结
-    pass_count = sum(1 for r in results if r == 0)
+    # 打印总结（Failed + TimeExceeded + Compile Failed 都算 Fail）
+    pass_count = sum(1 for r in results if (r is not None and r[0] == 0))
     fail_count = total - pass_count
     unicode_symbol = "\033[92m✔\033[0m" if fail_count == 0 else "\033[91m✘\033[0m"
-    print(f"\n总结：{pass_count}个通过，{fail_count}个失败 {unicode_symbol}")
+    print(f"\nSummary: {pass_count} passed, {fail_count} failed. {unicode_symbol}")
+
+    os.system("stty echo") # spike sometimes messes up terminal echo

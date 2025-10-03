@@ -4,8 +4,8 @@ set -euo pipefail
 
 DIR=$(cd "$(dirname "${0}")" &> /dev/null && (pwd -W 2> /dev/null || pwd))
 VENTUS_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX:-${DIR}/install}
-PROGRAMS_TOBUILD_DEFAULT=(systemc llvm ocl-icd libclc spike driver pocl rodinia test-pocl)
-PROGRAMS_TOBUILD_DEFAULT_FULL=(systemc llvm ocl-icd libclc spike rtlsim cyclesim driver pocl rodinia test-pocl)
+PROGRAMS_TOBUILD_DEFAULT=(systemc llvm ocl-icd libclc spike gvm driver pocl rodinia test-pocl)
+PROGRAMS_TOBUILD_DEFAULT_FULL=(systemc llvm ocl-icd libclc spike rtlsim cyclesim gvm driver pocl rodinia test-pocl)
 PROGRAMS_TOBUILD=(${PROGRAMS_TOBUILD_DEFAULT_FULL[@]})
 
 BUILD_PARALLEL=$(( $(nproc) * 2 / 3 ))
@@ -14,7 +14,7 @@ BUILD_PARALLEL=$(( $(nproc) * 2 / 3 ))
 help() {
   cat <<END
 
-Build [systemc llvm, pocl, ocl-icd, libclc, driver, spike, rtlsim|gpgpu, cyclesim|simulator] programs.
+Build [systemc llvm, pocl, ocl-icd, libclc, driver, spike, rtlsim|gpgpu, cyclesim|simulator, gvm] programs.
 Run the rodinia and test-pocl test suites.
 Read ${DIR}/llvm/README.md to get started.
 
@@ -176,7 +176,8 @@ build_driver() {
     -DSPIKE_SRC_DIR=${SPIKE_DIR} \
     -DDRIVER_ENABLE_AUTOSELECT=ON \
     -DDRIVER_ENABLE_RTLSIM=ON \
-    -DDRIVER_ENABLE_CYCLESIM=ON
+    -DDRIVER_ENABLE_CYCLESIM=ON \
+    -DDRIVER_ENABLE_GVM=ON \
     # -DCMAKE_C_COMPILER=clang \
     # -DCMAKE_CXX_COMPILER=clang++ \
   ninja -C ${DRIVER_BUILD_DIR}
@@ -209,6 +210,12 @@ build_gpgpu_rtlsim() {
   cd ${GPGPU_DIR}/sim-verilator-nocache
   make -j${BUILD_PARALLEL} RELEASE=1
   make install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX}
+}
+
+build_gvm() {
+  cd ${GPGPU_DIR}/sim-verilator
+  make -f gvm.mk -j${BUILD_PARALLEL} RELEASE=1 GVM_TRACE=0
+  make -f gvm.mk install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX}
 }
 
 # Build pocl from THU
@@ -348,10 +355,30 @@ check_if_spike_built() {
   fi
 }
 
+check_if_gvmref_built() {
+  if [ -f "${SPIKE_BUILD_DIR}/libgvmref.so" ]; then
+    cp ${SPIKE_BUILD_DIR}/libgvmref.so ${VENTUS_INSTALL_PREFIX}/lib
+    return 0
+  fi
+  if [ -f "${SPIKE_BUILD_DIR}/lib/libgvmref.so" ]; then
+    cp ${SPIKE_BUILD_DIR}/lib/libgvmref.so ${VENTUS_INSTALL_PREFIX}/lib
+    return 0
+  fi
+  echo "Please build spike gvm reference library (libgvmref.so) for GVM!"
+  exit 1
+}
+
 # Check gpgpu rtlsim sim-verilator is built or not
 check_if_rtlsim_built() {
   if [ ! -f "${VENTUS_INSTALL_PREFIX}/lib/libVentusRTL.so" ];then
     echo "Please build Ventus Chisel RTL sim-verilator (rtlsim) first!"
+    exit 1
+  fi
+}
+
+check_if_gvm_built() {
+  if [ ! -f "${VENTUS_INSTALL_PREFIX}/lib/libVentusGVM.so" ]; then
+    echo "Please build Ventus GVM backend first (use --build gvm)!"
     exit 1
   fi
 }
@@ -400,10 +427,14 @@ do
   elif [ "${program}" == "cyclesim" ] || [ "${program}" == "simulator" ]; then
     check_if_systemc_built
     build_gpgpu_cyclesim
+  elif [ "${program}" == "gvm" ]; then
+    build_gvm
   elif [ "${program}" == "driver" ]; then
     check_if_spike_built
     check_if_cyclesim_built
     check_if_rtlsim_built
+    check_if_gvm_built
+    check_if_gvmref_built
     build_driver
   elif [ "${program}" == "pocl" ]; then
     check_if_ventus_llvm_built

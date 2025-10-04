@@ -28,3 +28,6 @@
 [submodule "OpenCL-CTS"]
 	path = OpenCL-CTS
 	url = https://github.com/THU-DSP-LAB/OpenCL-CTS.git
+[submodule "testcases"]
+	path = testcases
+	url = https://github.com/THU-DSP-LAB/Ventus-OpenCL-Testcase.git

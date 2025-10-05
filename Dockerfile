@@ -69,7 +69,11 @@ RUN echo "export PATH=\"/opt/verilator/5.034/bin:/opt/firtool-1.62.0/bin:\${PATH
 FROM ventus-dev-repo-clone AS ventus-dev
 USER ubuntu
 WORKDIR /home/ubuntu/ventus
-RUN bash build-ventus.sh
+RUN bash build-ventus.sh \
+    && rm -rf systemc/build llvm/build llvm/build-libcyc spike/build \
+              cyclesim/build gpgpu/sim-verilator/build gpgpu/sim-verilator-nocache/build \
+              ocl-icd/build driver/build \
+    && ccache --clear
 
 FROM ventus-dev-os AS ventus
 USER ubuntu

@@ -1,12 +1,15 @@
 # Ventus Development Environment
 
-## 软硬件条件
+[中文版](README_zh_cn.md)
 
-* 推荐硬件内存32GiB以上
-* 推荐系统环境：Ubuntu 24.04
-* 推荐编译安装Verilator 5.034加入PATH
-* 下载解压安装CIRCT [firtool 1.62.0](https://github.com/llvm/circt/releases/download/firtool-1.62.0/firrtl-bin-linux-x64.tar.gz)加入PATH
-* 其它系统依赖：
+## System Requirements
+
+* **Memory:** 32 GiB RAM or higher recommended
+* **OS:** Ubuntu 24.04 recommended
+* **Verilator:** 5.034 (build from source and add to `PATH`)
+* **CIRCT firtool:** Install [firtool 1.62.0](https://github.com/llvm/circt/releases/download/firtool-1.62.0/firrtl-bin-linux-x64.tar.gz) and add to `PATH`
+* **Other system dependencies:**
+
 ```bash
 apt-get install \
     mold ccache ninja-build cmake clang clangd clang-format gdb \
@@ -15,70 +18,90 @@ apt-get install \
     device-tree-compiler bsdmainutils ruby default-jdk python3-tqdm
 ```
 
-## 使用方法简介
+A Dockerfile that bundles all dependencies is provided below.
 
-### 部署
+## Quick Start
 
-clone本仓库到本地路径（假如为`ventus-env/`）后：
+### Setup
+
+After cloning this repository to a local path (e.g., `ventus-env/`):
+
 ```bash
 cd ventus-env/
-make init # 从github拉取所有需要的仓库与数据，耗时较长，请保持网络环境畅通
+make init # Fetches all required repositories and data from GitHub; this can take a while—ensure a stable connection.
 ```
 
-gpu-rodinia所使用的数据集会自动[下载](http://dspdev.ime.tsinghua.edu.cn/images/ventus_dataset/ventus_rodinia_data.tar.xz)并解压   
-您也可以手动从[备用网址](https://cloud.tsinghua.edu.cn/d/ad60a4502fbb43daa45e/)下载rodinia_data.tar.xz并用如下命令解压
+The dataset used by gpu-rodinia will be downloaded and extracted automatically:
+[http://dspdev.ime.tsinghua.edu.cn/images/ventus\_dataset/ventus\_rodinia\_data.tar.xz](http://dspdev.ime.tsinghua.edu.cn/images/ventus_dataset/ventus_rodinia_data.tar.xz)
+
+You may also download `rodinia_data.tar.xz` manually from the mirror:
+[https://cloud.tsinghua.edu.cn/d/ad60a4502fbb43daa45e/](https://cloud.tsinghua.edu.cn/d/ad60a4502fbb43daa45e/)
+and extract it with:
+
 ```bash
 tar -xf rodinia_data.tar.xz
 ```
 
-使用编译脚本编译全部项目并安装到`ventus-env/install/`   
+Build all projects and install them under `ventus-env/install/`:
+
 ```bash
 bash build-ventus.sh
 ```
-若您更新或修改了部分子仓库，也推荐使用此脚本来编译，使用`--build XXX`参数可单独编译指定子仓库，详见`--help`参数打印的帮助文档
 
-**使用ventus前必须设置环境变量：**
+If you have updated or modified certain sub-repositories, we recommend using this script as well. Use `--build XXX` to build a specific sub-repo. See `--help` for details.
+
+**Before using Ventus, set environment variables:**
+
 ```bash
 source env.sh
 ```
 
-可以以不同仿真器作为实际执行后端运行openCL程序：
+Run OpenCL programs with different simulators as the execution backend:
+
 ```bash
 cd rodinia/opencl/gaussian
 make
-./run # 默认使用spike
-VENTUS_BACKEND=spike    ./run # 和上一条等效
-VENTUS_BACKEND=rtlsim   ./run # 使用verilator仿真Chisel RTL
-VENTUS_BACKEND=cyclesim ./run # 使用周期仿真器
+./run                         # Uses spike by default
+VENTUS_BACKEND=spike    ./run # Same as above
+VENTUS_BACKEND=rtlsim   ./run # Verilator-based Chisel RTL simulation
+VENTUS_BACKEND=cyclesim ./run # Cycle-accurate simulator
 ```
 
-提供一些环境变量用来调整仿真行为，罗列如下：
-* `VENTUS_BACKEND=XXX`选取使用哪种底层设备，可选值`spike`|`isa`, `rtl`|`rtlsim`|`gpgpu`, `cyclesim`|`systemc`|`simulator`
-* `VENTUS_WAVEFORM=1`时可以使rtlsim后端导出fst波形文件，让cyclesim后端导出vcd波形文件
-* `VENTUS_WAVEFORM_BEGIN`和`VENTUS_WAVEFORM_END`设定为一对数字可以使rtlsim后端只导出这一段仿真时间内的波形，以加速仿真。cyclesim后端不支持此功能
-* `VENTUS_DUMP_RESULT=filename.json`可以将所有OpenCL程序从device端拷贝回host端的数据及其在设备端的地址保存到指定json文件中，辅助调试
-* `NUM_THREAD=32`告知POCL设备端单个线程束（warp）支持多少线程。对于rtlsim和cyclesim应当与硬件规格对齐，对于spike可以任意调整数值
-* `NUM_WARP=8`告知POCL设备端单个线程块最多有多少线程束（warp）。对于rtlsim和cyclesim应当与硬件规格对齐，对于spike可以任意调整数值
+The following environment variables adjust simulation behavior:
 
-### 测试
+* `VENTUS_BACKEND=XXX` — Select the device/backend: `spike`|`isa`, `rtl`|`rtlsim`|`gpgpu`, `cyclesim`|`systemc`|`simulator`.
+* `VENTUS_WAVEFORM=1` — Enable waveform dump: `rtlsim` → FST, `cyclesim` → VCD.
+* `VENTUS_WAVEFORM_BEGIN` / `VENTUS_WAVEFORM_END` — Dump only a selected simulation interval for `rtlsim` (speeds up simulation). Not supported by `cyclesim`.
+* `VENTUS_DUMP_RESULT=filename.json` — Save all device→host copies from OpenCL programs and their device addresses to a JSON file (useful for debugging).
+* `VENTUS_TIMING_DDR=0` — Disable DDR timing in `cyclesim` (enabled by default). Current RTL simulation does not support DDR timing.
+* `NUM_THREAD=32` — Number of threads per warp reported by the POCL device. For `rtlsim`/`cyclesim`, this should match hardware specs; for `spike`, any value is acceptable.
+* `NUM_WARP=8` — Max warps per thread block reported by the POCL device. For `rtlsim`/`cyclesim`, match hardware specs; for `spike`, any value is acceptable.
 
-#### GPU-Rodinia测试集
+## Testing
 
-本仓库的`regression-test.py`包含了一些rodinia测试集的回归测试
+### Test Suites & Regression
+
+This repository includes the GPU-Rodinia test suite (`rodinia/opencl`) and Ventus’s own OpenCL tests (`testcases/`).
+
+The `regression-test.py` script runs a subset of the above as regression tests:
+
 ```bash
-python3 ./regression-test.py  # 默认使用spike
-VENTUS_BACKEND=spike    python3 ./regression-test.py # 和上一条等效
-VENTUS_BACKEND=rtlsim   python3 ./regression-test.py # 使用verilator仿真Chisel RTL
-VENTUS_BACKEND=cyclesim python3 ./regression-test.py # 使用周期仿真器
+python3 ./regression-test.py                 # Uses spike by default
+VENTUS_BACKEND=spike    python3 ./regression-test.py
+VENTUS_BACKEND=rtlsim   python3 ./regression-test.py # Verilator-based Chisel RTL
+VENTUS_BACKEND=cyclesim python3 ./regression-test.py # Cycle-accurate simulator
 ```
 
-推荐您先调整`regression-test.py`中的部分参数：
-* `TIMEOUT_SCALE`：依据您的计算机运行速度调整测例的运行时间限制，运行速度慢需要调大此参数
-* `MULTIPROCESS_NUM`：并行运行的测试进程数量，使用RTL仿真时每个测试进程又是多线程的（默认8线程），依据您的计算机具体情况调整
+Before running, we recommend tuning these options:
 
-如果希望运行rodinia中指定的单个测例，需进入到对应路径（`rodinia/opencl/*`）下手工处理  
-* 运行`make`编译测例
-* 使用`./run`脚本运行测例。很多测例需要命令行参数，`run`脚本中提供了示例，`regression-test.py`中支持的测例都提供了`run`脚本
+* `-t TIMEOUT_SCALE` — Scale timeouts based on your machine’s speed (increase if your system is slower).
+* `-j JOBS` — Number of parallel test processes. With RTL simulation, each test process is multi-threaded (8 threads by default). Adjust to your machine.
+
+To run a single test case manually, change to its directory and:
+
+* Run `make` to build the test.
+* Use the `./run` script to execute. Many tests require command-line arguments; the `run` script includes examples. All tests supported by `regression-test.py` provide a `run` script (tests with no arguments may omit it).
+
 ```bash
 source env.sh
 cd rodinia/opencl/backprop  # for example
@@ -86,36 +109,48 @@ make
 VENTUS_BACKEND=rtl ./run
 ```
 
-#### OpenCL-CTS 测试
-运行`bash build-ventus.sh --build cts`编译OpenCL CTS测试套件
+### OpenCL-CTS Tests
 
-运行某主题下的全部测例（以 compiler 为例）：
+Build the OpenCL CTS test suite:
+
+```bash
+bash build-ventus.sh --build cts
+```
+
+Run all tests under a topic (e.g., `compiler`):
+
 ```bash
 cd OpenCL-CTS/build/test_conformance/compiler
-# 运行compiler主题下的全部测试并保存输出到日志文件
+# Run all 'compiler' tests and save output to a log file
 ./test_compiler |& tee output.log
 ```
 
-只运行某个指定测试kernel
+Run a specific test kernel:
+
 ```bash
 cd OpenCL-CTS/build/test_conformance/basic
-./test_basic --help  # check what testcase is support
-./test_basic intmath_int4  # testcase name got from previous cmd
+./test_basic --help        # List available testcases
+./test_basic intmath_int4  # Testcase name from the previous command
 ```
 
-提供批量运行脚本，并行执行全部/大批量测试：
+Batch-run helper (execute all or many tests in parallel):
+
 ```bash
 cd OpenCL-CTS
 python3 run_test_parallel.py --json test_list_new.json --max-workers 20
 ```
-- `--json`: 测试列表（示例为 `test_list_new.json`）。
-- `--max-workers`: 并发工作进程数，按机器核心数与负载酌情设置。
-- 运行时会显示“准备执行 N 个测试任务，最大并发数 = K”，随后打印每个测试的结果行（如 `[  OK  ] basic_intmath_long2`）。
-- 建议在高并发下同时将标准输出落盘：`python3 run_test_parallel.py ... |& tee cts_parallel.log`。
 
-Note:   
-* OpenCL-CTS对于仿真来说规模偏大，运行时间较长，我们仅在spike仿真器上运行以检验软件栈的正确性
-* spike仿真器默认会导出指令粒度的日志，运行CTS可能会产生极大量的日志文件。推荐大规模运行CTS测试前先修改build-ventus.sh中的spike编译选项，关闭日志输出：
+* `--json`: Path to the test list (example: `test_list_new.json`).
+* `--max-workers`: Degree of parallelism; set based on core count and system load.
+* The runner prints “Preparing to execute N test tasks, max concurrency = K”, followed by per-test result lines (e.g., `[  OK  ] basic_intmath_long2`).
+* For high concurrency, also log stdout to disk:
+  `python3 run_test_parallel.py ... |& tee cts_parallel.log`.
+
+**Notes**
+
+* OpenCL-CTS is large for simulators and runs take a long time. We run CTS on `spike` only to verify software-stack correctness.
+* The `spike` simulator produces instruction-level logs by default. Running CTS can generate *huge* logs. Before large CTS runs, consider disabling logs in `build-ventus.sh` by removing `--enable-commitlog`:
+
 ```diff
 --- a/build-ventus.sh
 +++ b/build-ventus.sh
@@ -130,32 +165,43 @@ Note:
  }
 ```
 
-### 开发环境
+## Developer Setup
 
-Chisel RTL使用scala开发环境，可以使用vscode scala metals插件导入mill配置（`build.sc`），或者使用Makefile提供的`make idea`后使用IntelliJ IDEA打开，详见对应仓库的README
+For the Chisel RTL, use a Scala development environment. You can import the `mill` config (`build.sc`) into VS Code via the Scala Metals plugin, or run `make idea` and open the project in IntelliJ IDEA. See each sub-repo’s README for details.
 
-其它项目均为C++开发环境，使用`cmake`或`bear`导出compile_commands.json文件后即可导入并使vscode插件或其它IDE正常工作
+All other projects use C++. Export `compile_commands.json` with `cmake` or `bear` to enable proper language tooling in VS Code or other IDEs.
 
-## 构建Docker
+## Building Docker Images
 
-构建docker image：
+Build the images:
+
 ```bash
 docker build --target ventus-dev -t ventus-dev:latest .
 docker build --target ventus -t ventus:latest .
 ```
-其中`ventus-dev`包含所有代码仓库、编译产物与测试用例，适合开发人员使用   
-`ventus`只包含最终编译产物与部分测试用例，适合尝鲜
 
-## Trouble Shoot
+* `ventus-dev` contains all repositories, build artifacts, and test suites—best for development.
+* `ventus` includes only final build artifacts and a subset of tests—best for a quick tryout.
 
-1. 运行RTL verilator仿真时出现类似如下报错：
-```txt
-%Error: /opt/verilator/5.034/share/verilator/include/verilated.cpp:2729: VerilatedContext has 8 threads but model 'Vdut' (instantiated as 'TOP') was Verilated with --threads 11.
-```
-这是因为构建Verilated模型时选择的并行度过大，可能大于本机CPU逻辑线程数量   
-可以将`ventus-env/gpgpu/sim-verilator/verilate.mk`与`ventus-env/gpgpu/sim-verilator-nocache/verilate.mk`中`VLIB_NPROC_DUT`的数值改小，重新编译`bash build-ventus.sh --build gpgpu`
+## Troubleshooting
 
-2. 有时运行spike运行测例或回归测试后，命令行中输入字符无显示，可尝试盲输并运行`stty echo`
+1. **Verilator RTL simulation error like:**
 
-3. 有时Verilator报错类似`%Error: Internal Error: ../V3FuncOpt.cpp:162: Inconsitent terms`.   
-这可能是未知的Verilator问题，但出现频率较低，一般来说重新运行即可
+   ```txt
+   %Error: /opt/verilator/5.034/share/verilator/include/verilated.cpp:2729: VerilatedContext has 8 threads but model 'Vdut' (instantiated as 'TOP') was Verilated with --threads 11.
+   ```
+
+   The Verilated model was built with too much parallelism (possibly exceeding your CPU’s logical thread count). Reduce `VLIB_NPROC_DUT` in:
+   `ventus-env/gpgpu/sim-verilator/verilate.mk` and
+   `ventus-env/gpgpu/sim-verilator-nocache/verilate.mk`,
+   then rebuild with:
+
+   ```bash
+   bash build-ventus.sh --build gpgpu
+   ```
+
+2. **No characters echoing in the terminal after running spike or regression tests:**
+   Try typing blindly and run `stty echo`.
+
+3. **Verilator internal error like** `%Error: Internal Error: ../V3FuncOpt.cpp:162: Inconsitent terms`.
+   This appears to be an occasional Verilator issue. In most cases, simply re-run the build or simulation.

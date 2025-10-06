@@ -4,8 +4,8 @@ set -euo pipefail
 
 DIR=$(cd "$(dirname "${0}")" &> /dev/null && (pwd -W 2> /dev/null || pwd))
 VENTUS_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX:-${DIR}/install}
-PROGRAMS_TOBUILD_DEFAULT=(systemc llvm ocl-icd libclc spike gvm driver pocl rodinia test-pocl)
-PROGRAMS_TOBUILD_DEFAULT_FULL=(systemc llvm ocl-icd libclc spike rtlsim cyclesim gvm driver pocl rodinia test-pocl)
+PROGRAMS_TOBUILD_DEFAULT=(systemc llvm ocl-icd libclc spike gvm driver pocl rodinia cts test-pocl)
+PROGRAMS_TOBUILD_DEFAULT_FULL=(systemc llvm ocl-icd libclc spike rtlsim cyclesim gvm driver pocl rodinia cts test-pocl)
 PROGRAMS_TOBUILD=(${PROGRAMS_TOBUILD_DEFAULT_FULL[@]})
 
 BUILD_PARALLEL=$(( $(nproc) * 2 / 3 ))

@@ -72,7 +72,7 @@ WORKDIR /home/ubuntu/ventus
 RUN bash build-ventus.sh \
     && rm -rf systemc/build llvm/build llvm/build-libcyc spike/build \
               cyclesim/build gpgpu/sim-verilator/build gpgpu/sim-verilator-nocache/build \
-              ocl-icd/build driver/build \
+              ocl-icd/build driver/build rodinia_data.tar.xz \
     && ccache --clear
 
 FROM ventus-dev-os AS ventus

@@ -5,7 +5,7 @@ RUN env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY apt-get update
        mold ccache ninja-build cmake clang clangd clang-format gdb bash-completion \
        help2man perl perl-doc flex bison libfl2 libfl-dev zlib1g zlib1g-dev libgoogle-perftools-dev numactl \
        libfmt-dev libspdlog-dev libelf-dev libyaml-cpp-dev nlohmann-json3-dev \
-       device-tree-compiler bsdmainutils ruby default-jdk python3-tqdm \
+       device-tree-compiler bsdmainutils ruby default-jdk python3-tqdm python3-venv python3-pip \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
     && adduser ubuntu sudo
 
@@ -29,9 +29,9 @@ USER ubuntu
 WORKDIR /home/ubuntu
 ENV PATH="/opt/verilator/5.034/bin:/opt/firtool-1.62.0/bin:${PATH}"
 RUN echo "export PATH=\"/opt/verilator/5.034/bin:/opt/firtool-1.62.0/bin:\${PATH}\"" >> /home/ubuntu/.bashrc \
-    && git clone https://github.com/Humber-186/ventus-env.git ventus \
+    && git clone https://github.com/Humber-186/ventus-env.git ventus -b MICRO2025 \
     && cd ventus \
-    && make init
+    && make init DATASET_URL="https://cloud.tsinghua.edu.cn/f/01efd6a13eba4402a0fb/?dl=1"
 
 # FROM ventus-dev-repo-clone AS ventus-dev-llvm
 # USER ubuntu
@@ -74,6 +74,15 @@ RUN bash build-ventus.sh \
               cyclesim/build gpgpu/sim-verilator/build gpgpu/sim-verilator-nocache/build \
               ocl-icd/build driver/build rodinia_data.tar.xz \
     && ccache --clear
+
+FROM ventus-dev AS ventus-tutorial
+USER ubuntu
+WORKDIR /home/ubuntu/ventus
+RUN bash build-ventus.sh --build gpgpu \
+    && cd .. && python3 -m venv pyenv \
+    && source pyenv/bin/activate \
+    && pip install "jupyterhub>=5.3" jupyterlab notebook bash_kernel jupyterlab_limit_output jupyterlab_myst \
+    && python3 -m bash_kernel.install
 
 FROM ventus-dev-os AS ventus
 USER ubuntu

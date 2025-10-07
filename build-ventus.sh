@@ -99,6 +99,7 @@ CYCLESIM_BUILD_DIR=${CYCLESIM_DIR}/build
 # Need to get the ventus-gpgpu (Chisel RTL) folder from enviroment variables
 GPGPU_DIR=${GPGPU_DIR:-${DIR}/gpgpu}
 check_if_program_exits $GPGPU_DIR "ventus-gpgpu chisel RTL"
+VENTUS_VERILATOR_NPROC_DUT=${VENTUS_VERILATOR_NPROC_DUT:-8}
 
 # Need to get the pocl folder from enviroment variables
 POCL_DIR=${POCL_DIR:-${DIR}/pocl}
@@ -208,13 +209,13 @@ build_gpgpu_cyclesim() {
 # Build ventus cpp cycle-level simulator
 build_gpgpu_rtlsim() {
   cd ${GPGPU_DIR}/sim-verilator-nocache
-  make -j${BUILD_PARALLEL} RELEASE=1
+  make -j${BUILD_PARALLEL} RELEASE=1 VLIB_NPROC_DUT=${VENTUS_VERILATOR_NPROC_DUT}
   make install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX}
 }
 
 build_gvm() {
   cd ${GPGPU_DIR}/sim-verilator
-  make -f gvm.mk -j${BUILD_PARALLEL} RELEASE=1 GVM_TRACE=0
+  make -f gvm.mk -j${BUILD_PARALLEL} RELEASE=1 GVM_TRACE=0 VLIB_NPROC_DUT=${VENTUS_VERILATOR_NPROC_DUT}
   make -f gvm.mk install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX}
 }
 

@@ -78,8 +78,14 @@ RUN bash build-ventus.sh \
 FROM ventus-dev AS ventus-tutorial
 USER ubuntu
 WORKDIR /home/ubuntu/ventus
+COPY --chown=ubuntu:ubuntu _bug_patch /tmp/bug_patch
 RUN bash build-ventus.sh --build gpgpu \
-    && cd .. && python3 -m venv pyenv \
+    && git -C gpgpu/ worktree add ../_gpgpu_with_bug \
+    && cd _gpgpu_with_bug/ \
+    && rm -r dependencies && ln -s ../gpgpu/dependencies . \
+    && patch -p 1 < /tmp/bug_patch \
+    && make -C sim-verilator/ -f gvm.mk -j RELEASE=1 GVM_TRACE=0 VLIB_NPROC_DUT=4 \
+    && cd ../.. && python3 -m venv pyenv \
     && ./pyenv/bin/pip install "jupyterhub>=5.3" jupyterlab notebook bash_kernel jupyterlab_limit_output jupyterlab_myst \
     && ./pyenv/bin/python3 -m bash_kernel.install
 

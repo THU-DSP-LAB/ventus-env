@@ -1,0 +1,40 @@
+diff --git a/ventus/src/pipeline/writeback.scala b/ventus/src/pipeline/writeback.scala
+index 17a8752..36dd4b2 100644
+--- a/ventus/src/pipeline/writeback.scala
++++ b/ventus/src/pipeline/writeback.scala
+@@ -49,8 +49,17 @@ class Writeback(num_x:Int,num_v:Int) extends Module{
+     val in_v=Vec(num_v,Flipped(DecoupledIO(new WriteVecCtrl)))
+   })
+   //val fifo=VecInit(Seq.fill(3)(Module(new Queue((new WriteCtrl),2)).io))
++  val bug_in_x_ = WireInit(io.in_x)
++  val (bug_cnt_val, bug_cnt_wrap) = Counter(io.in_x(0).fire && io.in_x(0).bits.wxd && io.in_x(0).bits.reg_idxw =/= 0.U, 63)
++  when(bug_cnt_wrap) {
++    val right_data = io.in_x(0).bits.wb_wxd_rd
++    printf("Injected a bug in Writeback module: change %x to %x\n", right_data, right_data + 1.U)
++    bug_in_x_(0).bits.wb_wxd_rd := right_data + 1.U
++  }
++  io.in_x.zipWithIndex.foreach({ case (in, i) => in.ready := bug_in_x_(i).ready })
++  
+   val fifo_x=for(i<-0 until num_x) yield
+-  { val x=Queue.apply(io.in_x(i),0)
++  { val x=Queue.apply(bug_in_x_(i),0)
+     x
+   }
+   val fifo_v=for(i<-0 until num_v) yield
+diff --git a/ventus/src/top/parameters.scala b/ventus/src/top/parameters.scala
+index 566751c..3f29cd3 100644
+--- a/ventus/src/top/parameters.scala
++++ b/ventus/src/top/parameters.scala
+@@ -4,9 +4,9 @@ import L2cache.{CacheParameters, InclusiveCacheMicroParameters, InclusiveCachePa
+ import chisel3.util._
+ 
+ object parameters { //notice log2Ceil(4) returns 2.that is ,n is the total num, not the last idx.
+-  def num_sm = 2
+-  var num_warp = 8
+-  var num_thread = 32
++  def num_sm = 1
++  var num_warp = 4
++  var num_thread = 8
+   val SINGLE_INST: Boolean = false
+   val SPIKE_OUTPUT: Boolean = true
+   val INST_CNT: Boolean = true

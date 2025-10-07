@@ -80,9 +80,8 @@ USER ubuntu
 WORKDIR /home/ubuntu/ventus
 RUN bash build-ventus.sh --build gpgpu \
     && cd .. && python3 -m venv pyenv \
-    && source pyenv/bin/activate \
-    && pip install "jupyterhub>=5.3" jupyterlab notebook bash_kernel jupyterlab_limit_output jupyterlab_myst \
-    && python3 -m bash_kernel.install
+    && ./pyenv/bin/pip install "jupyterhub>=5.3" jupyterlab notebook bash_kernel jupyterlab_limit_output jupyterlab_myst \
+    && ./pyenv/bin/python3 -m bash_kernel.install
 
 FROM ventus-dev-os AS ventus
 USER ubuntu

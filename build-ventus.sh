@@ -4,8 +4,8 @@ set -euo pipefail
 
 DIR=$(cd "$(dirname "${0}")" &> /dev/null && (pwd -W 2> /dev/null || pwd))
 VENTUS_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX:-${DIR}/install}
-PROGRAMS_TOBUILD_DEFAULT=(systemc llvm ocl-icd libclc spike gvm driver pocl rodinia cts test-pocl)
-PROGRAMS_TOBUILD_DEFAULT_FULL=(systemc llvm ocl-icd libclc spike rtlsim cyclesim gvm driver pocl rodinia cts test-pocl)
+PROGRAMS_TOBUILD_DEFAULT=(systemc llvm ocl-icd libclc spike driver pocl rodinia test-pocl)
+PROGRAMS_TOBUILD_DEFAULT_FULL=(systemc llvm ocl-icd libclc spike rtlsim cyclesim driver pocl rodinia test-pocl)
 PROGRAMS_TOBUILD=(${PROGRAMS_TOBUILD_DEFAULT_FULL[@]})
 
 BUILD_PARALLEL=$(( $(nproc) * 2 / 3 ))
@@ -14,7 +14,7 @@ BUILD_PARALLEL=$(( $(nproc) * 2 / 3 ))
 help() {
   cat <<END
 
-Build [systemc llvm, pocl, ocl-icd, libclc, driver, spike, rtlsim|gpgpu, cyclesim|simulator, gvm] programs.
+Build [systemc llvm, pocl, ocl-icd, libclc, driver, spike, rtlsim|gpgpu, cyclesim|simulator] programs.
 Run the rodinia and test-pocl test suites.
 Read ${DIR}/llvm/README.md to get started.
 
@@ -120,11 +120,6 @@ OCL_ICD_DIR=${OCL_ICD_DIR:-${DIR}/ocl-icd}
 check_if_program_exits ${OCL_ICD_DIR} "ocl-icd"
 OCL_ICD_BUILD_DIR=${OCL_ICD_DIR}/build
 
-# Need to get the OpenCL-CTS folder from enviroment variables
-OPENCL_CTS_DIR=${OPENCL_CTS_DIR:-${DIR}/OpenCL-CTS}
-check_if_program_exits ${OPENCL_CTS_DIR} "OpenCL Conformance Test Suite (CTS)"
-OPENCL_CTS_BUILD_DIR=${OPENCL_CTS_DIR}/build
-
 # Need to get the gpu-rodinia folder from enviroment variables
 RODINIA_DIR=${RODINIA_DIR:-${DIR}/rodinia}
 check_if_program_exits ${RODINIA_DIR} "gpu-rodinia"
@@ -176,8 +171,7 @@ build_driver() {
     -DSPIKE_SRC_DIR=${SPIKE_DIR} \
     -DDRIVER_ENABLE_AUTOSELECT=ON \
     -DDRIVER_ENABLE_RTLSIM=ON \
-    -DDRIVER_ENABLE_CYCLESIM=ON \
-    -DDRIVER_ENABLE_GVM=ON \
+    -DDRIVER_ENABLE_CYCLESIM=ON
     # -DCMAKE_C_COMPILER=clang \
     # -DCMAKE_CXX_COMPILER=clang++ \
   ninja -C ${DRIVER_BUILD_DIR}
@@ -212,12 +206,6 @@ build_gpgpu_rtlsim() {
   make install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX}
 }
 
-build_gvm() {
-  cd ${GPGPU_DIR}/sim-verilator
-  make -f gvm.mk -j${BUILD_PARALLEL} RELEASE=1 GVM_TRACE=0
-  make -f gvm.mk install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX}
-}
-
 # Build pocl from THU
 build_pocl() {
   mkdir -p ${POCL_BUILD_DIR}
@@ -229,7 +217,6 @@ build_pocl() {
     -DDEFAULT_ENABLE_ICD=ON \
     -DENABLE_TESTS=OFF \
     -DSTATIC_LLVM=OFF \
-    -DVENTUS_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX} \
     -DCMAKE_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX} \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
     # -DCMAKE_C_COMPILER=clang \
@@ -283,16 +270,6 @@ build_icd_loader() {
   cd ${OCL_ICD_DIR}/build
   ../configure --prefix=${VENTUS_INSTALL_PREFIX}
   make -j${BUILD_PARALLEL} && make install
-}
-
-build_opencl_cts() {
-    cd ${OPENCL_CTS_DIR}
-    cmake -S ${OPENCL_CTS_DIR} -B ${OPENCL_CTS_BUILD_DIR} -G Ninja \
-        -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
-        -DCL_INCLUDE_DIR=${VENTUS_INSTALL_PREFIX}/include \
-        -DCL_LIB_DIR=${VENTUS_INSTALL_PREFIX}/lib \
-        -DOPENCL_LIBRARIES=OpenCL
-    cmake --build ${OPENCL_CTS_BUILD_DIR} -j ${BUILD_PARALLEL}
 }
 
 # Test the rodinia test suit
@@ -355,30 +332,10 @@ check_if_spike_built() {
   fi
 }
 
-check_if_gvmref_built() {
-  if [ -f "${SPIKE_BUILD_DIR}/libgvmref.so" ]; then
-    cp ${SPIKE_BUILD_DIR}/libgvmref.so ${VENTUS_INSTALL_PREFIX}/lib
-    return 0
-  fi
-  if [ -f "${SPIKE_BUILD_DIR}/lib/libgvmref.so" ]; then
-    cp ${SPIKE_BUILD_DIR}/lib/libgvmref.so ${VENTUS_INSTALL_PREFIX}/lib
-    return 0
-  fi
-  echo "Please build spike gvm reference library (libgvmref.so) for GVM!"
-  exit 1
-}
-
 # Check gpgpu rtlsim sim-verilator is built or not
 check_if_rtlsim_built() {
   if [ ! -f "${VENTUS_INSTALL_PREFIX}/lib/libVentusRTL.so" ];then
     echo "Please build Ventus Chisel RTL sim-verilator (rtlsim) first!"
-    exit 1
-  fi
-}
-
-check_if_gvm_built() {
-  if [ ! -f "${VENTUS_INSTALL_PREFIX}/lib/libVentusGVM.so" ]; then
-    echo "Please build Ventus GVM backend first (use --build gvm)!"
     exit 1
   fi
 }
@@ -396,13 +353,6 @@ check_if_cyclesim_built() {
 check_if_ocl_icd_built() {
   if [ ! -f "${VENTUS_INSTALL_PREFIX}/lib/libOpenCL.so" ];then
     echo "Please build ocl-icd first!"
-    exit 1
-  fi
-}
-
-check_if_pocl_built() {
-  if [ ! -f "${VENTUS_INSTALL_PREFIX}/lib/pocl/libpocl-devices-ventus.so" ];then
-    echo "Please build POCL first!"
     exit 1
   fi
 }
@@ -427,14 +377,10 @@ do
   elif [ "${program}" == "cyclesim" ] || [ "${program}" == "simulator" ]; then
     check_if_systemc_built
     build_gpgpu_cyclesim
-  elif [ "${program}" == "gvm" ]; then
-    build_gvm
   elif [ "${program}" == "driver" ]; then
     check_if_spike_built
     check_if_cyclesim_built
     check_if_rtlsim_built
-    check_if_gvm_built
-    check_if_gvmref_built
     build_driver
   elif [ "${program}" == "pocl" ]; then
     check_if_ventus_llvm_built
@@ -445,10 +391,6 @@ do
     check_if_ocl_icd_built
     check_if_spike_built
     test_rodinia
-  elif [ "${program}" == "cts" ] || [ "${program}" == "opencl-cts" ] || [ "${program}" == "OpenCL-CTS" ]; then
-    check_if_pocl_built
-    check_if_spike_built
-    build_opencl_cts
   elif [ "${program}" == "test-pocl" ]; then
     check_if_ventus_llvm_built
     check_if_ocl_icd_built

@@ -1,15 +1,12 @@
-default: init
+_init: 
+	git submodule update --init --recursive
 
-# Download rodinia dataset
-DATASET_URL  = "http://dspdev.ime.tsinghua.edu.cn/images/ventus_dataset/ventus_rodinia_data.tar.xz"
-rodinia_data.tar.xz:
-	curl -L $(DATASET_URL) -o rodinia_data.tar.xz
-rodinia_data: rodinia_data.tar.xz
-	tar -xf rodinia_data.tar.xz
+init: _init .patched
 
-submodules: 
-	git submodule update --init --recursive --filter=blob:none --progress
+.patched:
+	patch -d spike/ -p1 < spike.patch
+	patch -d llvm/ -p1 < llvm-libclc.patch
+	touch .patched
 
-init: submodules rodinia_data
+.PHONY: _init init
 
-.PHONY: submodules init rodinia_data

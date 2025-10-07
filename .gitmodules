@@ -19,15 +19,10 @@
 [submodule "llvm"]
 	path = llvm
 	url = https://github.com/THU-DSP-LAB/llvm-project.git
+	shallow = true
 [submodule "systemc"]
 	path = systemc
 	url = https://github.com/accellera-official/systemc.git
 [submodule "cyclesim"]
 	path = cyclesim
 	url = https://github.com/THU-DSP-LAB/ventus-gpgpu-cpp-simulator.git
-[submodule "OpenCL-CTS"]
-	path = OpenCL-CTS
-	url = https://github.com/THU-DSP-LAB/OpenCL-CTS.git
-[submodule "testcases"]
-	path = testcases
-	url = https://github.com/THU-DSP-LAB/Ventus-OpenCL-Testcase.git

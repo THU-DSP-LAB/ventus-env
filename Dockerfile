@@ -89,11 +89,20 @@ RUN bash build-ventus.sh --build gpgpu \
     && ./pyenv/bin/pip install "jupyterhub>=5.3" jupyterlab notebook bash_kernel jupyterlab_limit_output jupyterlab_myst \
     && ./pyenv/bin/python3 -m bash_kernel.install
 
+FROM ventus-dev-os AS ventus_tmp
+USER ubuntu
+WORKDIR /home/ubuntu/ventus
+COPY --from=ventus-dev /home/ubuntu/ventus/env.sh             /home/ubuntu/ventus/env.sh
+COPY --from=ventus-dev /home/ubuntu/ventus/regression-test.py /home/ubuntu/ventus/regression-test.py
+COPY --from=ventus-dev /home/ubuntu/ventus/install/           /home/ubuntu/ventus/install/
+COPY --from=ventus-dev /home/ubuntu/ventus/rodinia/           /home/ubuntu/ventus/rodinia/
+COPY --from=ventus-dev /home/ubuntu/ventus/testcases/         /home/ubuntu/ventus/testcases/
+COPY --from=ventus-dev /home/ubuntu/ventus/pocl/              /home/ubuntu/ventus/pocl/
+COPY --from=ventus-dev /home/ubuntu/ventus/OpenCL-CTS/        /home/ubuntu/ventus/OpenCL-CTS/
+COPY --from=ventus-dev /home/ubuntu/ventus/cyclesim/ramulator_config.yaml \
+                       /home/ubuntu/ventus/cyclesim/ramulator_config.yaml 
+
 FROM ventus-dev-os AS ventus
 USER ubuntu
 WORKDIR /home/ubuntu/ventus
-COPY --chown=ubuntu:ubuntu --from=ventus-dev \
-     /home/ubuntu/ventus/env.sh /home/ubuntu/ventus/install \
-     /home/ubuntu/ventus/regression-test.py \
-     /home/ubuntu/ventus/pocl /home/ubuntu/ventus/rodinia \
-     /home/ubuntu/ventus/
+COPY --chown=ubuntu:ubuntu --from=ventus_tmp /home/ubuntu/ventus/  /home/ubuntu/ventus/

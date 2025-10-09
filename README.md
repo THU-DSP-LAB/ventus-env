@@ -205,3 +205,22 @@ docker build --target ventus -t ventus:latest .
 
 3. **Verilator internal error like** `%Error: Internal Error: ../V3FuncOpt.cpp:162: Inconsitent terms`.
    This appears to be an occasional Verilator issue. In most cases, simply re-run the build or simulation.
+
+4. Occasionally (especially in Docker containers), running `VENTUS_BACKEND=rtl ./regression-test.py` may cause some test cases to fail. In `regression-test-logs/XXX.log` you may see:
+
+    ```txt
+    clang-16: error: unable to execute command: posix_spawn failed: Resource temporarily unavailable
+    ```
+    
+    or
+    
+    ```txt
+    terminate called after throwing an instance of 'std::system_error'
+    what(): Resource temporarily unavailable
+    ```
+    
+    This is typically due to excessive parallelism exceeding operating system or container resource limits. Regression tests using the RTL simulation backend are both multi-process and multi-threaded, and are therefore most prone to this issue. To mitigate, reduce the number of parallel processes, for example:
+    
+    ```bash
+    VENTUS_BACKEND=rtl python3 regression-test.py -j 6
+    ```

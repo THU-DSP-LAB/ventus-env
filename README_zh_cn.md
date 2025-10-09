@@ -156,13 +156,29 @@ docker build --target ventus -t ventus:latest .
 ## Trouble Shoot
 
 1. 运行RTL verilator仿真时出现类似如下报错：
-```txt
-%Error: /opt/verilator/5.034/share/verilator/include/verilated.cpp:2729: VerilatedContext has 8 threads but model 'Vdut' (instantiated as 'TOP') was Verilated with --threads 11.
-```
-这是因为构建Verilated模型时选择的并行度过大，可能大于本机CPU逻辑线程数量   
-可以将`ventus-env/gpgpu/sim-verilator/verilate.mk`与`ventus-env/gpgpu/sim-verilator-nocache/verilate.mk`中`VLIB_NPROC_DUT`的数值改小，重新编译`bash build-ventus.sh --build gpgpu`
-
+    ```txt
+    %Error: /opt/verilator/5.034/share/verilator/include/verilated.cpp:2729: VerilatedContext has 8 threads but model 'Vdut' (instantiated as 'TOP') was Verilated with --threads 11.
+    ```
+    这是因为构建Verilated模型时选择的并行度过大，可能大于本机CPU逻辑线程数量   
+    可以将`ventus-env/gpgpu/sim-verilator/verilate.mk`与`ventus-env/gpgpu/sim-verilator-nocache/verilate.mk`中`VLIB_NPROC_DUT`的数值改小，重新编译`bash build-ventus.sh --build gpgpu`
+    
 2. 有时运行spike运行测例或回归测试后，命令行中输入字符无显示，可尝试盲输并运行`stty echo`
 
 3. 有时Verilator报错类似`%Error: Internal Error: ../V3FuncOpt.cpp:162: Inconsitent terms`.   
 这可能是未知的Verilator问题，但出现频率较低，一般来说重新运行即可
+
+4. 有时（特别是在Docker容器中）运行`VENTUS_BACKEND=rtl ./regression-test.py`部分测例不通过，且在`regression-test-logs/XXX.log`中可以看到：
+    ```txt
+    clang-16: error: unable to execute command: posix_spawn failed: Resource temporarily unavailable
+    ```
+    或
+    ```txt
+    terminate called after throwing an instance of 'std::system_error'
+    what(): Resource temporarily unavailable
+    ```
+    这可能是因为并行度过大，超出操作系统或容器的资源限制。  
+    以RTL仿真为后端的回归测试既是多进程又是多线程，出现此问题的概率最大。  
+    可以尝试调小回归测试的多进程并行度以缓解此问题，例如：
+    ```bash
+    VENTUS_BACKEND=rtl python3 regression-test.py -j 6
+    ```

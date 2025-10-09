@@ -71,10 +71,18 @@ manager = multiprocessing.Manager()
 compile_paths = manager.dict()  # 用于存储已编译的路径，避免重复编译
 compile_path_locks = manager.dict()  # 保护对compile_paths的访问
 
+for tc in test_cases:
+    if tc.need_make:
+        path = tc.path.resolve()
+        compile_paths[tc.path] = False  # 初始时都未编译
+        if tc.path not in compile_path_locks:
+            compile_path_locks[tc.path] = manager.Lock()  # 为每个路径创建一个锁
+
 def get_compile_path_lock(path: Path):
     """获取指定路径的锁，确保对compile_paths的访问是线程安全的"""
-    if path not in compile_path_locks:
-        compile_path_locks[path] = manager.Lock()
+    path = path.resolve()
+    assert path in compile_paths, f"Path {path} not in compile_paths"
+    assert path in compile_path_locks, f"Path {path} not in compile_path_locks"
     return compile_path_locks[path]
 
 def run_test_case(arg: Tuple[int, TestCase]) -> Tuple[int, Tuple[int, str]]:

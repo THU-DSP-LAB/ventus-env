@@ -1,0 +1,30 @@
+diff --git a/cyclesim b/cyclesim
+--- a/cyclesim
++++ b/cyclesim
+@@ -1 +1 @@
+-Subproject commit 335ba24d2c7763c87e8c9bfe889c9074763a32f7
++Subproject commit 335ba24d2c7763c87e8c9bfe889c9074763a32f7-dirty
+diff --git a/driver b/driver
+--- a/driver
++++ b/driver
+@@ -1 +1 @@
+-Subproject commit 86a4860f6112e2f016d0f86c2653a75337f4f1f2
++Subproject commit 86a4860f6112e2f016d0f86c2653a75337f4f1f2-dirty
+diff --git a/gpgpu b/gpgpu
+--- a/gpgpu
++++ b/gpgpu
+@@ -1 +1 @@
+-Subproject commit f5853809f114192b99657e7021d1e50dfe961fe1
++Subproject commit f5853809f114192b99657e7021d1e50dfe961fe1-dirty
+diff --git a/llvm b/llvm
+--- a/llvm
++++ b/llvm
+@@ -1 +1 @@
+-Subproject commit d4f2063fe81cbbefda34da60d4cd5c46bce3d231
++Subproject commit d4f2063fe81cbbefda34da60d4cd5c46bce3d231-dirty
+diff --git a/systemc b/systemc
+--- a/systemc
++++ b/systemc
+@@ -1 +1 @@
+-Subproject commit 5fc1469339775b54b1fcc2020ac744a58be5b50e
++Subproject commit 5fc1469339775b54b1fcc2020ac744a58be5b50e-dirty

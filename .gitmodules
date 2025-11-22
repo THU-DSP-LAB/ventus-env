@@ -1,15 +1,18 @@
 [submodule "spike"]
 	path = spike
 	url = https://github.com/THU-DSP-LAB/ventus-gpgpu-isa-simulator.git
+	branch = develop
 [submodule "gpgpu"]
 	path = gpgpu
 	url = https://github.com/THU-DSP-LAB/ventus-gpgpu.git
+	branch = develop
 [submodule "driver"]
 	path = driver
 	url = https://github.com/THU-DSP-LAB/ventus-driver.git
 [submodule "pocl"]
 	path = pocl
 	url = https://github.com/THU-DSP-LAB/pocl.git
+	branch = develop
 [submodule "ocl-icd"]
 	path = ocl-icd
 	url = https://github.com/OCL-dev/ocl-icd.git
@@ -25,6 +28,7 @@
 [submodule "cyclesim"]
 	path = cyclesim
 	url = https://github.com/THU-DSP-LAB/ventus-gpgpu-cpp-simulator.git
+	branch = develop
 [submodule "OpenCL-CTS"]
 	path = OpenCL-CTS
 	url = https://github.com/THU-DSP-LAB/OpenCL-CTS.git

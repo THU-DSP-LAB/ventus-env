@@ -214,7 +214,7 @@ build_gpgpu_rtlsim() {
 
 build_gvm() {
   cd ${GPGPU_DIR}/sim-verilator
-  make -f gvm.mk -j${BUILD_PARALLEL} RELEASE=1 GVM_TRACE=0
+  make -f gvm.mk -j${BUILD_PARALLEL} RELEASE=1 GVM_TRACE=1
   make -f gvm.mk install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX}
 }
 

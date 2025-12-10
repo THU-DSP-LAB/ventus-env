@@ -77,6 +77,15 @@ def get_compile_path_lock(path: Path):
         compile_path_locks[path] = manager.Lock()
     return compile_path_locks[path]
 
+def format_list_with_quotes(lst):
+    formatted = []
+    for s in lst:
+        if ' ' in s:
+            formatted.append(repr(s))  # repr 会自动加上引号，并处理转义
+        else:
+            formatted.append(s)
+    return ' '.join(formatted)
+
 def run_test_case(arg: Tuple[int, TestCase]) -> Tuple[int, Tuple[int, str]]:
     """运行单个测试用例，返回 (索引, (返回码, 标签))"""
     index, testcase = arg
@@ -109,7 +118,9 @@ def run_test_case(arg: Tuple[int, TestCase]) -> Tuple[int, Tuple[int, str]]:
         f.write("=== Run Test ===\n")
         f.flush()
         try:
-            f.write(f"TestCase {index}: {testcase.name} begin...\n")
+            f.write(f"TestCase {index}: {testcase.name} begin...\nCOMMAND: ")
+            f.write(format_list_with_quotes(testcase.cmd));
+            f.write("\n")
             f.flush()
             result = subprocess.run(testcase.cmd, stdout=f, stderr=f, timeout=testcase.timeout * TIMEOUT_SCALE, cwd=testcase.path)
             rc = result.returncode

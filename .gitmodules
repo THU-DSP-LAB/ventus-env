@@ -9,6 +9,7 @@
 [submodule "driver"]
 	path = driver
 	url = https://github.com/THU-DSP-LAB/ventus-driver.git
+	branch = develop
 [submodule "pocl"]
 	path = pocl
 	url = https://github.com/THU-DSP-LAB/pocl.git

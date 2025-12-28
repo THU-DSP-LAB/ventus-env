@@ -30,6 +30,9 @@ jobs:
 
     - name: Initialize dependencies
       run: |
+        # Fix "dubious ownership" error because of container/host user mismatch
+        git config --global --add safe.directory '*'
+
         # make init includes submodule update and downloading rodinia data
         # Since we used checkout with submodules, we might just need the data part, 
         # but running make init is safe as it handles both.

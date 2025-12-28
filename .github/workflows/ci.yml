@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main", "develop", "dev/ci" ]
+  pull_request:
+    branches: [ "main", "develop" ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: self-hosted
+    container:
+      image: humber186/ventus:base-20251010
+      volumes:
+        # Mount host directory for ccache persistence
+        # Ensure this directory exists on the host and is writable by the container user (uid 1000)
+        - /ci/ventus-env/ccache:/home/ubuntu/.ccache
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Add tools to PATH
+      run: |
+        echo "/opt/verilator/5.034/bin" >> $GITHUB_PATH
+        echo "/opt/firtool-1.62.0/bin" >> $GITHUB_PATH
+
+    - name: Initialize dependencies
+      run: |
+        # make init includes submodule update and downloading rodinia data
+        # Since we used checkout with submodules, we might just need the data part, 
+        # but running make init is safe as it handles both.
+        make init
+
+    - name: Build Ventus
+      id: build
+      run: |
+        bash build-ventus.sh
+
+    - name: Run Regression Tests (ISA)
+      if: steps.build.outcome == 'success'
+      run: |
+        source env.sh
+        VENTUS_BACKEND=isa python3 regression-test.py
+
+    - name: Run Regression Tests (Cycle)
+      if: steps.build.outcome == 'success'
+      run: |
+        source env.sh
+        VENTUS_BACKEND=cyclesim python3 regression-test.py
+
+    - name: Run Regression Tests (RTL)
+      if: steps.build.outcome == 'success'
+      run: |
+        source env.sh
+        # RTL simulation is slower, so we might need to increase timeout
+        VENTUS_BACKEND=rtl python3 regression-test.py -j 4 -t 5

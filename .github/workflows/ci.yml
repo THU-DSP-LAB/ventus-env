@@ -46,18 +46,18 @@ jobs:
     - name: Run Regression Tests (ISA)
       if: steps.build.outcome == 'success'
       run: |
-        source env.sh
+        . env.sh
         VENTUS_BACKEND=isa python3 regression-test.py
 
     - name: Run Regression Tests (Cycle)
       if: steps.build.outcome == 'success'
       run: |
-        source env.sh
+        . env.sh
         VENTUS_BACKEND=cyclesim python3 regression-test.py
 
     - name: Run Regression Tests (RTL)
       if: steps.build.outcome == 'success'
       run: |
-        source env.sh
+        . env.sh
         # RTL simulation is slower, so we might need to increase timeout
         VENTUS_BACKEND=rtl python3 regression-test.py -j 4 -t 5

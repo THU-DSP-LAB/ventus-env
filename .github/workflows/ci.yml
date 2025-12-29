@@ -53,11 +53,20 @@ jobs:
       if: steps.build.outcome == 'success'
       run: |
         . ./env.sh
-        VENTUS_BACKEND=cyclesim python3 regression-test.py
+        VENTUS_BACKEND=cyclesim python3 regression-test.py --checklist=cycle
 
-    - name: Run Regression Tests (RTL)
+    - name: Run Regression Tests (RTL-without-cache)
       if: steps.build.outcome == 'success'
       run: |
         . ./env.sh
         # RTL simulation is slower, so we might need to increase timeout
+        make -C gpgpu/sim-verilator-nocache -j RELEASE=1 install PREFIX="$(realpath ./install)"
         VENTUS_BACKEND=rtl python3 regression-test.py -j 4 -t 5
+
+    - name: Run Regression Tests (RTL-with-cache)
+      if: steps.build.outcome == 'success'
+      run: |
+        . ./env.sh
+        # RTL simulation is slower, so we might need to increase timeout
+        make -C gpgpu/sim-verilator -j RELEASE=1 install PREFIX="$(realpath ./install)"
+        VENTUS_BACKEND=rtl python3 regression-test.py -j 4 -t 5 --checklist=rtl-with-cache

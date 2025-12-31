@@ -4,6 +4,10 @@ on:
   schedule:
     # Run at 00:00 on Sunday
     - cron: '0 0 * * 0'
+  push:
+    branches: [ "dev/ci" ]
+  pull_request:
+    branches: [ "main", "develop" ]
   workflow_dispatch:
 
 jobs:

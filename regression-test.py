@@ -79,8 +79,7 @@ compile_path_locks = manager.dict()  # 保护对compile_paths的访问
 
 def get_compile_path_lock(path: Path):
     """获取指定路径的锁，确保对compile_paths的访问是线程安全的"""
-    if path not in compile_path_locks:
-        compile_path_locks[path] = manager.Lock()
+    # 注意：锁必须在主进程启动 pool 前预先创建，否则多进程并发创建锁会有竞争
     return compile_path_locks[path]
 
 def format_list_with_quotes(lst):
@@ -136,6 +135,9 @@ def run_test_case(arg: Tuple[int, TestCase]) -> Tuple[int, Tuple[int, str]]:
             f.write("\nTestcase execution timeout, Failed\n")
             # 用一个超出常规范围的返回码以避免与被测程序冲突
             return index, (9999, TAG_TIMEOUT)
+        except Exception as e:
+            f.write(f"\nTestcase execution failed with exception: {e}\n")
+            return index, (9998, TAG_FAIL)
 
 def signal_handler(signum, frame):
     """处理外部中断信号，终止所有子进程"""
@@ -197,6 +199,11 @@ if __name__ == "__main__":
 
     # 设置信号处理器以处理外部中断
     signal.signal(signal.SIGINT, signal_handler)
+
+    # 预先为所有涉及编译的路径创建锁，避免多进程竞争创建锁导致的 race condition
+    for tc in test_cases:
+        if tc.need_make and tc.path not in compile_path_locks:
+            compile_path_locks[tc.path] = manager.Lock()
 
     # 创建进程池，控制并行度
     pool = multiprocessing.Pool(processes=MULTIPROCESS_NUM)  # 可根据需要调整并行进程数

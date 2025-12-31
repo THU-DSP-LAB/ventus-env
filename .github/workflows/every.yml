@@ -24,31 +24,16 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Add tools to PATH
-      run: |
-        echo "/opt/verilator/5.034/bin" >> $GITHUB_PATH
-        echo "/opt/firtool-1.62.0/bin" >> $GITHUB_PATH
-
-    - name: Initialize dependencies
-      run: |
-        # Fix "dubious ownership" error because of container/host user mismatch
-        git config --global --add safe.directory '*'
-
-        # make init includes submodule update and downloading rodinia data
-        # Since we used checkout with submodules, we might just need the data part, 
-        # but running make init is safe as it handles both.
-        make init
-
-    - name: Build Ventus
+    - name: Setup and Build
       id: build
-      run: |
-        env CCACHE_DIR=/ccache bash build-ventus.sh
+      uses: ./.github/actions/build-ventus
 
     - name: Run Regression Tests (ISA)
       if: steps.build.outcome == 'success'
       run: |
+        VENTUS_SPIKE_LOG=0 python3 testcases/_get_case/run_ventus_tests.py --cases cases_fast.csv --ref=results_nv --backends spike --rtol 1e-2 --atol 1e-2 --jobs 4 --timeout 7200
         . ./env.sh
-        VENTUS_BACKEND=isa python3 regression-test.py
+        VENTUS_SPIKE_LOG=0 VENTUS_BACKEND=isa python3 regression-test.py
 
     - name: Run Regression Tests (Cycle)
       if: steps.build.outcome == 'success'

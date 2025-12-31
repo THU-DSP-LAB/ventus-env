@@ -1,0 +1,23 @@
+name: 'Build Ventus'
+description: 'Setup and build Ventus environment'
+runs:
+  using: "composite"
+  steps:
+    - name: Add tools to PATH
+      shell: bash
+      run: |
+        echo "/opt/verilator/5.034/bin" >> $GITHUB_PATH
+        echo "/opt/firtool-1.62.0/bin" >> $GITHUB_PATH
+
+    - name: Initialize dependencies
+      shell: bash
+      run: |
+        # Fix git "dubious ownership" error because of container/host user mismatch
+        git config --global --add safe.directory '*'
+        make init
+
+    - name: Build Ventus
+      shell: bash
+      run: |
+        env CCACHE_DIR=/ccache bash build-ventus.sh
+        env CCACHE_DIR=/ccache make -C gpgpu/sim-verilator -j RELEASE=1

@@ -1,0 +1,31 @@
+name: Weekly CI
+
+on:
+  schedule:
+    # Run at 00:00 on Sunday
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+jobs:
+  weekly-test:
+    runs-on: self-hosted
+    container:
+      image: humber186/ventus:base-20251010
+      options: --add-host=host.docker.internal:host-gateway --env http_proxy=$container_http_proxy --env https_proxy=$container_https_proxy --env no_proxy=$container_no_proxy
+      volumes:
+        - /ci/ventus-env/ccache:/ccache
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Setup and Build
+      id: build
+      uses: ./.github/actions/build-ventus
+
+    - name: Run OpenCL application cases
+      if: steps.build.outcome == 'success'
+      run: |
+        VENTUS_SPIKE_LOG=0 python3 testcases/_get_case/run_ventus_tests.py --cases cases.csv --ref=results_nv --backends spike,rtlsim,cyclesim --rtol 1e-2 --atol 1e-2 --jobs 4 --timeout 7200

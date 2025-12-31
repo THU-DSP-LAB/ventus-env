@@ -12,7 +12,7 @@ jobs:
     runs-on: self-hosted
     container:
       image: humber186/ventus:base-20251010
-      options: --env http_proxy --env https_proxy --env no_proxy --env HTTP_PROXY --env HTTPS_PROXY --env NO_PROXY
+      options: --add-host=host.docker.internal:host-gateway --env http_proxy=$container_http_proxy --env https_proxy=$container_https_proxy --env no_proxy=$container_no_proxy
       volumes:
         # Mount host directory for ccache persistence
         # Ensure this directory exists on the host and is writable by the container user (uid 1000)

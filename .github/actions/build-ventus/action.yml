@@ -41,7 +41,6 @@ runs:
       run: |
         mkdir -p /artifacts/${{ github.sha }}
         if [ -d "install" ]; then cp -r install /artifacts/${{ github.sha }}/; fi
-        cp -r gpgpu /artifacts/${{ github.sha }}/
         touch /artifacts/${{ github.sha }}
 
     - name: Cleanup Old Artifacts

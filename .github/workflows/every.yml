@@ -12,11 +12,12 @@ jobs:
     runs-on: self-hosted
     container:
       image: humber186/ventus:base-20251010
-      options: --add-host=host.docker.internal:host-gateway --env http_proxy=$container_http_proxy --env https_proxy=$container_https_proxy --env no_proxy=$container_no_proxy
+      options: --add-host=host.docker.internal:host-gateway
       volumes:
         # Mount host directory for ccache persistence
         # Ensure this directory exists on the host and is writable by the container user (uid 1000)
         - /ci/ventus-env/ccache:/ccache
+        - /ci/ventus-env/artifacts:/artifacts
     
     steps:
     - name: Checkout repository
@@ -46,13 +47,11 @@ jobs:
       run: |
         . ./env.sh
         # RTL simulation is slower, so we might need to increase timeout
-        make -C gpgpu/sim-verilator-nocache -j RELEASE=1 install PREFIX="$(realpath ./install)"
-        VENTUS_BACKEND=rtl python3 regression-test.py -j 4 -t 5
+        VENTUS_BACKEND=rtl-nocache python3 regression-test.py -j 4 -t 5
 
     - name: Run Regression Tests (RTL-with-cache)
       if: steps.build.outcome == 'success'
       run: |
         . ./env.sh
         # RTL simulation is slower, so we might need to increase timeout
-        make -C gpgpu/sim-verilator -j RELEASE=1 install PREFIX="$(realpath ./install)"
-        VENTUS_BACKEND=rtl python3 regression-test.py -j 4 -t 5 --checklist=rtl-with-cache
+        VENTUS_BACKEND=rtl-cache python3 regression-test.py -j 4 -t 5 --checklist=rtl-with-cache

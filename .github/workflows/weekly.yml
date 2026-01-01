@@ -15,9 +15,10 @@ jobs:
     runs-on: self-hosted
     container:
       image: humber186/ventus:base-20251010
-      options: --add-host=host.docker.internal:host-gateway --env http_proxy=$container_http_proxy --env https_proxy=$container_https_proxy --env no_proxy=$container_no_proxy
+      options: --add-host=host.docker.internal:host-gateway
       volumes:
         - /ci/ventus-env/ccache:/ccache
+        - /ci/ventus-env/artifacts:/artifacts
     
     steps:
     - name: Checkout repository
@@ -32,4 +33,5 @@ jobs:
     - name: Run OpenCL application cases
       if: steps.build.outcome == 'success'
       run: |
-        VENTUS_SPIKE_LOG=0 python3 testcases/_get_case/run_ventus_tests.py --cases cases.csv --ref=results_nv --backends spike,rtlsim,cyclesim --rtol 1e-2 --atol 1e-2 --jobs 4 --timeout 7200
+        VENTUS_SPIKE_LOG=0 python3 testcases/_get_case/run_ventus_tests.py --cases cases.csv --ref=results_nv --backends spike,cycle,rtl-nocache,rtl-withcache --rtol 1e-2 --atol 1e-2 --jobs 4 --timeout 7200
+        cat testcases/_get_case/results/summary.md

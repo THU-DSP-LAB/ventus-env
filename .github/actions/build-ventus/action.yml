@@ -16,8 +16,36 @@ runs:
         git config --global --add safe.directory '*'
         make init
 
+    - name: Restore Build Artifacts
+      id: restore-build
+      shell: bash
+      run: |
+        if [ -d "/artifacts/${{ github.sha }}" ]; then
+          echo "Found existing artifacts for ${{ github.sha }}"
+          cp -r /artifacts/${{ github.sha }}/* .
+          echo "cache-hit=true" >> $GITHUB_OUTPUT
+        else
+          echo "No artifacts found"
+          echo "cache-hit=false" >> $GITHUB_OUTPUT
+        fi
+
     - name: Build Ventus
+      if: steps.restore-build.outputs.cache-hit != 'true'
       shell: bash
       run: |
         env CCACHE_DIR=/ccache bash build-ventus.sh
-        env CCACHE_DIR=/ccache make -C gpgpu/sim-verilator -j RELEASE=1
+
+    - name: Save Build Artifacts
+      if: steps.restore-build.outputs.cache-hit != 'true' && success()
+      shell: bash
+      run: |
+        mkdir -p /artifacts/${{ github.sha }}
+        if [ -d "install" ]; then cp -r install /artifacts/${{ github.sha }}/; fi
+        cp -r gpgpu /artifacts/${{ github.sha }}/
+        touch /artifacts/${{ github.sha }}
+
+    - name: Cleanup Old Artifacts
+      if: always()
+      shell: bash
+      run: |
+        find /artifacts -maxdepth 1 -mindepth 1 -type d -mtime +7 -exec rm -rf {} +

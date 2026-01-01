@@ -207,9 +207,10 @@ build_gpgpu_cyclesim() {
 
 # Build ventus cpp cycle-level simulator
 build_gpgpu_rtlsim() {
+  cd ${GPGPU_DIR}/sim-verilator
+  make -j${BUILD_PARALLEL} install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX}
   cd ${GPGPU_DIR}/sim-verilator-nocache
-  make -j${BUILD_PARALLEL} RELEASE=1
-  make install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX}
+  make -j${BUILD_PARALLEL} install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX}
 }
 
 build_gvm() {

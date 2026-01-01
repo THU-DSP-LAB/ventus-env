@@ -23,6 +23,7 @@ runs:
         if [ -d "/artifacts/${{ github.sha }}" ]; then
           echo "Found existing artifacts for ${{ github.sha }}"
           cp -r /artifacts/${{ github.sha }}/* .
+          env CCACHE_DIR=/ccache bash build-ventus.sh --build pocl
           echo "cache-hit=true" >> $GITHUB_OUTPUT
         else
           echo "No artifacts found"

@@ -33,5 +33,13 @@ jobs:
     - name: Run OpenCL application cases
       if: steps.build.outcome == 'success'
       run: |
+        set +e
         VENTUS_SPIKE_LOG=0 python3 testcases/_get_case/run_ventus_tests.py --cases cases.csv --ref=results_nv --backends spike,cycle,rtl-nocache,rtl-withcache --rtol 1e-2 --atol 1e-2 --jobs 4 --timeout 7200
-        cat testcases/_get_case/results/summary.md
+        EXIT_CODE=$?
+        
+        echo "=== Test Summary ==="
+        if [ -f testcases/_get_case/results/summary.csv ]; then
+          cat testcases/_get_case/results/summary.csv
+        fi
+        
+        exit $EXIT_CODE

@@ -1,0 +1,45 @@
+name: Weekly CI
+
+on:
+  schedule:
+    # Run at 00:00 on Sunday
+    - cron: '0 0 * * 0'
+  push:
+    branches: [ "main", "develop", "dev/ci" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  weekly-test:
+    runs-on: self-hosted
+    container:
+      image: humber186/ventus:base-20251010
+      options: --add-host=host.docker.internal:host-gateway
+      volumes:
+        - /ci/ventus-env/ccache:/ccache
+        - /ci/ventus-env/artifacts:/artifacts
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Setup and Build
+      id: build
+      uses: ./.github/actions/build-ventus
+
+    - name: Run OpenCL application cases
+      if: steps.build.outcome == 'success'
+      run: |
+        set +e
+        VENTUS_SPIKE_LOG=0 python3 testcases/_get_case/run_ventus_tests.py --cases cases.csv --ref=results_nv --backends spike,cycle,rtl-nocache,rtl-withcache --rtol 1e-2 --atol 1e-2 --jobs 4 --timeout 7200
+        EXIT_CODE=$?
+        
+        echo "=== Test Summary ==="
+        if [ -f testcases/_get_case/results/summary.csv ]; then
+          cat testcases/_get_case/results/summary.csv
+        fi
+        
+        exit $EXIT_CODE

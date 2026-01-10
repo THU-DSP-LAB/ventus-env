@@ -1,7 +1,7 @@
 default: init
 
 # Download rodinia dataset
-DATASET_URL  = "http://dspdev.ime.tsinghua.edu.cn/images/ventus_dataset/ventus_rodinia_data.tar.xz"
+DATASET_URL ?= https://cloud.tsinghua.edu.cn/f/60be001427c546fba292/?dl=1
 rodinia_data.tar.xz:
 	curl -L $(DATASET_URL) -o rodinia_data.tar.xz
 rodinia_data: rodinia_data.tar.xz

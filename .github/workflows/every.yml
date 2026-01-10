@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main", "develop", "dev/ci" ]
+  pull_request:
+    branches: [ "main", "develop" ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: self-hosted
+    container:
+      image: humber186/ventus:base-20251010
+      options: --add-host=host.docker.internal:host-gateway
+      volumes:
+        # Mount host directory for ccache persistence
+        # Ensure this directory exists on the host and is writable by the container user (uid 1000)
+        - /ci/ventus-env/ccache:/ccache
+        - /ci/ventus-env/artifacts:/artifacts
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Setup and Build
+      id: build
+      uses: ./.github/actions/build-ventus
+
+    - name: Run Regression Tests (ISA)
+      if: steps.build.outcome == 'success'
+      run: |
+        VENTUS_SPIKE_LOG=0 python3 testcases/_get_case/run_ventus_tests.py --cases cases_fast.csv --ref=results_nv --backends spike --rtol 1e-2 --atol 1e-2 --jobs 4 --timeout 7200
+        . ./env.sh
+        VENTUS_SPIKE_LOG=0 VENTUS_BACKEND=isa python3 regression-test.py
+
+    - name: Run Regression Tests (Cycle)
+      if: steps.build.outcome == 'success'
+      run: |
+        . ./env.sh
+        VENTUS_BACKEND=cyclesim python3 regression-test.py --checklist=cycle
+
+    - name: Run Regression Tests (RTL-without-cache)
+      if: steps.build.outcome == 'success'
+      run: |
+        . ./env.sh
+        # RTL simulation is slower, so we might need to increase timeout
+        VENTUS_BACKEND=rtl-nocache python3 regression-test.py -j 4 -t 5
+
+    - name: Run Regression Tests (RTL-with-cache)
+      if: steps.build.outcome == 'success'
+      run: |
+        . ./env.sh
+        # RTL simulation is slower, so we might need to increase timeout
+        VENTUS_BACKEND=rtl-cache python3 regression-test.py -j 4 -t 5 --checklist=rtl-with-cache

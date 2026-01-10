@@ -67,14 +67,19 @@ test_cases = [
     # TestCase(name="mnist_conv"      , path=VENTUS_TESTCASE_DIR/"_get_case/MNIST_conv"      , cmd=["./conv.out"]),
 ]
 
+REQUIRED_PRESETS = {
+    "all": list(range(len(test_cases))),
+    "cycle": [0,1,2,4,5,6,7,8,9,10],
+    "rtl-with-cache": [0,1,2,6,9,10],
+}
+
 manager = multiprocessing.Manager()
 compile_paths = manager.dict()  # 用于存储已编译的路径，避免重复编译
 compile_path_locks = manager.dict()  # 保护对compile_paths的访问
 
 def get_compile_path_lock(path: Path):
     """获取指定路径的锁，确保对compile_paths的访问是线程安全的"""
-    if path not in compile_path_locks:
-        compile_path_locks[path] = manager.Lock()
+    # 注意：锁必须在主进程启动 pool 前预先创建，否则多进程并发创建锁会有竞争
     return compile_path_locks[path]
 
 def format_list_with_quotes(lst):
@@ -130,6 +135,9 @@ def run_test_case(arg: Tuple[int, TestCase]) -> Tuple[int, Tuple[int, str]]:
             f.write("\nTestcase execution timeout, Failed\n")
             # 用一个超出常规范围的返回码以避免与被测程序冲突
             return index, (9999, TAG_TIMEOUT)
+        except Exception as e:
+            f.write(f"\nTestcase execution failed with exception: {e}\n")
+            return index, (9998, TAG_FAIL)
 
 def signal_handler(signum, frame):
     """处理外部中断信号，终止所有子进程"""
@@ -144,7 +152,37 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Ventus regression test runner")
     parser.add_argument("-t", "--timeout-scale", type=float, default=None, help="Timeout scale (default: 1)")
     parser.add_argument("-j", "--jobs", type=int, default=None, help="Parallel multiprocess num (default: auto)")
+    parser.add_argument(
+        "--checklist",
+        type=str,
+        default="all",
+        help=(
+            "Which testcases must pass. Accepts a comma-separated index list (e.g. 0,2,5) "
+            "or a preset name: " + ", ".join(sorted(REQUIRED_PRESETS.keys())) + ". Default: all"
+        ),
+    )
     args = parser.parse_args()
+
+    # 解析必须通过的 TestCase 列表
+    checklist = (args.checklist or "all").strip().lower()
+    if checklist in REQUIRED_PRESETS:
+        checklist_set = set(REQUIRED_PRESETS[checklist])
+    else:
+        try:
+            parts = [p.strip() for p in checklist.split(",") if p.strip()]
+            if not parts:
+                parser.error("--checklist is empty")
+            checklist_set = set(int(p) for p in parts)
+        except ValueError:
+            parser.error(
+                "Invalid --checklist value. Use preset name ({}), or comma-separated integers like 0,1,2".format(
+                    ", ".join(sorted(REQUIRED_PRESETS.keys()))
+                )
+            )
+
+    invalid_indices = sorted(i for i in checklist_set if i < 0 or i >= len(test_cases))
+    if invalid_indices:
+        parser.error(f"--checklist contains invalid indices: {invalid_indices} (valid range: 0..{len(test_cases)-1})")
 
     # 应用命令行参数或自动检测默认值
     if args.timeout_scale is not None:
@@ -161,6 +199,11 @@ if __name__ == "__main__":
 
     # 设置信号处理器以处理外部中断
     signal.signal(signal.SIGINT, signal_handler)
+
+    # 预先为所有涉及编译的路径创建锁，避免多进程竞争创建锁导致的 race condition
+    for tc in test_cases:
+        if tc.need_make and tc.path not in compile_path_locks:
+            compile_path_locks[tc.path] = manager.Lock()
 
     # 创建进程池，控制并行度
     pool = multiprocessing.Pool(processes=MULTIPROCESS_NUM)  # 可根据需要调整并行进程数
@@ -187,7 +230,11 @@ if __name__ == "__main__":
     # 打印每个测试用例的结果
     print("\nTest result: ")
     for i, testcase in enumerate(test_cases):
-        rc, tag = results[i] if results[i] is not None else (-1, "not_run")
+        res = results[i]
+        if res is None:
+            rc, tag = (-1, "not_run")
+        else:
+            rc, tag = res
         if rc == 0:
             status = "\033[92mPassed\033[0m"  # 绿
         elif tag == TAG_COMPILE_FAIL:
@@ -201,8 +248,26 @@ if __name__ == "__main__":
     # 打印总结（Failed + TimeExceeded + Compile Failed 都算 Fail）
     pass_count = sum(1 for r in results if (r is not None and r[0] == 0))
     fail_count = total - pass_count
-    unicode_symbol = "\033[92m✔\033[0m" if fail_count == 0 else "\033[91m✘\033[0m"
-    print(f"\nSummary: {pass_count} passed, {fail_count} failed. {unicode_symbol}")
+    checklist_failed: List[int] = []
+    for i in checklist_set:
+        res = results[i]
+        if res is None or res[0] != 0:
+            checklist_failed.append(i)
+    checklist_failed.sort()
+    exit_code = 0 if not checklist_failed else 1
+
+    if exit_code == 0:
+        result_descript = f"All required testcases in checklist({checklist_set}) passed."
+    else:
+        result_descript = f"Some testcases in checklist({checklist_set}) failed."
+    unicode_symbol = "\033[92m✔\033[0m" if exit_code == 0 else "\033[91m✘\033[0m"
+    print(f"\nSummary: {pass_count} passed, {fail_count} failed. \n{result_descript} {unicode_symbol}")
+
+    # 如果指定的必须通过测例未全部通过，则以非0退出码告知CI失败
+    if exit_code != 0:
+        print(f"Required testcases not all passed (--checklist={args.checklist}): {checklist_failed}")
 
     if 'NOTEBOOK_BASH_KERNEL_CAPABILITIES' not in os.environ: # not in JupyterNotebook bash_kernel
         os.system("stty echo") # spike sometimes messes up terminal echo
+
+    sys.exit(exit_code)

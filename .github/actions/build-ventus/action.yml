@@ -1,0 +1,51 @@
+name: 'Build Ventus'
+description: 'Setup and build Ventus environment'
+runs:
+  using: "composite"
+  steps:
+    - name: Add tools to PATH
+      shell: bash
+      run: |
+        echo "/opt/verilator/5.034/bin" >> $GITHUB_PATH
+        echo "/opt/firtool-1.62.0/bin" >> $GITHUB_PATH
+
+    - name: Initialize dependencies
+      shell: bash
+      run: |
+        # Fix git "dubious ownership" error because of container/host user mismatch
+        git config --global --add safe.directory '*'
+        make init
+
+    - name: Restore Build Artifacts
+      id: restore-build
+      shell: bash
+      run: |
+        if [ -d "/artifacts/${{ github.sha }}" ]; then
+          echo "Found existing artifacts for ${{ github.sha }}"
+          cp -r /artifacts/${{ github.sha }}/* .
+          env CCACHE_DIR=/ccache bash build-ventus.sh --build pocl
+          echo "cache-hit=true" >> $GITHUB_OUTPUT
+        else
+          echo "No artifacts found"
+          echo "cache-hit=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build Ventus
+      if: steps.restore-build.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        env CCACHE_DIR=/ccache bash build-ventus.sh
+
+    - name: Save Build Artifacts
+      if: steps.restore-build.outputs.cache-hit != 'true' && success()
+      shell: bash
+      run: |
+        mkdir -p /artifacts/${{ github.sha }}
+        if [ -d "install" ]; then cp -r install /artifacts/${{ github.sha }}/; fi
+        touch /artifacts/${{ github.sha }}
+
+    - name: Cleanup Old Artifacts
+      if: always()
+      shell: bash
+      run: |
+        find /artifacts -maxdepth 1 -mindepth 1 -type d -mtime +7 -exec rm -rf {} +

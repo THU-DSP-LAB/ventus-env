@@ -14,7 +14,7 @@ BUILD_PARALLEL=$(( $(nproc) * 2 / 3 ))
 help() {
   cat <<END
 
-Build [systemc llvm, pocl, ocl-icd, libclc, driver, spike, rtlsim|gpgpu, cyclesim|simulator, gvm, gpusim|sbtsim|ptx|ptxsim] programs.
+Build [systemc llvm, pocl, ocl-icd, libclc, driver, spike, rtlsim|gpgpu, cyclesim|simulator, gvm, sbt|sbtsim|ptx|ptxsim] programs.
 Run the rodinia and test-pocl test suites.
 Read ${DIR}/llvm/README.md to get started.
 
@@ -462,7 +462,7 @@ do
   elif [ "${program}" == "cyclesim" ] || [ "${program}" == "simulator" ]; then
     check_if_systemc_built
     build_gpgpu_cyclesim
-  elif [ "${program}" == "gpusim" ] || [ "${program}" == "sbtsim" ] || [ "${program}" == "ptx" ] || [ "${program}" == "ptxsim" ]; then
+  elif [ "${program}" == "sbt" ] || [ "${program}" == "sbtsim" ] || [ "${program}" == "ptx" ] || [ "${program}" == "ptxsim" ]; then
     build_ptxsim
   elif [ "${program}" == "gvm" ]; then
     build_gvm

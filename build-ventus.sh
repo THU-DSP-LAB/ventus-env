@@ -4,8 +4,8 @@ set -euo pipefail
 
 DIR=$(cd "$(dirname "${0}")" &> /dev/null && (pwd -W 2> /dev/null || pwd))
 VENTUS_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX:-${DIR}/install}
-PROGRAMS_TOBUILD_DEFAULT=(systemc llvm ocl-icd libclc spike gvm driver pocl rodinia cts test-pocl)
-PROGRAMS_TOBUILD_DEFAULT_FULL=(systemc llvm ocl-icd libclc spike rtlsim cyclesim gvm driver pocl rodinia cts test-pocl)
+PROGRAMS_TOBUILD_DEFAULT=(systemc llvm ocl-icd libclc spike gvm ptxsim driver pocl rodinia cts test-pocl)
+PROGRAMS_TOBUILD_DEFAULT_FULL=(systemc llvm ocl-icd libclc spike rtlsim cyclesim gvm ptxsim driver pocl rodinia cts test-pocl)
 PROGRAMS_TOBUILD=(${PROGRAMS_TOBUILD_DEFAULT_FULL[@]})
 
 BUILD_PARALLEL=$(( $(nproc) * 2 / 3 ))
@@ -14,7 +14,7 @@ BUILD_PARALLEL=$(( $(nproc) * 2 / 3 ))
 help() {
   cat <<END
 
-Build [systemc llvm, pocl, ocl-icd, libclc, driver, spike, rtlsim|gpgpu, cyclesim|simulator, gvm] programs.
+Build [systemc llvm, pocl, ocl-icd, libclc, driver, spike, rtlsim|gpgpu, cyclesim|simulator, gvm, gpusim|sbtsim|ptx|ptxsim] programs.
 Run the rodinia and test-pocl test suites.
 Read ${DIR}/llvm/README.md to get started.
 
@@ -27,7 +27,7 @@ Options:
     Chosen programs to build : [${PROGRAMS_TOBUILD}]
     Option format : "llvm;pocl", string are separated by semicolon.
     ( Note that quotation marks are necessary, or bash will parse the semicolon as command ending )
-    Default : "llvm;ocl-icd;libclc;spike;rtlsim;cyclesim;driver;pocl;rodinia;test-pocl"
+    Default : "llvm;ocl-icd;libclc;spike;rtlsim;cyclesim;ptxsim;driver;pocl;rodinia;test-pocl"
     'BUILD_TYPE' is default 'Release' which can be changed by enviroment variable
 
   --help | -h
@@ -110,6 +110,11 @@ DRIVER_DIR=${DRIVER_DIR:-${DIR}/driver}
 check_if_program_exits ${DRIVER_DIR} "ventus-driver"
 DRIVER_BUILD_DIR=${DRIVER_DIR}/build
 
+# Need to get the ptxsim (SBT PTX translator) folder from enviroment variables
+GPUSIM_DIR=${GPUSIM_DIR:-${DIR}/gpusim}
+check_if_program_exits ${GPUSIM_DIR} "ptxsim (SBT PTX translator)"
+GPUSIM_BUILD_DIR=${GPUSIM_DIR}/build
+
 # Need to get the ventus-spike folder from enviroment variables
 SPIKE_DIR=${SPIKE_DIR:-${DIR}/spike}
 check_if_program_exits ${SPIKE_DIR} "spike"
@@ -177,11 +182,30 @@ build_driver() {
     -DDRIVER_ENABLE_AUTOSELECT=ON \
     -DDRIVER_ENABLE_RTLSIM=ON \
     -DDRIVER_ENABLE_CYCLESIM=ON \
-    -DDRIVER_ENABLE_GVM=ON
+    -DDRIVER_ENABLE_GVM=ON \
+    -DDRIVER_ENABLE_PTX=ON
     # -DCMAKE_C_COMPILER=clang \
     # -DCMAKE_CXX_COMPILER=clang++ \
   ninja -C ${DRIVER_BUILD_DIR}
   ninja -C ${DRIVER_BUILD_DIR} install
+}
+
+# Build ptxsim (SBT translator) and install sbt_ptx to ${VENTUS_INSTALL_PREFIX}/bin
+build_ptxsim() {
+  mkdir -p ${GPUSIM_BUILD_DIR}
+  cd ${GPUSIM_DIR}
+  cmake -G Ninja -B ${GPUSIM_BUILD_DIR} -S ${GPUSIM_DIR} \
+    -DCMAKE_BUILD_TYPE=${BUILD_TYPE}
+  ninja -C ${GPUSIM_BUILD_DIR}
+  mkdir -p ${VENTUS_INSTALL_PREFIX}/bin
+  install -m 0755 ${GPUSIM_BUILD_DIR}/sbt_ptx ${VENTUS_INSTALL_PREFIX}/bin/sbt_ptx
+  install -m 0755 ${GPUSIM_BUILD_DIR}/sbt_decode ${VENTUS_INSTALL_PREFIX}/bin/sbt_decode
+
+  # Install runtime data needed by sbt_ptx (for ptx_device JIT path).
+  mkdir -p ${VENTUS_INSTALL_PREFIX}/share/ventus
+  mkdir -p ${VENTUS_INSTALL_PREFIX}/share/ventus/spike
+  install -m 0644 ${GPUSIM_DIR}/data/spike_want.txt ${VENTUS_INSTALL_PREFIX}/share/ventus/spike_want.txt
+  install -m 0644 ${SPIKE_DIR}/riscv/encoding.h ${VENTUS_INSTALL_PREFIX}/share/ventus/spike/encoding.h
 }
 
 # Build spike simulator
@@ -387,7 +411,15 @@ check_if_gvm_built() {
 # Check gpgpu cpp cycle-level simulator is built or not
 check_if_cyclesim_built() {
   if [ ! -f "${VENTUS_INSTALL_PREFIX}/lib/libVentusCycleSim.so" ];then
-    echo "Please build Ventus Chisel C++ cycle-level simulator (cyclesim) first!"
+    echo "Please build Ventus C++ cycle-level simulator (cyclesim) first!"
+    exit 1
+  fi
+}
+
+# Check ventus ptxsim simulator is built or not
+check_if_ptxsim_built() {
+  if [ ! -f "${VENTUS_INSTALL_PREFIX}/bin/sbt_ptx" ];then
+    echo "Please build Ventus CUDA-PTX simulator (ptxsim) first!"
     exit 1
   fi
 }
@@ -428,6 +460,8 @@ do
   elif [ "${program}" == "cyclesim" ] || [ "${program}" == "simulator" ]; then
     check_if_systemc_built
     build_gpgpu_cyclesim
+  elif [ "${program}" == "gpusim" ] || [ "${program}" == "sbtsim" ] || [ "${program}" == "ptx" ] || [ "${program}" == "ptxsim" ]; then
+    build_ptxsim
   elif [ "${program}" == "gvm" ]; then
     build_gvm
   elif [ "${program}" == "driver" ]; then
@@ -436,6 +470,7 @@ do
     check_if_rtlsim_built
     check_if_gvm_built
     check_if_gvmref_built
+    check_if_ptxsim_built
     build_driver
   elif [ "${program}" == "pocl" ]; then
     check_if_ventus_llvm_built

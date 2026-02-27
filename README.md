@@ -8,6 +8,7 @@
 * **OS:** Ubuntu 24.04 recommended
 * **Verilator:** 5.034 (build from source and add to `PATH`)
 * **CIRCT firtool:** Install [firtool 1.62.0](https://github.com/llvm/circt/releases/download/firtool-1.62.0/firrtl-bin-linux-x64.tar.gz) and add to `PATH`
+* **CUDA (optional, for `VENTUS_BACKEND=ptx`):** NVIDIA driver + CUDA toolkit (for headers/tools). The PTX backend uses CUDA Driver API (`libcuda.so`) at runtime and `find_package(CUDAToolkit)` at build time.
 * **Other system dependencies:**
 
 ```bash
@@ -65,11 +66,13 @@ make
 VENTUS_BACKEND=spike    ./run # Same as above
 VENTUS_BACKEND=rtlsim   ./run # Verilator-based Chisel RTL simulation
 VENTUS_BACKEND=cyclesim ./run # Cycle-accurate simulator
+VENTUS_BACKEND=ptx      ./run # PTX backend (SBT ELF->PTX + CUDA Driver API)
 ```
 
 The following environment variables adjust simulation behavior:
 
 * `VENTUS_BACKEND=XXX` — Select the device/backend: `spike`|`isa`, `rtl`|`rtlsim`|`gpgpu`, `cyclesim`|`systemc`|`simulator`.
+  * PTX backend: `ptx` (requires building `build-ventus.sh --build "ptx"` and CUDA availability).
 * `VENTUS_WAVEFORM=1` — Enable waveform dump: `rtlsim` → FST, `cyclesim` → VCD.
 * `VENTUS_WAVEFORM_BEGIN` / `VENTUS_WAVEFORM_END` — Dump only a selected simulation interval for `rtlsim` (speeds up simulation). Not supported by `cyclesim`.
 * `VENTUS_DUMP_RESULT=filename.json` — Save all device→host copies from OpenCL programs and their device addresses to a JSON file (useful for debugging).
@@ -90,6 +93,7 @@ python3 ./regression-test.py                 # Uses spike by default
 VENTUS_BACKEND=spike    python3 ./regression-test.py
 VENTUS_BACKEND=rtlsim   python3 ./regression-test.py # Verilator-based Chisel RTL
 VENTUS_BACKEND=cyclesim python3 ./regression-test.py # Cycle-accurate simulator
+VENTUS_BACKEND=ptx      python3 ./regression-test.py # PTX backend (requires CUDA)
 ```
 
 Before running, we recommend tuning these options:

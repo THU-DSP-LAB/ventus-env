@@ -111,9 +111,9 @@ check_if_program_exits ${DRIVER_DIR} "ventus-driver"
 DRIVER_BUILD_DIR=${DRIVER_DIR}/build
 
 # Need to get the ptxsim (SBT PTX translator) folder from enviroment variables
-GPUSIM_DIR=${GPUSIM_DIR:-${DIR}/gpusim}
-check_if_program_exits ${GPUSIM_DIR} "ptxsim (SBT PTX translator)"
-GPUSIM_BUILD_DIR=${GPUSIM_DIR}/build
+SBTSIM_DIR=${SBTSIM_DIR:-${DIR}/sbtsim}
+check_if_program_exits ${SBTSIM_DIR} "sbtsim (SBT PTX translator)"
+SBTSIM_BUILD_DIR=${SBTSIM_DIR}/build
 
 # Need to get the ventus-spike folder from enviroment variables
 SPIKE_DIR=${SPIKE_DIR:-${DIR}/spike}
@@ -190,22 +190,16 @@ build_driver() {
   ninja -C ${DRIVER_BUILD_DIR} install
 }
 
-# Build ptxsim (SBT translator) and install sbt_ptx to ${VENTUS_INSTALL_PREFIX}/bin
+# Build ptxsim (SBT translator) and install via CMake rules to ${VENTUS_INSTALL_PREFIX}
 build_ptxsim() {
-  mkdir -p ${GPUSIM_BUILD_DIR}
-  cd ${GPUSIM_DIR}
-  cmake -G Ninja -B ${GPUSIM_BUILD_DIR} -S ${GPUSIM_DIR} \
-    -DCMAKE_BUILD_TYPE=${BUILD_TYPE}
-  ninja -C ${GPUSIM_BUILD_DIR}
-  mkdir -p ${VENTUS_INSTALL_PREFIX}/bin
-  install -m 0755 ${GPUSIM_BUILD_DIR}/sbt_ptx ${VENTUS_INSTALL_PREFIX}/bin/sbt_ptx
-  install -m 0755 ${GPUSIM_BUILD_DIR}/sbt_decode ${VENTUS_INSTALL_PREFIX}/bin/sbt_decode
-
-  # Install runtime data needed by sbt_ptx (for ptx_device JIT path).
-  mkdir -p ${VENTUS_INSTALL_PREFIX}/share/ventus
-  mkdir -p ${VENTUS_INSTALL_PREFIX}/share/ventus/spike
-  install -m 0644 ${GPUSIM_DIR}/data/spike_want.txt ${VENTUS_INSTALL_PREFIX}/share/ventus/spike_want.txt
-  install -m 0644 ${SPIKE_DIR}/riscv/encoding.h ${VENTUS_INSTALL_PREFIX}/share/ventus/spike/encoding.h
+  mkdir -p ${SBTSIM_BUILD_DIR}
+  cd ${SBTSIM_DIR}
+  cmake -G Ninja -B ${SBTSIM_BUILD_DIR} -S ${SBTSIM_DIR} \
+    -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
+    -DCMAKE_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX} \
+    -DSBT_SPIKE_ENCODING_H=${SPIKE_DIR}/riscv/encoding.h
+  ninja -C ${SBTSIM_BUILD_DIR}
+  cmake --install ${SBTSIM_BUILD_DIR}
 }
 
 # Build spike simulator

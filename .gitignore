@@ -4,4 +4,6 @@
 .vscode/
 install/
 regression-test-logs/
+rodinia_data.tar.xz
+__pycache__
 

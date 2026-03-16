@@ -4,8 +4,8 @@ set -euo pipefail
 
 DIR=$(cd "$(dirname "${0}")" &> /dev/null && (pwd -W 2> /dev/null || pwd))
 VENTUS_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX:-${DIR}/install}
-PROGRAMS_TOBUILD_DEFAULT=(systemc llvm ocl-icd libclc spike gvm ptxsim driver pocl rodinia cts test-pocl)
-PROGRAMS_TOBUILD_DEFAULT_FULL=(systemc llvm ocl-icd libclc spike rtlsim cyclesim gvm ptxsim driver pocl rodinia cts test-pocl)
+PROGRAMS_TOBUILD_DEFAULT=(systemc llvm ocl-icd libclc spike gvm sbtsim driver pocl rodinia cts test-pocl)
+PROGRAMS_TOBUILD_DEFAULT_FULL=(systemc llvm ocl-icd libclc spike rtlsim cyclesim gvm sbtsim driver pocl rodinia cts test-pocl)
 PROGRAMS_TOBUILD=(${PROGRAMS_TOBUILD_DEFAULT_FULL[@]})
 
 BUILD_PARALLEL=$(( $(nproc) * 2 / 3 ))
@@ -27,7 +27,7 @@ Options:
     Chosen programs to build : [${PROGRAMS_TOBUILD}]
     Option format : "llvm;pocl", string are separated by semicolon.
     ( Note that quotation marks are necessary, or bash will parse the semicolon as command ending )
-    Default : "llvm;ocl-icd;libclc;spike;rtlsim;cyclesim;ptxsim;driver;pocl;rodinia;test-pocl"
+    Default : "llvm;ocl-icd;libclc;spike;rtlsim;cyclesim;sbtsim;driver;pocl;rodinia;test-pocl"
     'BUILD_TYPE' is default 'Release' which can be changed by enviroment variable
 
   --help | -h
@@ -110,7 +110,7 @@ DRIVER_DIR=${DRIVER_DIR:-${DIR}/driver}
 check_if_program_exits ${DRIVER_DIR} "ventus-driver"
 DRIVER_BUILD_DIR=${DRIVER_DIR}/build
 
-# Need to get the ptxsim (SBT PTX translator) folder from enviroment variables
+# Need to get the sbtsim (SBT PTX translator) folder from enviroment variables
 SBTSIM_DIR=${SBTSIM_DIR:-${DIR}/sbtsim}
 check_if_program_exits ${SBTSIM_DIR} "sbtsim (SBT PTX translator)"
 SBTSIM_BUILD_DIR=${SBTSIM_DIR}/build
@@ -190,8 +190,8 @@ build_driver() {
   ninja -C ${DRIVER_BUILD_DIR} install
 }
 
-# Build ptxsim (SBT translator) and install via CMake rules to ${VENTUS_INSTALL_PREFIX}
-build_ptxsim() {
+# Build sbtsim (SBT translator) and install via CMake rules to ${VENTUS_INSTALL_PREFIX}
+build_sbtsim() {
   mkdir -p ${SBTSIM_BUILD_DIR}
   cd ${SBTSIM_DIR}
   cmake -G Ninja -B ${SBTSIM_BUILD_DIR} -S ${SBTSIM_DIR} \
@@ -412,10 +412,10 @@ check_if_cyclesim_built() {
   fi
 }
 
-# Check ventus ptxsim simulator is built or not
-check_if_ptxsim_built() {
+# Check ventus sbtsim simulator is built or not
+check_if_sbtsim_built() {
   if [ ! -f "${VENTUS_INSTALL_PREFIX}/bin/sbt_ptx" ];then
-    echo "Please build Ventus CUDA-PTX simulator (ptxsim) first!"
+    echo "Please build Ventus CUDA-PTX simulator (sbtsim) first!"
     exit 1
   fi
 }
@@ -457,7 +457,7 @@ do
     check_if_systemc_built
     build_gpgpu_cyclesim
   elif [ "${program}" == "sbt" ] || [ "${program}" == "sbtsim" ] || [ "${program}" == "ptx" ] || [ "${program}" == "ptxsim" ]; then
-    build_ptxsim
+    build_sbtsim
   elif [ "${program}" == "gvm" ]; then
     build_gvm
   elif [ "${program}" == "driver" ]; then
@@ -466,7 +466,7 @@ do
     check_if_rtlsim_built
     check_if_gvm_built
     check_if_gvmref_built
-    check_if_ptxsim_built
+    check_if_sbtsim_built
     build_driver
   elif [ "${program}" == "pocl" ]; then
     check_if_ventus_llvm_built

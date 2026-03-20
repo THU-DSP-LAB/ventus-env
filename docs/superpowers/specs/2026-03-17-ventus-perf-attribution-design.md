@@ -28,7 +28,8 @@
    - Ventus ELF -> PTX 翻译耗时
    - NVIDIA JIT 编译耗时
    - kernel 在 NVIDIA 上执行的等待耗时
-   - CUDA API 级别的 memcpy / launch / sync 等
+   - CUDA-facing 边界的 launch / sync 等
+   - 如果当前实现路径天然可见，再额外细分到 CUDA API 级别的 memcpy
 5. 支持 warmup、多次 measured run、以及 `nsys` / `ncu` 这类会干扰时序的外部 profiler。
 6. 明确区分“运行态记录”和“离线报告”，后者从前者读取并再加工。
 7. 默认产出最简短、最有用的 summary，同时：
@@ -53,11 +54,11 @@
 - 运行态 recorder 只记录事实，不负责复杂 summary。
 - report 层负责聚合、归因、渲染和对比。
 
-### 3.2 环境变量与 wrapper 并存
+### 3.2 wrapper 是唯一用户入口，环境变量是内部控制面
 
-- 最低门槛入口：环境变量直跑。
-- 推荐入口：wrapper 编排 experiment。
-- 两者共享同一套 recorder 与 schema。
+- 用户入口固定为 wrapper 编排 experiment。
+- `VENTUS_PERF*` 环境变量仍保留，但仅作为 wrapper 与 runtime recorder 之间的内部控制面，不作为面向用户的稳定直跑接口。
+- recorder、producer、wrapper、reporter 共享同一套 schema 与目录约定。
 
 ### 3.3 schema 先行，格式后定
 
@@ -87,6 +88,38 @@
   - 不再宣称整次 pass 的闭合归因严格成立
   - 输出 per-thread / per-scope 的保守统计，并扩大 `uncategorized`
 
+### 3.7 跨模块上下文传播必须显式建模
+
+- 首版不得假设“同一进程中的不同共享库/可执行模块”天然共享同一份 recorder 单例、`thread_local` scope 栈或 launch sequence 状态。
+- `thread_local` + RAII scope guard 只能解决“单个已链接模块内部”的语义继承。
+- 如果 PoCL、driver、shim 或其他 producer 被分别编译/链接，跨模块关联必须通过显式上下文快照传播：
+  - `scope_id`
+  - `parent_event_id`
+  - `launch_seq`
+  - `kernel_name`
+  - `kernel_occurrence`
+  - `kernel_signature_hash`
+- Phase 1 不允许把“跨模块 scope 自动继承”作为正确性前提；必须要么显式传递上下文，要么退化为基于正式顶层字段的保守关联。
+
+推荐方案：
+
+- 在 `vt_*` 主 ABI 之外增加独立 sideband perf context API，而不是扩展所有 `vt_*` 函数签名。
+- 建议新增：
+  - `vt_perf_context_t`
+  - `vt_set_perf_context(vt_device_h, const vt_perf_context_t*)`
+  - `vt_clear_perf_context(vt_device_h)`
+- `vt_perf_context_t` 至少承载：
+  - `scope_id`
+  - `parent_event_id`
+  - `launch_seq`
+  - `kernel_name`
+  - `kernel_occurrence`
+  - `kernel_signature_hash`
+- PoCL 在进入关键语义区间前设置当前上下文，driver 在生成 `vt_*` 事件时读取并重发这些正式顶层字段。
+- 如果默认用户入口经过 `libventus_driver.so` 的 auto-select loader，则该 loader 也必须显式导出并转发 sideband perf context API，不能假设 PoCL 总是直连某个具体 backend DSO。
+- 不推荐复用现有 `taskID` / `kernelID` 做隐式编码，因为它们无法稳定覆盖 `vt_start()` 前后的 buffer / memcpy / upload 路径。
+- Phase 1 只要求 `ptx` / `sbtsim` 路径真正消费这些 sideband perf context。对其他 backend，可允许 sideband API 显式 no-op，但不得影响原有非 perf 执行能力。
+
 ## 4. 总体架构
 
 整套系统拆成四个组件：
@@ -109,6 +142,7 @@
 - 复杂聚合
 - 跨 pass 对比
 - `nsys/ncu` 结果解释
+- `experiment.begin.json` / `experiment.json` / `pass.begin.json` / `pass.json` 这类生命周期 manifest 的权威写入
 
 ### 4.2 event producers
 
@@ -129,6 +163,7 @@
 - 创建 experiment 目录
 - 编排 warmup / measured / `nsys` / `ncu`
 - 为每个 pass 分配唯一目录
+- 写入 `experiment.begin.json` / `experiment.json` / `pass.begin.json` / `pass.json`
 - 注入环境变量与 `LD_PRELOAD`
 - 收集 stdout/stderr 与 profiler artifact
 - 触发离线 report
@@ -143,40 +178,20 @@
 
 ## 5. 用户入口
 
-### 5.1 最小入口：环境变量直跑
-
-示例：
-
-```bash
-VENTUS_PERF=1 \
-VENTUS_PERF_OUT_DIR=/tmp/ventus-perf/pass-001 \
-./run
-```
-
-语义：
-
-- 当前这次进程执行是一个 pass
-- recorder 将原始事件写入 `VENTUS_PERF_OUT_DIR`
-
-如果用户未设置 `VENTUS_PERF_OUT_DIR`：
-
-- runtime recorder 自动创建唯一 pass 目录
-- 运行结束后将路径打印到 stdout/stderr 中
-
-### 5.2 推荐入口：wrapper 编排 experiment
+### 5.1 wrapper 编排 experiment
 
 建议实现为 `tools/ventus_perf.py`。
 
 示例：
 
 ```bash
-tools/ventus_perf.py run -- ./run
+python3 tools/ventus_perf.py run -- ./run
 ```
 
 带 repeat / profiler 的示例：
 
 ```bash
-tools/ventus_perf.py run \
+python3 tools/ventus_perf.py run \
   --warmup 2 \
   --repeat 5 \
   --profile nsys \
@@ -185,16 +200,32 @@ tools/ventus_perf.py run \
   -- ./run
 ```
 
-### 5.3 离线报告入口
+语义：
+
+- 用户只通过 wrapper 发起 profiling 请求。
+- wrapper 为每个 pass 分配唯一目录，并向运行时注入 `VENTUS_PERF*` 环境变量。
+- runtime recorder 不负责决定 experiment / pass 生命周期，只负责把 canonical event 写到 wrapper 指定的 pass 目录。
+
+### 5.2 离线报告入口
 
 示例：
 
 ```bash
-tools/ventus_perf.py report <experiment-dir>
-tools/ventus_perf.py report <experiment-dir> --view timeline
-tools/ventus_perf.py report <experiment-dir> --view kernel
-tools/ventus_perf.py report <experiment-dir> --view profiler
+python3 tools/ventus_perf.py report <experiment-dir>
+python3 tools/ventus_perf.py report <pass-dir>
+python3 tools/ventus_perf.py report <experiment-dir> --view timeline
+python3 tools/ventus_perf.py report <experiment-dir> --view kernel
+python3 tools/ventus_perf.py report <experiment-dir> --view profiler
 ```
+
+语义：
+
+- 当输入是 `experiment-dir` 时，reporter 读取 `experiment.json` 与 `actual_passes` 作为权威索引。
+- 当输入是单个 `pass-dir` 时，该目录也必须来自 wrapper-managed experiment：
+  - 至少包含 wrapper 写出的 `pass.begin.json` 或 `pass.json`
+  - 不伪造完整 experiment 生命周期
+  - 仍产出该 pass 的 `summary` / `timeline` / `kernel` 视图
+  - 报告文件固定写入 `<pass-dir>/reports/`
 
 ## 6. 数据模型
 
@@ -265,7 +296,7 @@ reporter 规则：
   - experiment 视为 `incomplete`
   - reporter 只允许做 best-effort 报告
 - 只有 `experiment.json` 且 `finalized=true` 时，才视为完整 experiment
-- `actual_passes` 是 wrapper 与 reporter 之间的唯一权威 pass 索引，不允许各组件自行扫描目录推断 pass 顺序
+- `actual_passes` 是 wrapper-managed experiment 与 reporter 之间的唯一权威 pass 索引，不允许各组件自行扫描目录推断 pass 顺序
 
 ### 6.2 pass
 
@@ -291,11 +322,29 @@ reporter 规则：
 建议文件：
 
 - `pass.begin.json`
-  - 启动时立即写出
+  - 在子进程成功 spawn 并拿到 `pid` 后由 wrapper 立即写出
   - 记录 pass 的初始上下文
 - `pass.json`
-  - 结束时原子写出
+  - 结束时由 wrapper 原子写出
   - 是 reporter 认定 pass 完整性的唯一完成态文件
+
+补充约束：
+
+- 所有受支持的 pass 都属于 wrapper-managed experiment。
+- runtime recorder 不写 `pass.begin.json` / `pass.json` 这两个权威 manifest。
+- wrapper-managed pass 的权威完成态始终由 wrapper 写入，不依赖进程内 teardown。
+- 如果 wrapper 在 spawn 前就失败，允许直接写终态 `pass.json`：
+  - `state=failed`
+  - `finalized=true`
+  - `pid` 留空或省略
+  - `pass.begin.json` 可以不存在
+- 因此 `pid` 对“成功 spawn 过的 pass”是必填，对“spawn 前失败”的终态记录不是强制字段。
+- wrapper 必须在 spawn 前就准备好：
+  - `experiment_id`
+  - `pass_id`
+  - `pass_type`
+  - `VENTUS_PERF_OUT_DIR`
+- 如果 runtime 在 `VENTUS_PERF=1` 下缺少这些 wrapper 注入的关键字段，初始化必须显式失败，而不是偷偷退回“无 experiment / 无 manifest”的临时模式。
 
 建议 `pass.begin.json` / `pass.json` 字段至少包含：
 
@@ -324,7 +373,11 @@ reporter 规则：
 - `event_counts`
 - `artifact_paths`
 - `recorder_errors`
-- `concurrency_detected`
+
+其中：
+
+- `concurrency_detected` 不属于 pass lifecycle 的权威事实字段。
+- 如需缓存，可作为 reporter 生成的派生摘要附加到 `pass.json` 或单独 report 文件中，但权威判断必须来自离线 report 重新计算。
 
 其中 `profile_target` 用于 profiler pass 的目标声明，建议包含：
 
@@ -352,6 +405,10 @@ reporter 规则：
   - 相关 JSONL 视为可能截断
 - 只有 `pass.json` 且 `finalized=true` 时，才视为完整完成态
 - `state=signaled` 或 `state=failed` 的 pass 仍可保留部分事件，reporter 应展示但不得与正常 measured pass 混为一谈
+- 单 pass 报告输入也必须来自 wrapper-managed pass 目录：
+  - `pass.json` + `events.*.jsonl`
+  - 或 `pass.begin.json` + `events.*.jsonl`
+- 若缺少权威 manifest，只能视为 wrapper-managed pass 的不完整目录，而不是另一种独立运行模式
 
 ### 6.3 trace event
 
@@ -389,10 +446,15 @@ reporter 规则：
 
 - `event_id`
   - 在单个 pass 内唯一
+  - 必须视为 opaque id，reporter 不得依赖字符串解析其来源
+  - 必须包含 producer/process 实例身份，不能只是 `<stream>-<pid>-<seq>` 这类会在多 DSO / 多子进程下碰撞的局部计数
+  - 建议格式为 `<stream>-<pid>-<producer_instance>-evt-<seq>`
 - `parent_event_id`
   - 显式表示嵌套关系；无父事件时为空
 - `scope_id`
   - 用于把一组语义相关事件绑定到同一个逻辑 scope
+  - 同样必须视为 opaque id，并携带 producer/process 实例身份
+  - 建议格式为 `<stream>-<pid>-<producer_instance>-scope-<seq>` 或显式传播得到的上游 scope id
 - `queue_id`
   - 可选；用于保留未来多 command queue 事实
 - `stream` 用于区分来源，例如：
@@ -429,6 +491,28 @@ reporter 规则：
 
 表示从 experiment 的多个 pass 中离线生成的人类视图与机器可读摘要。
 
+建议至少包含：
+
+- `best_effort`
+- `concurrency_detected`
+- `measured_pass_count`
+- `input_kind`
+  - `experiment`
+  - `pass`
+- `summary`
+  - `wall_time_ns`
+  - `top_level_total_ns`
+  - `buckets`
+  - `sub_buckets`
+- `timeline`
+- `kernels`
+
+约束：
+
+- `concurrency_detected` 的权威值由 reporter 根据 canonical event 重新计算。
+- `sub_buckets` 是顶层 bucket 的 drill-down，不得与顶层总和重复累计。
+- 当输入是单个 `pass` 时，报告文件写入 `<pass-dir>/reports/`。
+
 ## 7. 目录结构
 
 推荐 experiment 目录结构如下：
@@ -443,8 +527,8 @@ build/ventus-perf/<experiment-id>/
       pass.json
       events.pocl.jsonl
       events.vt.jsonl
-      events.sbt_ptx.jsonl
-      events.cuda.jsonl
+      events.sbt_ptx.jsonl   # optional; Phase 1 may omit this when only parent-side SBT wall time is measured
+      events.cuda.jsonl   # optional, only when a CUDA API shim is explicitly enabled
       events.sim.jsonl
       stdout.log
       stderr.log
@@ -467,7 +551,7 @@ build/ventus-perf/<experiment-id>/
     summary.json
     timeline.json
     kernels.json
-    profiler.json
+    profiler.json   # optional, only when profiler passes are present
 ```
 
 ### 7.1 `VENTUS_PERF_OUT_DIR`
@@ -483,7 +567,12 @@ build/ventus-perf/<experiment-id>/
 
 - 一次 pass 会产出多路日志与 artifact
 - 多次复测需要天然隔离，避免覆盖
-- wrapper 与手工运行都可复用同一个接口
+- wrapper 可以用同一个接口驱动所有 runtime producer
+
+补充约束：
+
+- `VENTUS_PERF_OUT_DIR` 由 wrapper 分配并注入。
+- 不再支持“用户手工指定若干环境变量后直接运行程序”作为文档承诺的使用方式。
 
 ### 7.2 覆盖策略
 
@@ -504,18 +593,28 @@ build/ventus-perf/<experiment-id>/
 - `buffer_write`
 - `buffer_read`
 
-当调用落到 `vt_*` 层时，继承当前 scope 信息。
+当调用落到 `vt_*` 层时，需要尽可能保留上层语义关联。
 
 建议实现：
 
 - 线程局部上下文
 - RAII scope guard
+- 显式上下文快照传播
+- sideband perf context API
 
 避免事后通过时间猜测上层语义。
 
 补充要求：
 
 - 线程局部上下文只能解决“当前线程的语义 scope 继承”
+- 如果 PoCL 与 driver 位于不同已链接模块，Phase 1 不得假设它们天然共享同一份 `thread_local` scope 栈
+- 跨模块调用边界必须传播正式上下文字段，至少包括：
+  - `launch_seq`
+  - `kernel_name`
+  - `kernel_occurrence`
+  - `kernel_signature_hash`
+  - 可选 `scope_id` / `parent_event_id`
+- 推荐通过独立于 `vt_*` 主调用签名的 sideband API 传播，而不是挤占 `taskID` / `kernelID` 语义槽位
 - reporter 不得假设所有关键事件都来自单一线程
 - 如未来出现多 host thread / 多 queue，事件层级必须依赖 `event_id` / `parent_event_id` / `scope_id`，而不是只依赖时间邻近
 
@@ -618,7 +717,7 @@ reporter 优先使用以下键做“聚合相关性”判断，而不是默认�
 - 无显式多 command queue 并行 kernel
 - 无多个稳定可观察的 in-flight kernel
 
-一旦 recorder 检测到以下任意情况：
+一旦 reporter 检测到以下任意情况：
 
 - 不同线程上的重叠 `kernel_prepare` / `kernel_exec_wait`
 - 同一设备上重叠的多个 kernel wait window
@@ -700,6 +799,62 @@ reporter 优先使用以下键做“聚合相关性”判断，而不是默认�
 - `simulator_wait`
 - `nvidia_wait`
 
+对于 `ptx` / `sbtsim` 的 measured pass，Phase 1 的 machine-readable summary 也必须显式暴露这些 drill-down：
+
+- `summary.sub_buckets.kernel_prepare`
+- `summary.sub_buckets.kernel_exec_wait`
+
+避免出现“埋了细粒度事件但 report 契约没有对应出口”的情况。
+
+### 9.4A Phase 1 归因映射规则
+
+为避免不同实现对 `kernel_prepare` / `kernel_exec_wait` 各自脑补，Phase 1 必须固定以下口径：
+
+- reporter 先按 `launch_seq` 聚合同一 invocation 的候选事件；只有缺少 `launch_seq` 时，才允许退回到显式传播的 `scope_id` / `parent_event_id` 做保守拼装
+- 顶层 attribution 只对互斥 span 求和，不直接对原始嵌套事件求和
+- `h2d` 的原始候选事件包括：
+  - `buffer_write`
+  - `buffer_copy` 中明确 host -> device 的部分
+  - `vt_copy_to_dev`
+  - `cuMemcpyHtoD`
+- `d2h` 的原始候选事件包括：
+  - `buffer_read`
+  - `vt_copy_from_dev`
+  - `cuMemcpyDtoH`
+- `kernel_prepare` 的原始候选事件包括：
+  - `kernel_arg_pack`
+  - `kernel_arg_upload`
+  - `kernel_elf_upload`
+  - `kernel_metadata_upload`
+  - `kernel_submit`
+  - `vt_start`
+  - `generate_ptx_via_sbt`
+  - `read_generated_ptx`
+  - `cuModuleLoadDataEx`
+  - `cuModuleGetFunction`
+  - `cuLaunchKernel`
+- `kernel_exec_wait` 的原始候选事件包括：
+  - `kernel_wait`
+  - `vt_ready_wait`
+  - `cuCtxSynchronize`
+- `teardown` 只承载明确发生在 pass 尾部、且不属于上面各桶的收尾事件；其余未覆盖时间进入 `uncategorized`
+
+Phase 1 的 span 生成规则：
+
+- 单次 invocation 的 `kernel_prepare` span 定义为：同一 `launch_seq` 下所有 prepare 候选事件的并集，且必须截断在对应 wait span 之前
+- 单次 invocation 的 `kernel_exec_wait` span 定义为：同一 `launch_seq` 下 wait 候选事件的并集
+- 当 `vt_ready_wait` 与 `cuCtxSynchronize` 同时存在时：
+  - 顶层 `kernel_exec_wait` 只计一次互斥 wait span
+  - `cuCtxSynchronize` 作为 `summary.sub_buckets.kernel_exec_wait` 的 drill-down 事实，不得再重复累计到顶层总和
+- 当 `vt_start` 与更细粒度的 `generate_ptx_via_sbt` / `cuModuleLoadDataEx` / `cuLaunchKernel` 同时存在时：
+  - 顶层 `kernel_prepare` 只计一次互斥 prepare span
+  - 更细事件只用于 `summary.sub_buckets.kernel_prepare`
+
+并发检测规则也必须绑定到上述派生 span，而不是直接拿所有原始事件做名字匹配：
+
+- `concurrency_detected=true` 的判断基于派生后的 `kernel_prepare` / `kernel_exec_wait` span 是否发生重叠
+- 若原始事件不足以稳定派生这些 span，reporter 必须进入保守模式并扩大 `uncategorized`
+
 ### 9.5 归因闭合原则
 
 - 顶层桶的总和尽量逼近 wall time
@@ -736,6 +891,7 @@ reporter 优先使用以下键做“聚合相关性”判断，而不是默认�
 
 位置：
 
+- [`driver/driver/auto_select/ventus.cpp`](../../../driver/driver/auto_select/ventus.cpp)
 - [`driver/driver/ptx_device/ventus.cpp`](../../../driver/driver/ptx_device/ventus.cpp)
 - [`driver/driver/cyclesim_device/ventus.cpp`](../../../driver/driver/cyclesim_device/ventus.cpp)
 - [`driver/driver/rtlsim_device/ventus.cpp`](../../../driver/driver/rtlsim_device/ventus.cpp)
@@ -754,6 +910,7 @@ reporter 优先使用以下键做“聚合相关性”判断，而不是默认�
 作用：
 
 - 提供跨 backend 的统一事件基线
+- 对于经 `auto_select` 动态转发的调用链，还负责保证 sideband perf context API 不被中途丢失
 
 ### 10.3 `ptx` / `sbtsim` 内部细分
 
@@ -761,7 +918,7 @@ reporter 优先使用以下键做“聚合相关性”判断，而不是默认�
 
 位置：[`sbtsim/tools/sbt_ptx.cpp`](../../../sbtsim/tools/sbt_ptx.cpp)
 
-建议细化为：
+完整设计下可细化为：
 
 - `cache_lookup`
 - `elf_read`
@@ -781,6 +938,12 @@ reporter 优先使用以下键做“聚合相关性”判断，而不是默认�
   - 或由 wrapper / adapter 将 legacy JSONL 转换为 canonical event
 - 但 reporter 只能消费 canonical event，不能同时混吃两套来源
 
+Phase 1 收敛约束：
+
+- Phase 1 不要求深入改造 `sbt_ptx` 内部源码来产出这些细粒度事件
+- Phase 1 只要求父进程在 `ptx_device` 侧把整个子进程转译耗时记录为一个 `generate_ptx_via_sbt` span
+- 因此 Phase 1 的 correctness 不依赖 `events.sbt_ptx.jsonl`
+
 #### `ptx_device`
 
 位置：[`driver/driver/ptx_device/ventus.cpp`](../../../driver/driver/ptx_device/ventus.cpp)
@@ -798,7 +961,10 @@ reporter 优先使用以下键做“聚合相关性”判断，而不是默认�
 
 #### CUDA Driver API
 
-位置：[`sbtsim/tools/cuda_trace.cpp`](../../../sbtsim/tools/cuda_trace.cpp)
+位置：
+
+- [`driver/driver/ptx_device/ventus.cpp`](../../../driver/driver/ptx_device/ventus.cpp)
+- [`sbtsim/tools/cuda_trace.cpp`](../../../sbtsim/tools/cuda_trace.cpp)
 
 建议记录：
 
@@ -810,6 +976,12 @@ reporter 优先使用以下键做“聚合相关性”判断，而不是默认�
 - `cuModuleLoadDataEx`
 - `cuLaunchKernel`
 - `cuCtxSynchronize`
+
+口径要求：
+
+- Phase 1 的 canonical CUDA-facing facts 以 `ptx_device` 直接产出的 `cu*` 事件为主，不要求为了补齐同名事件而强制引入 `cuda_trace` shim
+- 如果未来显式启用 `cuda_trace`，则必须保证同一事实只保留一套 canonical 来源，不能让 `ptx_device` 直写事件与 shim 事件在 reporter 里双重入账
+- 因此同一 pass 中，`cuModuleLoadDataEx` / `cuLaunchKernel` / `cuCtxSynchronize` 这类事实要么来自 driver 直接埋点，要么来自 shim 适配后的 canonical 事件，不允许两套来源同时作为权威事实参与求和
 
 兼容 / 迁移要求：
 
@@ -904,7 +1076,8 @@ wrapper 负责注入 `LD_PRELOAD` 时，必须定义稳定组合规则。
 针对不同 pass 的规则：
 
 - baseline measured pass
-  - 允许启用 perf 所需 shim，例如 `cuda_trace`
+  - 可按实现需要启用 perf 所需 shim，例如 `cuda_trace`
+  - 但 Phase 1 不以“必须启用 `cuda_trace`”作为 correctness 前提
 - `nsys` / `ncu` pass
   - 默认不额外挂 `cuda_trace` 这类 API 拦截 shim，避免双重拦截与额外扰动
   - 仍保留内部 recorder 与显式事件埋点
@@ -977,7 +1150,7 @@ report 中分开两个语义区：
 - 写入 `reports/summary.txt`
 - 打印到 stdout
 
-summary 应尽量短，但保证最有用，至少包含：
+summary 应尽量短，但保证最有用。对于 baseline-only experiment，至少包含：
 
 - experiment 元信息
 - command
@@ -986,6 +1159,9 @@ summary 应尽量短，但保证最有用，至少包含：
 - wall time 均值 / 最小 / 最大 / 标准差
 - 顶层 attribution 桶
 - kernel invocation 摘要
+
+如果 experiment 中包含 profiler pass，则额外包含：
+
 - profiler supplement 摘要
 
 ### 12.2 `summary` 视图
@@ -1037,7 +1213,7 @@ summary 应尽量短，但保证最有用，至少包含：
 - `reports/summary.json`
 - `reports/timeline.json`
 - `reports/kernels.json`
-- `reports/profiler.json`
+- `reports/profiler.json`（仅当 experiment 中存在 profiler pass 时必需）
 
 理由：
 
@@ -1046,22 +1222,10 @@ summary 应尽量短，但保证最有用，至少包含：
 
 ## 14. 推荐默认行为
 
-### 14.1 单次运行
+### 14.1 wrapper 编排
 
 ```bash
-VENTUS_PERF=1 ./run
-```
-
-行为：
-
-- 自动创建唯一 pass 目录
-- 打印该目录路径
-- 运行结束后打印最简短 summary
-
-### 14.2 wrapper 编排
-
-```bash
-tools/ventus_perf.py run -- ./run
+python3 tools/ventus_perf.py run -- ./run
 ```
 
 默认建议：
@@ -1078,19 +1242,19 @@ tools/ventus_perf.py run -- ./run
 - baseline attribution 默认路径：
 
 ```bash
-tools/ventus_perf.py run -- ./run
+python3 tools/ventus_perf.py run -- ./run
 ```
 
 - PTX backend 的 profiler supplement 路径：
 
 ```bash
-tools/ventus_perf.py run --profile nsys -- ./run
+python3 tools/ventus_perf.py run --profile nsys -- ./run
 ```
 
-### 14.3 离线查看
+### 14.2 离线查看
 
 ```bash
-tools/ventus_perf.py report <experiment-dir>
+python3 tools/ventus_perf.py report <experiment-dir>
 ```
 
 默认输出 `summary` 视图。
@@ -1102,14 +1266,15 @@ tools/ventus_perf.py report <experiment-dir>
 范围：
 
 - 统一 runtime recorder
-- `VENTUS_PERF` / `VENTUS_PERF_OUT_DIR`
-- PoCL 层、`vt_*` 层、`ptx_device` / `sbt_ptx` 的关键事件
+- wrapper 注入的 `VENTUS_PERF*` runtime contract
+- PoCL 层、`vt_*` 层、`ptx_device` 的关键事件
 - 基础 wrapper
 - summary / timeline / kernel report
 
 目标：
 
 - 在不引入外部 profiler 的情况下，完成 baseline wall attribution
+- 对 `ptx` 路径，Phase 1 以 `ptx_device` 直写的 `cu*` 事件兑现 launch / sync / JIT 细分；`sbt_ptx` 内部细粒度拆分、`cuda_trace` shim 与 `profiler.json` 进入后续 phase
 
 ### Phase 2：simulator 特有细分与多 backend 对齐
 
@@ -1179,7 +1344,7 @@ tools/ventus_perf.py report <experiment-dir>
 
 本设计最终采用以下方案：
 
-- 入口：环境变量 + wrapper 并存
+- 用户入口：wrapper；`VENTUS_PERF*` 环境变量仅作为内部控制面
 - 原始记录：per-pass 目录下的结构化 JSONL / JSON
 - 组织模型：`experiment -> pass -> event/artifact -> report`
 - 关联方式：显式上下文传播 + local `launch_seq` + parent/child anchor + 保守的 profiler target 规则

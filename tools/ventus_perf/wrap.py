@@ -40,6 +40,7 @@ def build_perf_env(
 ) -> dict[str, str]:
     env = dict(base_env)
     env["VENTUS_PERF"] = "1"
+    env["VENTUS_PERF_DETAIL"] = env.get("VENTUS_PERF_DETAIL", "default")
     env["VENTUS_PERF_EXPERIMENT_ID"] = experiment_id
     env["VENTUS_PERF_PASS_ID"] = pass_id
     env["VENTUS_PERF_PASS_TYPE"] = pass_type
@@ -115,6 +116,7 @@ def summarize_perf_env(env: dict[str, str]) -> dict[str, str]:
     keys = [
         "VENTUS_BACKEND",
         "VENTUS_PERF",
+        "VENTUS_PERF_DETAIL",
         "VENTUS_PERF_EXPERIMENT_ID",
         "VENTUS_PERF_PASS_ID",
         "VENTUS_PERF_PASS_TYPE",

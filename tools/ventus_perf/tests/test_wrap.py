@@ -9,6 +9,16 @@ from ventus_perf import wrap as ventus_perf_wrap
 
 
 class ChildContextTests(unittest.TestCase):
+    def test_build_perf_env_defaults_to_default_detail(self) -> None:
+        env = ventus_perf_wrap.build_perf_env(
+            {"PATH": os.environ["PATH"], "VENTUS_BACKEND": "ptx"},
+            experiment_id="exp-test",
+            pass_id="measure-0001",
+            pass_type="measure",
+            pass_dir=pathlib.Path("/tmp/ventus-pass"),
+        )
+        self.assertEqual(env["VENTUS_PERF_DETAIL"], "default")
+
     def test_phase1_rejects_unsupported_backend(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported backend"):
             ventus_perf_wrap.validate_phase1_backend("spike")
@@ -45,6 +55,7 @@ class ChildContextTests(unittest.TestCase):
             self.assertTrue((pass_dir / "pass.begin.json").exists())
             self.assertTrue((pass_dir / "pass.json").exists())
             self.assertIn("stdout.log", manifest["stdout_path"])
+            self.assertEqual(manifest["env_summary"]["VENTUS_PERF_DETAIL"], "default")
 
     def test_build_runtime_env_bootstraps_ventus_defaults(self) -> None:
         env = ventus_perf_wrap.build_runtime_env({"PATH": "/usr/bin"})

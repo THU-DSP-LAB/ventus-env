@@ -123,23 +123,37 @@ def _group_kernel_windows(pass_events: list[dict]) -> dict[int, dict[str, object
     return groups
 
 
-def _detect_concurrency(pass_events: list[dict]) -> tuple[bool, int]:
-    groups = _group_kernel_windows(pass_events)
-    windows = []
-    for launch_seq, group in groups.items():
+def _detect_concurrency(kernel_groups: dict[int, dict[str, object]]) -> tuple[bool, int]:
+    markers: list[tuple[int, int, int]] = []
+    for launch_seq, group in kernel_groups.items():
         for start, end in group["launch_intervals"]:
-            windows.append((launch_seq, start, end))
+            markers.append((start, 1, launch_seq))
+            markers.append((end, -1, launch_seq))
         for start, end in group["wait_intervals"]:
-            windows.append((launch_seq, start, end))
+            markers.append((start, 1, launch_seq))
+            markers.append((end, -1, launch_seq))
+    if not markers:
+        return False, 0
+    markers.sort(key=lambda item: (item[0], item[1]))
+    active_counts: dict[int, int] = {}
+    active_sequences = 0
     overlap_ns = 0
-    for index, (lhs_seq, lhs_start, lhs_end) in enumerate(windows):
-        for rhs_seq, rhs_start, rhs_end in windows[index + 1 :]:
-            if lhs_seq == rhs_seq:
-                continue
-            overlap_start = max(lhs_start, rhs_start)
-            overlap_end = min(lhs_end, rhs_end)
-            if overlap_end > overlap_start:
-                overlap_ns += overlap_end - overlap_start
+    previous_ts = markers[0][0]
+    for ts, delta, launch_seq in markers:
+        if active_sequences > 1 and ts > previous_ts:
+            overlap_ns += ts - previous_ts
+        count = active_counts.get(launch_seq, 0)
+        if delta < 0:
+            if count == 1:
+                active_sequences -= 1
+                active_counts.pop(launch_seq, None)
+            else:
+                active_counts[launch_seq] = count - 1
+        else:
+            if count == 0:
+                active_sequences += 1
+            active_counts[launch_seq] = count + 1
+        previous_ts = ts
     return overlap_ns > 0, overlap_ns
 
 
@@ -170,7 +184,7 @@ def _build_pass_summary(pass_manifest: dict, pass_events: list[dict]) -> dict:
     for bucket in DERIVED_BUCKETS:
         buckets[bucket] = _interval_duration(intervals[bucket])
     wall_time_ns = _pass_duration_ns(pass_manifest, pass_events)
-    concurrency_detected, overlap_ns = _detect_concurrency(pass_events)
+    concurrency_detected, overlap_ns = _detect_concurrency(kernel_groups)
     known_total = sum(buckets[bucket] for bucket in TOP_LEVEL_BUCKETS if bucket != "uncategorized")
     uncategorized = max(wall_time_ns - known_total, 0)
     if concurrency_detected:

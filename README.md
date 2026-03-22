@@ -80,6 +80,32 @@ The following environment variables adjust simulation behavior:
 * `NUM_THREAD=32` — Number of threads per warp reported by the POCL device. For `rtlsim`/`cyclesim`, this should match hardware specs; for `spike`, any value is acceptable.
 * `NUM_WARP=8` — Max warps per thread block reported by the POCL device. For `rtlsim`/`cyclesim`, match hardware specs; for `spike`, any value is acceptable.
 
+### Performance Attribution for PTX Backend
+
+Use `tools/ventus_perf.py` to run a wrapper-managed PTX performance pass and generate offline reports:
+
+```bash
+source env.sh
+export VENTUS_BACKEND=ptx
+
+python3 tools/ventus_perf.py run --repeat 1 -- ./run
+```
+
+The wrapper creates an experiment directory under `build/ventus-perf/<experiment-id>/` and writes:
+
+* per-pass manifests such as `pass.begin.json` and `pass.json`
+* canonical event logs such as `events.pocl.jsonl` and `events.vt.jsonl`
+* offline reports under `reports/`
+
+To re-render reports from an existing experiment or a single wrapper-managed pass:
+
+```bash
+python3 tools/ventus_perf.py report build/ventus-perf/<experiment-id>/
+python3 tools/ventus_perf.py report build/ventus-perf/<experiment-id>/passes/measure-0001/
+```
+
+Phase 1 currently supports only the `ptx` / `sbtsim` path. Unsupported backends are rejected explicitly by the wrapper.
+
 ## Testing
 
 ### Test Suites & Regression

@@ -1,5 +1,7 @@
+import json
 import pathlib
 import subprocess
+import tempfile
 import unittest
 
 from ventus_perf import report as ventus_perf_report
@@ -104,6 +106,26 @@ class SummaryViewTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
         self.assertIn("ventus_perf.report", proc.stdout)
+
+    def test_write_report_outputs_also_writes_perfetto_trace(self) -> None:
+        report = ventus_perf_report.load_input_report(MINIMAL_FIXTURE)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            work_dir = pathlib.Path(tmpdir) / "experiment"
+            work_dir.mkdir()
+
+            output_dir = ventus_perf_report.write_report_outputs(work_dir, report)
+
+            perfetto_path = output_dir / "perfetto.json"
+            self.assertTrue(perfetto_path.exists())
+            payload = pathlib.Path(perfetto_path).read_text(encoding="utf-8")
+            trace = json.loads(payload)
+            self.assertIn("traceEvents", trace)
+            self.assertGreater(len(trace["traceEvents"]), 0)
+            complete_events = [event for event in trace["traceEvents"] if event.get("ph") == "X"]
+            metadata_events = [event for event in trace["traceEvents"] if event.get("ph") == "M"]
+            self.assertGreater(len(complete_events), 0)
+            self.assertGreater(len(metadata_events), 0)
 
 
 if __name__ == "__main__":

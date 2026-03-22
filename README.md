@@ -95,7 +95,7 @@ The wrapper creates an experiment directory under `build/ventus-perf/<experiment
 
 * per-pass manifests such as `pass.begin.json` and `pass.json`
 * canonical event logs such as `events.pocl.jsonl` and `events.vt.jsonl`
-* offline reports under `reports/`
+* offline reports under `reports/`, including raw `timeline.json` and Perfetto-compatible `perfetto.json`
 
 To re-render reports from an existing experiment or a single wrapper-managed pass:
 

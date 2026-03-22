@@ -82,6 +82,7 @@ class CliTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
+            self.assertTrue((work_dir / "reports" / "perfetto.json").exists())
         self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
         self.assertIn("Baseline Attribution", proc.stdout)
 

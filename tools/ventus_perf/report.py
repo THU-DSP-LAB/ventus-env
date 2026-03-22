@@ -40,6 +40,81 @@ NS_PER_MS = 1_000_000
 NS_PER_S = 1_000_000_000
 
 
+def _render_perfetto_metadata_event(pid: int, tid: int, name: str, value: str) -> dict:
+    return {
+        "ph": "M",
+        "pid": pid,
+        "tid": tid,
+        "name": name,
+        "args": {"name": value},
+    }
+
+
+def _render_perfetto_complete_event(event: dict, pid: int, tid: int) -> dict:
+    duration_ns = int(event["ts_end_ns"]) - int(event["ts_start_ns"])
+    return {
+        "ph": "X",
+        "name": str(event["event_type"]),
+        "cat": str(event.get("stream") or "unknown"),
+        "ts": int(event["ts_start_ns"]) / NS_PER_US,
+        "dur": duration_ns / NS_PER_US,
+        "pid": pid,
+        "tid": tid,
+        "args": {
+            "event_id": event.get("event_id"),
+            "parent_event_id": event.get("parent_event_id"),
+            "pass_id": event.get("pass_id"),
+            "pass_type": event.get("pass_type"),
+            "pass_state": event.get("pass_state"),
+            "stream": event.get("stream"),
+            "scope_id": event.get("scope_id"),
+            "queue_id": event.get("queue_id"),
+            "launch_seq": event.get("launch_seq"),
+            "kernel_occurrence": event.get("kernel_occurrence"),
+            "kernel_signature_hash": event.get("kernel_signature_hash"),
+            "kernel_name": event.get("kernel_name"),
+            "source_pid": event.get("pid"),
+            "source_tid": event.get("tid"),
+            "attrs": event.get("attrs", {}),
+        },
+    }
+
+
+def _render_perfetto_trace(passes: list[dict], events_by_pass: dict[str, list[dict]]) -> dict:
+    trace_events = []
+    pass_pid_map = {
+        pass_manifest["pass_id"]: index
+        for index, pass_manifest in enumerate(passes, start=1)
+    }
+    for pass_manifest in passes:
+        pass_id = pass_manifest["pass_id"]
+        pid = pass_pid_map[pass_id]
+        pass_events = events_by_pass.get(pass_id, [])
+        streams = sorted({str(event.get("stream") or "unknown") for event in pass_events})
+        stream_tid_map = {stream: index for index, stream in enumerate(streams, start=1)}
+        trace_events.append(_render_perfetto_metadata_event(pid, 0, "process_name", pass_id))
+        for stream, tid in stream_tid_map.items():
+            track_name = f"{pass_id}:{stream}"
+            trace_events.append(_render_perfetto_metadata_event(pid, tid, "thread_name", track_name))
+        sorted_events = sorted(
+            pass_events,
+            key=lambda event: (
+                int(event["ts_start_ns"]),
+                int(event["ts_end_ns"]),
+                str(event["event_type"]),
+                str(event.get("event_id") or ""),
+            ),
+        )
+        for event in sorted_events:
+            stream = str(event.get("stream") or "unknown")
+            tid = stream_tid_map[stream]
+            trace_events.append(_render_perfetto_complete_event(event, pid, tid))
+    return {
+        "traceEvents": trace_events,
+        "displayTimeUnit": "ns",
+    }
+
+
 def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     merged = []
     for start, end in sorted(intervals):
@@ -280,6 +355,7 @@ def load_input_report(input_dir: Path) -> dict:
         "concurrency_detected": concurrency_detected,
         "passes": passes,
         "timeline": [event for events in events_by_pass.values() for event in events],
+        "perfetto": _render_perfetto_trace(passes, events_by_pass),
         "kernels": _render_kernel_view(events_by_pass),
         "summary": {
             "wall_time_ns": wall_time_ns,
@@ -317,6 +393,10 @@ def write_report_outputs(input_dir: Path, report: dict) -> Path:
     )
     (output_dir / "timeline.json").write_text(
         json.dumps(report["timeline"], indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (output_dir / "perfetto.json").write_text(
+        json.dumps(report["perfetto"], indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     (output_dir / "kernels.json").write_text(

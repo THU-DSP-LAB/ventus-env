@@ -9,17 +9,22 @@ from ventus_perf.model import load_events_for_pass, load_input_manifests
 
 TOP_LEVEL_BUCKETS = (
     "host_overhead",
-    "h2d",
-    "kernel_prepare",
-    "kernel_exec_wait",
-    "d2h",
+    "memcpy_h2d",
+    "kernel_launch",
+    "kernel_wait",
+    "memcpy_d2h",
     "teardown",
     "uncategorized",
 )
 
-H2D_EVENTS = {"buffer_write", "buffer_copy", "buffer_fill", "map_mem", "vt_copy_to_dev"}
-D2H_EVENTS = {"buffer_read", "vt_copy_from_dev", "unmap_mem"}
-KERNEL_PREPARE_EVENTS = {
+MEMCPY_H2D_EVENTS = {"buffer_write", "buffer_copy", "buffer_fill", "map_mem", "vt_copy_to_dev"}
+MEMCPY_D2H_EVENTS = {"buffer_read", "vt_copy_from_dev", "unmap_mem"}
+KERNEL_LAUNCH_EVENTS = {
+    "kernel_submit",
+    "kernel_arg_pack",
+    "kernel_arg_upload",
+    "kernel_elf_upload",
+    "kernel_metadata_upload",
     "vt_start",
     "generate_ptx_via_sbt",
     "read_generated_ptx",
@@ -28,20 +33,27 @@ KERNEL_PREPARE_EVENTS = {
     "cuLaunchKernel",
 }
 KERNEL_WAIT_EVENTS = {"kernel_wait", "vt_ready_wait", "cuCtxSynchronize"}
+DERIVED_BUCKETS = ("memcpy_h2d", "kernel_launch", "kernel_wait", "memcpy_d2h")
+SUB_BUCKET_NAMES = ("kernel_launch", "kernel_wait")
 NS_PER_US = 1_000
 NS_PER_MS = 1_000_000
 NS_PER_S = 1_000_000_000
 
 
-def _interval_duration(intervals: list[tuple[int, int]]) -> int:
-    if not intervals:
-        return 0
+def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     merged = []
     for start, end in sorted(intervals):
         if not merged or start > merged[-1][1]:
             merged.append([start, end])
         else:
             merged[-1][1] = max(merged[-1][1], end)
+    return [(start, end) for start, end in merged]
+
+
+def _interval_duration(intervals: list[tuple[int, int]]) -> int:
+    if not intervals:
+        return 0
+    merged = _merge_intervals(intervals)
     return sum(end - start for start, end in merged)
 
 
@@ -50,14 +62,14 @@ def _extract_interval(event: dict) -> tuple[int, int]:
 
 
 def _bucket_for_event(event_type: str) -> str | None:
-    if event_type in H2D_EVENTS:
-        return "h2d"
-    if event_type in D2H_EVENTS:
-        return "d2h"
-    if event_type in KERNEL_PREPARE_EVENTS:
-        return "kernel_prepare"
+    if event_type in MEMCPY_H2D_EVENTS:
+        return "memcpy_h2d"
+    if event_type in MEMCPY_D2H_EVENTS:
+        return "memcpy_d2h"
+    if event_type in KERNEL_LAUNCH_EVENTS:
+        return "kernel_launch"
     if event_type in KERNEL_WAIT_EVENTS:
-        return "kernel_exec_wait"
+        return "kernel_wait"
     return None
 
 
@@ -85,18 +97,29 @@ def _group_kernel_windows(pass_events: list[dict]) -> dict[int, dict[str, object
                 "launch_seq": launch_seq,
                 "kernel_name": event.get("kernel_name"),
                 "events": [],
-                "prepare": [],
-                "wait": [],
+                "launch_candidates": [],
+                "wait_candidates": [],
             },
         )
         group["events"].append(event)
         bucket = _bucket_for_event(str(event["event_type"]))
-        if bucket == "kernel_prepare":
-            group["prepare"].append(_extract_interval(event))
-        elif bucket == "kernel_exec_wait":
-            group["wait"].append(_extract_interval(event))
+        if bucket == "kernel_launch":
+            group["launch_candidates"].append(_extract_interval(event))
+        elif bucket == "kernel_wait":
+            group["wait_candidates"].append(_extract_interval(event))
         if not group.get("kernel_name") and event.get("kernel_name"):
             group["kernel_name"] = event["kernel_name"]
+    for group in groups.values():
+        wait_candidates = list(group["wait_candidates"])
+        wait_intervals = _merge_intervals(wait_candidates)
+        wait_start_ns = min((start for start, _ in wait_intervals), default=None)
+        launch_intervals = []
+        for start, end in group["launch_candidates"]:
+            clipped_end = min(end, wait_start_ns) if wait_start_ns is not None else end
+            if clipped_end > start:
+                launch_intervals.append((start, clipped_end))
+        group["launch_intervals"] = _merge_intervals(launch_intervals)
+        group["wait_intervals"] = wait_intervals
     return groups
 
 
@@ -104,16 +127,10 @@ def _detect_concurrency(pass_events: list[dict]) -> tuple[bool, int]:
     groups = _group_kernel_windows(pass_events)
     windows = []
     for launch_seq, group in groups.items():
-        prepare = group["prepare"]
-        wait = group["wait"]
-        if prepare:
-            starts = [start for start, _ in prepare]
-            ends = [end for _, end in prepare]
-            windows.append((launch_seq, min(starts), max(ends)))
-        if wait:
-            starts = [start for start, _ in wait]
-            ends = [end for _, end in wait]
-            windows.append((launch_seq, min(starts), max(ends)))
+        for start, end in group["launch_intervals"]:
+            windows.append((launch_seq, start, end))
+        for start, end in group["wait_intervals"]:
+            windows.append((launch_seq, start, end))
     overlap_ns = 0
     for index, (lhs_seq, lhs_start, lhs_end) in enumerate(windows):
         for rhs_seq, rhs_start, rhs_end in windows[index + 1 :]:
@@ -127,7 +144,7 @@ def _detect_concurrency(pass_events: list[dict]) -> tuple[bool, int]:
 
 
 def _summarize_sub_buckets(pass_events: list[dict]) -> dict[str, dict[str, int]]:
-    sub_buckets = {"kernel_prepare": {}, "kernel_exec_wait": {}}
+    sub_buckets = {bucket_name: {} for bucket_name in SUB_BUCKET_NAMES}
     for event in pass_events:
         event_type = str(event["event_type"])
         bucket = _bucket_for_event(event_type)
@@ -141,12 +158,16 @@ def _summarize_sub_buckets(pass_events: list[dict]) -> dict[str, dict[str, int]]
 def _build_pass_summary(pass_manifest: dict, pass_events: list[dict]) -> dict:
     buckets = {bucket: 0 for bucket in TOP_LEVEL_BUCKETS}
     intervals = {bucket: [] for bucket in TOP_LEVEL_BUCKETS}
+    kernel_groups = _group_kernel_windows(pass_events)
     for event in pass_events:
         bucket = _bucket_for_event(str(event["event_type"]))
-        if bucket is None:
+        if bucket not in {"memcpy_h2d", "memcpy_d2h"}:
             continue
         intervals[bucket].append(_extract_interval(event))
-    for bucket in ("h2d", "kernel_prepare", "kernel_exec_wait", "d2h"):
+    for group in kernel_groups.values():
+        intervals["kernel_launch"].extend(group["launch_intervals"])
+        intervals["kernel_wait"].extend(group["wait_intervals"])
+    for bucket in DERIVED_BUCKETS:
         buckets[bucket] = _interval_duration(intervals[bucket])
     wall_time_ns = _pass_duration_ns(pass_manifest, pass_events)
     concurrency_detected, overlap_ns = _detect_concurrency(pass_events)
@@ -218,7 +239,7 @@ def load_input_report(input_dir: Path) -> dict:
     }
     wall_times = [summary["wall_time_ns"] for summary in pass_summaries.values()]
     aggregate_buckets = {bucket: 0 for bucket in TOP_LEVEL_BUCKETS}
-    aggregate_sub_buckets = {"kernel_prepare": {}, "kernel_exec_wait": {}}
+    aggregate_sub_buckets = {bucket_name: {} for bucket_name in SUB_BUCKET_NAMES}
     for summary in pass_summaries.values():
         for bucket, value in summary["buckets"].items():
             aggregate_buckets[bucket] += value

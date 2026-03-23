@@ -2,6 +2,7 @@
 .metals/
 .cache/
 .vscode/
+build/
 install/
 regression-test-logs/
 rodinia_data.tar.xz

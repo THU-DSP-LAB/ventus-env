@@ -260,20 +260,16 @@ class SummaryViewTests(unittest.TestCase):
             [{"kernel_name": "profiler_kernel", "gpu_time_ns": 110}],
         )
 
-    def test_repo_root_invocation_can_import_report_module(self) -> None:
+    def test_new_entrypoint_help_works_from_repo_root(self) -> None:
         proc = subprocess.run(
-            [
-                "python3",
-                "-c",
-                "from ventus_perf import report; print(report.__name__)",
-            ],
+            ["python3", "tools/ventus-perf.py", "--help"],
             cwd=pathlib.Path(__file__).resolve().parents[3],
             check=False,
             capture_output=True,
             text=True,
         )
         self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
-        self.assertIn("ventus_perf.report", proc.stdout)
+        self.assertIn("Run wrapper-managed Ventus perf passes", proc.stdout)
 
     def test_write_report_outputs_also_writes_perfetto_trace(self) -> None:
         report = ventus_perf_report.load_input_report(MINIMAL_FIXTURE)

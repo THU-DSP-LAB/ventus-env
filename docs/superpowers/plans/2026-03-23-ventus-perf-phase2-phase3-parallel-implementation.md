@@ -259,9 +259,9 @@ Preferred verification commands after implementation:
 
 ```bash
 source env.sh
-VENTUS_BACKEND=cyclesim timeout 60s python3 tools/ventus_perf.py run --warmup 0 --repeat 1 -- ./pocl/build/examples/matadd/matadd
-VENTUS_BACKEND=rtlsim timeout 60s python3 tools/ventus_perf.py run --warmup 0 --repeat 1 -- ./pocl/build/examples/matadd/matadd
-VENTUS_BACKEND=spike timeout 60s python3 tools/ventus_perf.py run --warmup 0 --repeat 1 -- ./pocl/build/examples/matadd/matadd
+VENTUS_BACKEND=cyclesim timeout 60s python3 tools/ventus-perf.py run --warmup 0 --repeat 1 -- ./pocl/build/examples/matadd/matadd
+VENTUS_BACKEND=rtlsim timeout 60s python3 tools/ventus-perf.py run --warmup 0 --repeat 1 -- ./pocl/build/examples/matadd/matadd
+VENTUS_BACKEND=spike timeout 60s python3 tools/ventus-perf.py run --warmup 0 --repeat 1 -- ./pocl/build/examples/matadd/matadd
 ```
 
 Expected before implementation: unsupported-backend rejection or missing canonical events.
@@ -302,7 +302,7 @@ git commit -m "feat: add ventus perf baseline support for simulator backends"
 ### Task 4: Implement Phase 3 CLI and wrapper orchestration for profiler passes
 
 **Files:**
-- Modify: `tools/ventus_perf.py`
+- Modify: `tools/ventus-perf.py`
 - Modify: `tools/ventus_perf/cli.py`
 - Modify: `tools/ventus_perf/model.py`
 - Modify: `tools/ventus_perf/wrap.py`
@@ -334,7 +334,7 @@ Expected: FAIL because CLI parsing and wrapper orchestration do not yet support 
 Implementation requirements:
 
 - Extend `cli.py` with `--profile` and `--ncu-kernel`
-- Keep `tools/ventus_perf.py` as the only user-facing entry script
+- Keep `tools/ventus-perf.py` as the only user-facing entry script
 - In `wrap.py`, schedule extra `nsys` / `ncu` passes as separate pass directories with authoritative `pass.begin.json` / `pass.json`
 - Record tool-not-found and non-zero-exit cases as explicit failed passes
 - Restrict profiler passes to PTX-family backends for this phase
@@ -352,7 +352,7 @@ Expected: PASS for profiler scheduling and explicit-failure tests.
 - [ ] **Step 5: Commit the profiler orchestration**
 
 ```bash
-git add tools/ventus_perf.py tools/ventus_perf/cli.py tools/ventus_perf/model.py tools/ventus_perf/wrap.py tools/ventus_perf/tests/test_wrap.py tools/ventus_perf/tests/fixtures/profiler_experiment
+git add tools/ventus-perf.py tools/ventus_perf/cli.py tools/ventus_perf/model.py tools/ventus_perf/wrap.py tools/ventus_perf/tests/test_wrap.py tools/ventus_perf/tests/fixtures/profiler_experiment
 git commit -m "feat: orchestrate ventus perf profiler passes"
 ```
 
@@ -443,18 +443,18 @@ Baseline smokes:
 
 ```bash
 source env.sh
-VENTUS_BACKEND=ptx timeout 60s python3 tools/ventus_perf.py run --warmup 0 --repeat 1 -- ./pocl/build/examples/matadd/matadd
-VENTUS_BACKEND=cyclesim timeout 60s python3 tools/ventus_perf.py run --warmup 0 --repeat 1 -- ./pocl/build/examples/matadd/matadd
-VENTUS_BACKEND=rtlsim timeout 60s python3 tools/ventus_perf.py run --warmup 0 --repeat 1 -- ./pocl/build/examples/matadd/matadd
-VENTUS_BACKEND=spike timeout 60s python3 tools/ventus_perf.py run --warmup 0 --repeat 1 -- ./pocl/build/examples/matadd/matadd
+VENTUS_BACKEND=ptx timeout 60s python3 tools/ventus-perf.py run --warmup 0 --repeat 1 -- ./pocl/build/examples/matadd/matadd
+VENTUS_BACKEND=cyclesim timeout 60s python3 tools/ventus-perf.py run --warmup 0 --repeat 1 -- ./pocl/build/examples/matadd/matadd
+VENTUS_BACKEND=rtlsim timeout 60s python3 tools/ventus-perf.py run --warmup 0 --repeat 1 -- ./pocl/build/examples/matadd/matadd
+VENTUS_BACKEND=spike timeout 60s python3 tools/ventus-perf.py run --warmup 0 --repeat 1 -- ./pocl/build/examples/matadd/matadd
 ```
 
 Profiler smokes when tools exist:
 
 ```bash
 source env.sh
-VENTUS_BACKEND=ptx timeout 60s python3 tools/ventus_perf.py run --warmup 0 --repeat 1 --profile nsys -- ./pocl/build/examples/matadd/matadd
-VENTUS_BACKEND=ptx timeout 60s python3 tools/ventus_perf.py run --warmup 0 --repeat 1 --profile ncu --ncu-kernel matadd -- ./pocl/build/examples/matadd/matadd
+VENTUS_BACKEND=ptx timeout 60s python3 tools/ventus-perf.py run --warmup 0 --repeat 1 --profile nsys -- ./pocl/build/examples/matadd/matadd
+VENTUS_BACKEND=ptx timeout 60s python3 tools/ventus-perf.py run --warmup 0 --repeat 1 --profile ncu --ncu-kernel matadd -- ./pocl/build/examples/matadd/matadd
 ```
 
 Expected:

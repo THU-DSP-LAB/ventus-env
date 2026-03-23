@@ -16,14 +16,14 @@
 - Do **not** add `nsys` / `ncu`, `cyclesim` / `rtlsim` / `spike` backend-specific counters, protobuf export, TUI/HTML, or silent fallback paths in this plan.
 - Do **not** require a new worktree just to write or review this plan. When executing the implementation, prefer a worktree only if the engineer wants branch isolation; otherwise execute in-place with care because the current repository is already dirty.
 - This repository currently has no top-level `tools/` directory; this plan intentionally creates `tools/` and `tools/ventus_perf/` as the canonical home for the new user-facing perf tool.
-- Do **not** rely on `PYTHONPATH` or other ad-hoc environment hacks for the new Python tool. Package the multi-file implementation under a dedicated `tools/ventus_perf/` directory and keep `tools/ventus_perf.py` as the only user-facing entry script.
+- Do **not** rely on `PYTHONPATH` or other ad-hoc environment hacks for the new Python tool. Package the multi-file implementation under a dedicated `tools/ventus_perf/` directory and keep `tools/ventus-perf.py` as the only user-facing entry script.
 - For files placed directly under `tools/`, add a short top-level comment that explains the background need, implementation flow, usage, and any key maintenance notes. If a tool does not have separate documentation, the top-level script must remain maintainable as a single file.
 - Do **not** create `tools/__init__.py`; the `tools/` root must contain only user-facing entry scripts, per project rules.
 - Treat `tools/ventus_perf/wrap.py` as the authoritative writer of `pass.begin.json` and `pass.json`; `pass.begin.json` is written only after successful spawn so `pid` is real, and runtime code must not write these authoritative manifests.
 - Do **not** assume PoCL and driver automatically share one DSO-global `thread_local` perf context. Cross-module correlation in Phase 1 must be based on explicit propagated fields such as `launch_seq`, `kernel_name`, `kernel_occurrence`, and `kernel_signature_hash`, with optional scope identifiers when they can be carried safely.
 - Because the default runtime path may go through `libventus_driver.so` and `auto_select_driver`, Phase 1 must also add sideband perf-context forwarding there; updating only `ptx_driver` is insufficient.
 - Phase 1 does **not** require `cuda_trace.cpp` instrumentation or `reports/profiler.json`; PTX-path CUDA-facing facts come from `ptx_device` direct `cu*` events in this plan, and profiler supplement outputs are deferred to the later profiler phase.
-- Phase 1 perf support is limited to the `ptx` / `sbtsim` backend path. `tools/ventus_perf.py run` must reject unsupported backends explicitly instead of attempting a degraded run.
+- Phase 1 perf support is limited to the `ptx` / `sbtsim` backend path. `tools/ventus-perf.py run` must reject unsupported backends explicitly instead of attempting a degraded run.
 - Adding sideband perf-context APIs must not break existing non-perf or non-`ptx` execution. `auto_select` must preserve legacy behavior for unsupported backends, and unsupported backends may treat the new perf sideband calls as no-op.
 
 ## File Structure
@@ -64,7 +64,7 @@ Responsibility split:
 
 ### Wrapper and reporter
 
-- Create: `tools/ventus_perf.py`
+- Create: `tools/ventus-perf.py`
 - Create: `tools/ventus_perf/__init__.py`
 - Create: `tools/ventus_perf/cli.py`
 - Create: `tools/ventus_perf/model.py`
@@ -86,7 +86,7 @@ Responsibility split:
 
 Responsibility split:
 
-- `tools/ventus_perf.py`: top-level executable entry script with concise maintenance comments and zero external env hacks.
+- `tools/ventus-perf.py`: top-level executable entry script with concise maintenance comments and zero external env hacks.
 - `tools/ventus_perf/cli.py`: argument parsing and command dispatch.
 - `tools/ventus_perf/model.py`: schema validation/loading helpers for wrapper-managed `experiment`, `pass`, and events, including incomplete experiments and incomplete passes.
 - `tools/ventus_perf/report.py`: attribution closure, concurrency detection, `summary.sub_buckets`, and `summary` / `timeline` / `kernel` rendering for experiment inputs and wrapper-generated single-pass inputs.
@@ -577,7 +577,7 @@ git commit -m "feat: instrument ptx driver perf spans"
 ### Task 5: Implement the wrapper CLI and offline report artifacts
 
 **Files:**
-- Create: `tools/ventus_perf.py`
+- Create: `tools/ventus-perf.py`
 - Create: `tools/ventus_perf/cli.py`
 - Modify: `tools/ventus_perf/report.py`
 - Modify: `tools/ventus_perf/wrap.py`
@@ -601,7 +601,7 @@ class CliTests(unittest.TestCase):
             work_dir = pathlib.Path(tmpdir) / "experiment"
             shutil.copytree(fixture, work_dir)
             proc = subprocess.run(
-                ["python3", "tools/ventus_perf.py", "report", str(work_dir)],
+                ["python3", "tools/ventus-perf.py", "report", str(work_dir)],
                 cwd=pathlib.Path(__file__).resolve().parents[2],
                 check=False,
                 capture_output=True,
@@ -611,7 +611,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("Baseline Attribution", proc.stdout)
 ```
 
-- [ ] **Step 2: Run the CLI tests and verify they fail before `tools/ventus_perf.py` exists**
+- [ ] **Step 2: Run the CLI tests and verify they fail before `tools/ventus-perf.py` exists**
 
 Run:
 
@@ -627,17 +627,17 @@ Expected: missing file or missing CLI entrypoint.
 def main(argv: list[str]) -> int:
     # Background: baseline perf attribution for the current ptx/sbtsim path.
     # Flow: parse args -> dispatch into ventus_perf.cli -> run wrapper/report logic.
-    # Usage: python3 tools/ventus_perf.py run -- <cmd>
-    #        python3 tools/ventus_perf.py report <experiment-dir|pass-dir>
+    # Usage: python3 tools/ventus-perf.py run -- <cmd>
+    #        python3 tools/ventus-perf.py report <experiment-dir|pass-dir>
     from ventus_perf.cli import main as cli_main
     return cli_main(argv)
 ```
 
 Implementation requirements:
 
-- `tools/ventus_perf.py` must remain the only user-facing script at `tools/` level for this tool.
+- `tools/ventus-perf.py` must remain the only user-facing script at `tools/` level for this tool.
 - The multi-file implementation must live under `tools/ventus_perf/`; do not spread related modules directly in `tools/`.
-- The direct-execution path `python3 tools/ventus_perf.py ...` must work without `PYTHONPATH`; structure imports accordingly and do not rely on `from tools...` package imports inside the entry script.
+- The direct-execution path `python3 tools/ventus-perf.py ...` must work without `PYTHONPATH`; structure imports accordingly and do not rely on `from tools...` package imports inside the entry script.
 - `run` must create `build/ventus-perf/<experiment-id>/`, write `experiment.begin.json`, execute warmup/measured passes, then atomically write `experiment.json`.
 - `run` must support only the Phase 1 `ptx` / `sbtsim` backend path and reject unsupported backends explicitly before spawning a pass.
 - `run` must write `pass.begin.json` immediately after successfully spawning each pass subprocess and finalize `pass.json` only after collecting the real subprocess return code and artifact paths.
@@ -673,7 +673,7 @@ Expected: all wrapper/report tests pass.
 - [ ] **Step 5: Commit the wrapper CLI**
 
 ```bash
-git add tools/ventus_perf.py tools/ventus_perf/cli.py tools/ventus_perf/report.py tools/ventus_perf/wrap.py tools/ventus_perf/tests/test_wrap.py tools/ventus_perf/tests/test_report.py
+git add tools/ventus-perf.py tools/ventus_perf/cli.py tools/ventus_perf/report.py tools/ventus_perf/wrap.py tools/ventus_perf/tests/test_wrap.py tools/ventus_perf/tests/test_report.py
 git commit -m "feat: add ventus perf wrapper and report cli"
 ```
 
@@ -747,7 +747,7 @@ env \
   VENTUS_BACKEND=ptx \
   GPU_SBT_PTX=$SMOKE_PREFIX/bin/sbt_ptx \
   VENTUS_SBT_PTX=$SMOKE_PREFIX/bin/sbt_ptx \
-  timeout 60s python3 tools/ventus_perf.py run --warmup 0 --repeat 1 -- ./pocl/build/examples/matadd/matadd
+  timeout 60s python3 tools/ventus-perf.py run --warmup 0 --repeat 1 -- ./pocl/build/examples/matadd/matadd
 ```
 
 Expected:

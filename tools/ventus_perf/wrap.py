@@ -7,7 +7,9 @@ import time
 from pathlib import Path
 
 
-SUPPORTED_PHASE1_BACKENDS = {"ptx", "sbt", "ptxsim", "sbtsim"}
+DEFAULT_BACKEND = "spike"
+SUPPORTED_PHASE1_BACKEND_NAMES = ("ptx", "sbt", "ptxsim", "sbtsim")
+SUPPORTED_PHASE1_BACKENDS = set(SUPPORTED_PHASE1_BACKEND_NAMES)
 SUPPORTED_PROFILER_TYPES = {"nsys", "ncu"}
 MAX_NSYS_TOP_KERNELS = 5
 
@@ -20,6 +22,10 @@ def default_install_prefix() -> Path:
     return repo_root() / "install"
 
 
+def supported_phase1_backend_list() -> str:
+    return ", ".join(SUPPORTED_PHASE1_BACKEND_NAMES)
+
+
 def normalize_backend(backend: str) -> str:
     value = (backend or "").strip().lower()
     return value.split("-", 1)[0]
@@ -28,14 +34,20 @@ def normalize_backend(backend: str) -> str:
 def validate_phase1_backend(backend: str) -> str:
     normalized = normalize_backend(backend)
     if normalized not in SUPPORTED_PHASE1_BACKENDS:
-        raise ValueError(f"unsupported backend for phase1 perf run: {backend}")
+        raise ValueError(
+            "unsupported backend for phase1 perf run: "
+            f"{backend}; supported perf backends: {supported_phase1_backend_list()}"
+        )
     return normalized
 
 
 def validate_profiler_backend(backend: str) -> str:
     normalized = normalize_backend(backend)
     if normalized not in SUPPORTED_PHASE1_BACKENDS:
-        raise ValueError(f"profiler passes require a supported phase1 backend: {backend}")
+        raise ValueError(
+            "profiler passes require a supported phase1 backend: "
+            f"{backend}; supported perf backends: {supported_phase1_backend_list()}"
+        )
     return normalized
 
 
@@ -68,6 +80,7 @@ def build_runtime_env(base_env: dict[str, str]) -> dict[str, str]:
     env = dict(base_env)
     install_prefix = Path(env.get("VENTUS_INSTALL_PREFIX", default_install_prefix()))
     env["VENTUS_INSTALL_PREFIX"] = str(install_prefix)
+    env.setdefault("VENTUS_BACKEND", DEFAULT_BACKEND)
     env["PATH"] = prepend_env_path(env.get("PATH"), install_prefix / "bin")
     env["LD_LIBRARY_PATH"] = prepend_env_path(env.get("LD_LIBRARY_PATH"), install_prefix / "lib")
     env.setdefault("POCL_DEVICES", "ventus")

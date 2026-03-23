@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 #
-# Background: provide the Phase 1 wrapper/report entrypoint for Ventus PTX perf attribution.
+# Background: provide the user-facing wrapper/report entrypoint for Ventus perf attribution.
 # Flow: parse CLI args, dispatch into the package implementation, and keep `tools/` limited
 # to a single user-facing script.
-# Usage: python3 tools/ventus_perf.py run -- <cmd>
-#        python3 tools/ventus_perf.py report <experiment-dir|pass-dir>
+# Usage: python3 tools/ventus-perf.py run -- <cmd>
+#        python3 tools/ventus-perf.py report <experiment-dir|pass-dir>
 # Maintenance: keep related implementation under `tools/ventus_perf/`; do not add sibling
 # helper modules at the `tools/` root.
 

@@ -82,19 +82,19 @@ The following environment variables adjust simulation behavior:
 
 ### Performance Attribution for PTX Backend
 
-Use `tools/ventus_perf.py` to run a wrapper-managed PTX performance pass and generate offline reports:
+Use `tools/ventus-perf.py` to run a wrapper-managed PTX performance pass and generate offline reports:
 
 ```bash
 source env.sh
 export VENTUS_BACKEND=ptx
 
-python3 tools/ventus_perf.py run --repeat 1 -- ./run
+python3 tools/ventus-perf.py run --repeat 1 -- ./run
 ```
 
 The `run` subcommand currently supports:
 
 ```bash
-python3 tools/ventus_perf.py run \
+python3 tools/ventus-perf.py run \
   --warmup 1 \
   --repeat 3 \
   -- ./run
@@ -103,12 +103,12 @@ python3 tools/ventus_perf.py run \
 Profiler passes can also be scheduled explicitly on supported phase1 backends:
 
 ```bash
-python3 tools/ventus_perf.py run \
+python3 tools/ventus-perf.py run \
   --repeat 1 \
   --profile nsys \
   -- ./run
 
-python3 tools/ventus_perf.py run \
+python3 tools/ventus-perf.py run \
   --repeat 1 \
   --profile ncu \
   --ncu-kernel matadd \
@@ -132,8 +132,8 @@ The wrapper creates an experiment directory under `build/ventus-perf/<experiment
 To re-render reports from an existing experiment or a single wrapper-managed pass:
 
 ```bash
-python3 tools/ventus_perf.py report build/ventus-perf/<experiment-id>/
-python3 tools/ventus_perf.py report build/ventus-perf/<experiment-id>/passes/measure-0001/
+python3 tools/ventus-perf.py report build/ventus-perf/<experiment-id>/
+python3 tools/ventus-perf.py report build/ventus-perf/<experiment-id>/passes/measure-0001/
 ```
 
 Current support boundary:

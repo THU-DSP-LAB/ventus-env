@@ -180,18 +180,18 @@
 
 ### 5.1 wrapper 编排 experiment
 
-建议实现为 `tools/ventus_perf.py`。
+建议实现为 `tools/ventus-perf.py`。
 
 示例：
 
 ```bash
-python3 tools/ventus_perf.py run -- ./run
+python3 tools/ventus-perf.py run -- ./run
 ```
 
 带 repeat / profiler 的示例：
 
 ```bash
-python3 tools/ventus_perf.py run \
+python3 tools/ventus-perf.py run \
   --warmup 2 \
   --repeat 5 \
   --profile nsys \
@@ -211,11 +211,11 @@ python3 tools/ventus_perf.py run \
 示例：
 
 ```bash
-python3 tools/ventus_perf.py report <experiment-dir>
-python3 tools/ventus_perf.py report <pass-dir>
-python3 tools/ventus_perf.py report <experiment-dir> --view timeline
-python3 tools/ventus_perf.py report <experiment-dir> --view kernel
-python3 tools/ventus_perf.py report <experiment-dir> --view profiler
+python3 tools/ventus-perf.py report <experiment-dir>
+python3 tools/ventus-perf.py report <pass-dir>
+python3 tools/ventus-perf.py report <experiment-dir> --view timeline
+python3 tools/ventus-perf.py report <experiment-dir> --view kernel
+python3 tools/ventus-perf.py report <experiment-dir> --view profiler
 ```
 
 语义：
@@ -1107,7 +1107,7 @@ wrapper 负责注入 `LD_PRELOAD` 时，必须定义稳定组合规则。
 建议：
 
 - 对 `ptx` backend 提供一等支持
-- 不作为 `tools/ventus_perf.py run -- ./run` 的默认隐式 pass
+- 不作为 `tools/ventus-perf.py run -- ./run` 的默认隐式 pass
 - 只有在用户显式请求 `--profile nsys` 时才运行
 
 ### 11.3 `ncu`
@@ -1225,7 +1225,7 @@ summary 应尽量短，但保证最有用。对于 baseline-only experiment，�
 ### 14.1 wrapper 编排
 
 ```bash
-python3 tools/ventus_perf.py run -- ./run
+python3 tools/ventus-perf.py run -- ./run
 ```
 
 默认建议：
@@ -1242,19 +1242,19 @@ python3 tools/ventus_perf.py run -- ./run
 - baseline attribution 默认路径：
 
 ```bash
-python3 tools/ventus_perf.py run -- ./run
+python3 tools/ventus-perf.py run -- ./run
 ```
 
 - PTX backend 的 profiler supplement 路径：
 
 ```bash
-python3 tools/ventus_perf.py run --profile nsys -- ./run
+python3 tools/ventus-perf.py run --profile nsys -- ./run
 ```
 
 ### 14.2 离线查看
 
 ```bash
-python3 tools/ventus_perf.py report <experiment-dir>
+python3 tools/ventus-perf.py report <experiment-dir>
 ```
 
 默认输出 `summary` 视图。

@@ -64,6 +64,7 @@ class ChildContextTests(unittest.TestCase):
         repo_root = pathlib.Path(__file__).resolve().parents[3]
         install_prefix = repo_root / "install"
         self.assertEqual(env["VENTUS_INSTALL_PREFIX"], str(install_prefix))
+        self.assertEqual(env["VENTUS_BACKEND"], "spike")
         self.assertEqual(env["POCL_DEVICES"], "ventus")
         self.assertEqual(env["POCL_ENABLE_UNINIT"], "1")
         self.assertEqual(env["OCL_ICD_VENDORS"], str(install_prefix / "lib" / "libpocl.so"))
@@ -72,13 +73,27 @@ class ChildContextTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_top_level_help_includes_backend_and_output_guidance(self) -> None:
+        proc = subprocess.run(
+            ["python3", "tools/ventus-perf.py", "--help"],
+            cwd=pathlib.Path(__file__).resolve().parents[3],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertIn("wrapper-managed Ventus perf passes", proc.stdout)
+        self.assertIn("driver default backend is spike", proc.stdout)
+        self.assertIn("build/ventus-perf", proc.stdout)
+        self.assertIn("ptx, sbt, ptxsim, sbtsim", proc.stdout)
+
     def test_report_writes_summary_and_json_views(self) -> None:
         fixture = pathlib.Path(__file__).resolve().parent / "fixtures" / "minimal_experiment"
         with tempfile.TemporaryDirectory() as tmpdir:
             work_dir = pathlib.Path(tmpdir) / "experiment"
             shutil.copytree(fixture, work_dir)
             proc = subprocess.run(
-                ["python3", "tools/ventus_perf.py", "report", str(work_dir)],
+                ["python3", "tools/ventus-perf.py", "report", str(work_dir)],
                 cwd=pathlib.Path(__file__).resolve().parents[3],
                 check=False,
                 capture_output=True,
@@ -94,7 +109,7 @@ class CliTests(unittest.TestCase):
             work_dir = pathlib.Path(tmpdir) / "experiment"
             shutil.copytree(fixture, work_dir)
             proc = subprocess.run(
-                ["python3", "tools/ventus_perf.py", "report", str(work_dir)],
+                ["python3", "tools/ventus-perf.py", "report", str(work_dir)],
                 cwd=pathlib.Path(__file__).resolve().parents[3],
                 check=False,
                 capture_output=True,
@@ -107,7 +122,7 @@ class CliTests(unittest.TestCase):
         proc = subprocess.run(
             [
                 "python3",
-                "tools/ventus_perf.py",
+                "tools/ventus-perf.py",
                 "run",
                 "--ncu-kernel",
                 "matadd",
@@ -129,7 +144,7 @@ class CliTests(unittest.TestCase):
         proc = subprocess.run(
             [
                 "python3",
-                "tools/ventus_perf.py",
+                "tools/ventus-perf.py",
                 "run",
                 "--repeat",
                 "1",
@@ -146,6 +161,34 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
         self.assertIn("Baseline Attribution", proc.stdout)
+
+    def test_report_missing_input_is_rendered_as_friendly_cli_error(self) -> None:
+        proc = subprocess.run(
+            ["python3", "tools/ventus-perf.py", "report", "does-not-exist"],
+            cwd=pathlib.Path(__file__).resolve().parents[3],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("ventus-perf.py: error:", proc.stderr)
+        self.assertIn("missing experiment manifest in does-not-exist", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_run_without_backend_env_fails_against_driver_default_without_traceback(self) -> None:
+        proc = subprocess.run(
+            ["python3", "tools/ventus-perf.py", "run", "--", "/bin/true"],
+            cwd=pathlib.Path(__file__).resolve().parents[3],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={key: value for key, value in os.environ.items() if key != "VENTUS_BACKEND"},
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("ventus-perf.py: error:", proc.stderr)
+        self.assertIn("unsupported backend for phase1 perf run: spike", proc.stderr)
+        self.assertIn("ptx, sbt, ptxsim, sbtsim", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
 
 
 class ProfilerPassTests(unittest.TestCase):

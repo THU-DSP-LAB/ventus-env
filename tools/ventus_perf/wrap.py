@@ -8,6 +8,8 @@ from pathlib import Path
 
 
 SUPPORTED_PHASE1_BACKENDS = {"ptx", "sbt", "ptxsim", "sbtsim"}
+SUPPORTED_PROFILER_TYPES = {"nsys", "ncu"}
+MAX_NSYS_TOP_KERNELS = 5
 
 
 def repo_root() -> Path:
@@ -27,6 +29,13 @@ def validate_phase1_backend(backend: str) -> str:
     normalized = normalize_backend(backend)
     if normalized not in SUPPORTED_PHASE1_BACKENDS:
         raise ValueError(f"unsupported backend for phase1 perf run: {backend}")
+    return normalized
+
+
+def validate_profiler_backend(backend: str) -> str:
+    normalized = normalize_backend(backend)
+    if normalized not in SUPPORTED_PHASE1_BACKENDS:
+        raise ValueError(f"profiler passes require a supported phase1 backend: {backend}")
     return normalized
 
 
@@ -141,6 +150,11 @@ def finalize_pass_manifest(
     cwd: str | None = None,
     env_summary: dict[str, str] | None = None,
     recorder_errors: list[str] | None = None,
+    launcher_argv: list[str] | None = None,
+    target_argv: list[str] | None = None,
+    profile_target: dict | None = None,
+    artifacts: list[dict] | None = None,
+    target_pass_id: str | None = None,
 ) -> dict:
     state = "completed"
     exit_code = returncode
@@ -181,6 +195,16 @@ def finalize_pass_manifest(
         manifest["cwd"] = cwd
     if env_summary is not None:
         manifest["env_summary"] = dict(env_summary)
+    if launcher_argv is not None:
+        manifest["launcher_argv"] = list(launcher_argv)
+    if target_argv is not None:
+        manifest["target_argv"] = list(target_argv)
+    if profile_target is not None:
+        manifest["profile_target"] = dict(profile_target)
+    if artifacts is not None:
+        manifest["artifacts"] = [dict(artifact) for artifact in artifacts]
+    if target_pass_id is not None:
+        manifest["target_pass_id"] = target_pass_id
     return manifest
 
 
@@ -193,6 +217,11 @@ def run_pass(
     pass_dir: Path,
     env: dict[str, str],
     cwd: str | None = None,
+    launcher_argv: list[str] | None = None,
+    target_argv: list[str] | None = None,
+    profile_target: dict | None = None,
+    artifacts: list[dict] | None = None,
+    target_pass_id: str | None = None,
 ) -> dict:
     pass_path = Path(pass_dir)
     pass_path.mkdir(parents=True, exist_ok=True)
@@ -249,6 +278,11 @@ def run_pass(
             cwd=os.getcwd() if cwd is None else cwd,
             env_summary=env_summary,
             recorder_errors=[str(error)],
+            launcher_argv=launcher_argv,
+            target_argv=target_argv,
+            profile_target=profile_target,
+            artifacts=artifacts,
+            target_pass_id=target_pass_id,
         )
         write_json_atomic(pass_path / "pass.json", manifest)
         return manifest
@@ -267,9 +301,119 @@ def run_pass(
         cwd=os.getcwd() if cwd is None else cwd,
         env_summary=env_summary,
         recorder_errors=list_recorder_errors(pass_path),
+        launcher_argv=launcher_argv,
+        target_argv=target_argv,
+        profile_target=profile_target,
+        artifacts=artifacts,
+        target_pass_id=target_pass_id,
     )
     write_json_atomic(pass_path / "pass.json", manifest)
     return manifest
+
+
+def normalize_profiles(profiles: list[str] | None) -> list[str]:
+    normalized = []
+    for profile in profiles or []:
+        value = profile.strip().lower()
+        if value not in SUPPORTED_PROFILER_TYPES:
+            raise ValueError(f"unsupported profiler pass: {profile}")
+        if value not in normalized:
+            normalized.append(value)
+    return normalized
+
+
+def _profiler_pass_id(profile: str, occurrence: int) -> str:
+    return f"{profile}-{occurrence:04d}"
+
+
+def _build_profiler_artifacts(profile: str) -> list[dict]:
+    if profile == "nsys":
+        return [{"kind": "nsys_summary", "path": "artifacts/nsys/summary.json"}]
+    if profile == "ncu":
+        return [{"kind": "ncu_summary", "path": "artifacts/ncu/summary.json"}]
+    raise ValueError(f"unsupported profiler pass: {profile}")
+
+
+def _build_profiler_target(profile: str, ncu_kernel: str | None, target_pass_id: str) -> dict:
+    target = {
+        "target_pass_id": target_pass_id,
+        "strategy": "aggregate_by_kernel" if profile == "nsys" else "targeted_kernel",
+    }
+    if profile == "ncu" and ncu_kernel is not None:
+        target["kernel_name"] = ncu_kernel
+    return target
+
+
+def _build_profiler_command(profile: str, pass_dir: Path, target_command: list[str]) -> list[str]:
+    if profile == "nsys":
+        output_path = pass_dir / "artifacts" / "nsys" / "report"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        return ["nsys", "profile", "--output", str(output_path), *target_command]
+    if profile == "ncu":
+        output_path = pass_dir / "artifacts" / "ncu" / "report"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        return ["ncu", "--export", str(output_path), *target_command]
+    raise ValueError(f"unsupported profiler pass: {profile}")
+
+
+def _extract_nsys_top_kernels(stats_payload: list[dict]) -> list[dict]:
+    top_kernels = []
+    for entry in stats_payload[:MAX_NSYS_TOP_KERNELS]:
+        if "Name" not in entry or "Total Time (ns)" not in entry:
+            continue
+        top_kernels.append(
+            {
+                "kernel_name": str(entry["Name"]),
+                "gpu_time_ns": int(entry["Total Time (ns)"]),
+            }
+        )
+    return top_kernels
+
+
+def _write_nsys_summary(pass_dir: Path, env: dict[str, str]) -> None:
+    report_path = pass_dir / "artifacts" / "nsys" / "report.nsys-rep"
+    if not report_path.exists():
+        raise FileNotFoundError(f"missing nsys report artifact: {report_path}")
+    proc = subprocess.run(
+        [
+            "nsys",
+            "stats",
+            "--quiet",
+            "--report",
+            "cuda_gpu_kern_sum",
+            "--format",
+            "json",
+            "--output",
+            "-",
+            str(report_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if proc.returncode != 0:
+        message = proc.stderr.strip() or proc.stdout.strip() or "unknown nsys stats failure"
+        raise RuntimeError(message)
+    payload = json.loads(proc.stdout)
+    if not isinstance(payload, list):
+        raise ValueError("nsys stats did not return a JSON list")
+    write_json_atomic(
+        pass_dir / "artifacts" / "nsys" / "summary.json",
+        {
+            "tool": "nsys",
+            "top_kernels": _extract_nsys_top_kernels(payload),
+        },
+    )
+
+
+def _build_profiler_schedule(profiles: list[str]) -> list[tuple[str, str]]:
+    counts: dict[str, int] = {}
+    schedule = []
+    for profile in profiles:
+        counts[profile] = counts.get(profile, 0) + 1
+        schedule.append((profile, _profiler_pass_id(profile, counts[profile])))
+    return schedule
 
 
 def run_experiment(
@@ -277,18 +421,28 @@ def run_experiment(
     command: list[str],
     warmup: int,
     repeat: int,
+    profiles: list[str] | None,
+    ncu_kernel: str | None,
     env: dict[str, str],
     output_root: Path,
     cwd: str | None = None,
 ) -> tuple[Path, dict]:
     runtime_env = build_runtime_env(env)
-    backend = validate_phase1_backend(runtime_env.get("VENTUS_BACKEND", ""))
+    profiler_passes = normalize_profiles(profiles)
+    if ncu_kernel and "ncu" not in profiler_passes:
+        raise ValueError("--ncu-kernel requires --profile ncu")
+    if profiler_passes:
+        backend = validate_profiler_backend(runtime_env.get("VENTUS_BACKEND", ""))
+    else:
+        backend = validate_phase1_backend(runtime_env.get("VENTUS_BACKEND", ""))
+    profiler_schedule = _build_profiler_schedule(profiler_passes)
     experiment_id = f"{int(time.time())}-pid{os.getpid()}"
     experiment_dir = Path(output_root) / experiment_id
     experiment_dir.mkdir(parents=True, exist_ok=True)
     scheduled_passes = [
         f"passes/warmup-{index:04d}" for index in range(1, warmup + 1)
     ] + [f"passes/measure-{index:04d}" for index in range(1, repeat + 1)]
+    scheduled_passes.extend(f"passes/{pass_id}" for _, pass_id in profiler_schedule)
     experiment_begin = {
         "experiment_id": experiment_id,
         "backend": backend,
@@ -325,6 +479,39 @@ def run_experiment(
                 cwd=cwd,
             )
         )
+    target_pass_id = f"measure-{repeat:04d}" if repeat > 0 else None
+    for profile, pass_id in profiler_schedule:
+        if target_pass_id is None:
+            raise ValueError("profiler passes require at least one measured pass")
+        pass_dir = experiment_dir / "passes" / pass_id
+        profile_target = _build_profiler_target(profile, ncu_kernel, target_pass_id)
+        profiler_command = _build_profiler_command(profile, pass_dir, command)
+        manifest = run_pass(
+            experiment_id=experiment_id,
+            pass_id=pass_id,
+            pass_type=profile,
+            command=profiler_command,
+            pass_dir=pass_dir,
+            env=runtime_env,
+            cwd=cwd,
+            launcher_argv=profiler_command,
+            target_argv=command,
+            profile_target=profile_target,
+            artifacts=_build_profiler_artifacts(profile),
+            target_pass_id=target_pass_id,
+        )
+        if profile == "nsys" and manifest["state"] == "completed":
+            try:
+                _write_nsys_summary(pass_dir, runtime_env)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError, RuntimeError) as exc:
+                manifest.setdefault("recorder_errors", []).append(
+                    f"nsys summary extraction failed: {exc}"
+                )
+                manifest["state"] = "failed"
+                manifest["exit_code"] = 1
+                manifest["term_signal"] = None
+                write_json_atomic(pass_dir / "pass.json", manifest)
+        manifests.append(manifest)
     final_state = "completed" if all(m["state"] == "completed" for m in manifests) else "failed"
     experiment_manifest = {
         "experiment_id": experiment_id,

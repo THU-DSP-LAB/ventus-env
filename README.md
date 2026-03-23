@@ -91,11 +91,43 @@ export VENTUS_BACKEND=ptx
 python3 tools/ventus_perf.py run --repeat 1 -- ./run
 ```
 
+The `run` subcommand currently supports:
+
+```bash
+python3 tools/ventus_perf.py run \
+  --warmup 1 \
+  --repeat 3 \
+  -- ./run
+```
+
+Profiler passes can also be scheduled explicitly on supported phase1 backends:
+
+```bash
+python3 tools/ventus_perf.py run \
+  --repeat 1 \
+  --profile nsys \
+  -- ./run
+
+python3 tools/ventus_perf.py run \
+  --repeat 1 \
+  --profile ncu \
+  --ncu-kernel matadd \
+  -- ./run
+```
+
+Rules:
+
+* `--ncu-kernel` requires `--profile ncu`
+* profiler passes are accepted only for the wrapper-supported phase1 backends: `ptx`, `sbt`, `ptxsim`, `sbtsim`
+* missing profiler tools are recorded as failed profiler passes; they are not silently skipped
+
 The wrapper creates an experiment directory under `build/ventus-perf/<experiment-id>/` and writes:
 
 * per-pass manifests such as `pass.begin.json` and `pass.json`
 * canonical event logs such as `events.pocl.jsonl` and `events.vt.jsonl`
-* offline reports under `reports/`, including raw `timeline.json` and Perfetto-compatible `perfetto.json`
+* offline reports under `reports/`, including `summary.txt`, `summary.json`, raw `timeline.json`, `kernels.json`, and Perfetto-compatible `perfetto.json`
+* when an experiment contains profiler passes, `summary.txt` / `summary.json` also include a brief reference-only profiler summary; baseline attribution buckets still come only from measured passes
+* `reports/profiler.json` only when the experiment contains profiler passes
 
 To re-render reports from an existing experiment or a single wrapper-managed pass:
 
@@ -104,7 +136,11 @@ python3 tools/ventus_perf.py report build/ventus-perf/<experiment-id>/
 python3 tools/ventus_perf.py report build/ventus-perf/<experiment-id>/passes/measure-0001/
 ```
 
-Phase 1 currently supports only the `ptx` / `sbtsim` path. Unsupported backends are rejected explicitly by the wrapper.
+Current support boundary:
+
+* baseline wrapper-managed attribution currently supports only the wrapper-supported phase1 backends: `ptx`, `sbt`, `ptxsim`, `sbtsim`
+* profiler pass orchestration is also limited to those same wrapper-supported phase1 backends
+* unsupported backends are rejected explicitly by the wrapper
 
 ## Testing
 

@@ -15,6 +15,8 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--warmup", type=int, default=0)
     run_parser.add_argument("--repeat", type=int, default=1)
+    run_parser.add_argument("--profile", action="append", choices=["nsys", "ncu"], default=[])
+    run_parser.add_argument("--ncu-kernel")
     run_parser.add_argument("child_command", nargs=argparse.REMAINDER)
 
     report_parser = subparsers.add_parser("report")
@@ -25,11 +27,15 @@ def _build_parser() -> argparse.ArgumentParser:
 def _run_command(args: argparse.Namespace) -> int:
     if not args.child_command or args.child_command[0] != "--" or len(args.child_command) == 1:
         raise SystemExit("run requires a child command after --")
+    if args.ncu_kernel and "ncu" not in args.profile:
+        raise SystemExit("--ncu-kernel requires --profile ncu")
     command = args.child_command[1:]
     experiment_dir, _ = wrap_module.run_experiment(
         command=command,
         warmup=args.warmup,
         repeat=args.repeat,
+        profiles=args.profile,
+        ncu_kernel=args.ncu_kernel,
         env=dict(os.environ),
         output_root=Path("build/ventus-perf"),
     )

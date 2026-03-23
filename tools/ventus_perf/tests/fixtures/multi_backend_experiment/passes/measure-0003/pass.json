@@ -1,0 +1,13 @@
+{
+  "pass_id": "measure-0003",
+  "pass_type": "measure",
+  "backend": "spike",
+  "state": "completed",
+  "exit_code": 0,
+  "start_mono_ns": 0,
+  "end_mono_ns": 100,
+  "duration_ns": 100,
+  "event_files": [
+    "events.vt.jsonl"
+  ]
+}

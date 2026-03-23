@@ -1,0 +1,348 @@
+{
+  "displayTimeUnit": "ns",
+  "traceEvents": [
+    {
+      "args": {
+        "name": "measure-0001"
+      },
+      "name": "process_name",
+      "ph": "M",
+      "pid": 1,
+      "tid": 0
+    },
+    {
+      "args": {
+        "name": "measure-0001:pocl"
+      },
+      "name": "thread_name",
+      "ph": "M",
+      "pid": 1,
+      "tid": 1
+    },
+    {
+      "args": {
+        "name": "measure-0001:vt"
+      },
+      "name": "thread_name",
+      "ph": "M",
+      "pid": 1,
+      "tid": 2
+    },
+    {
+      "args": {
+        "attrs": {
+          "bytes": 4096
+        },
+        "event_id": "pocl-e1",
+        "kernel_name": null,
+        "kernel_occurrence": 0,
+        "kernel_signature_hash": 0,
+        "launch_seq": 0,
+        "parent_event_id": null,
+        "pass_id": "measure-0001",
+        "pass_state": "completed",
+        "pass_type": "measure",
+        "queue_id": null,
+        "scope_id": "pocl-s1",
+        "source_pid": 1,
+        "source_tid": 1,
+        "stream": "pocl"
+      },
+      "cat": "pocl",
+      "dur": 10000.0,
+      "name": "buffer_write",
+      "ph": "X",
+      "pid": 1,
+      "tid": 1,
+      "ts": 10000.0
+    },
+    {
+      "args": {
+        "attrs": {},
+        "event_id": "vt-e2",
+        "kernel_name": "demo_kernel",
+        "kernel_occurrence": 1,
+        "kernel_signature_hash": 4660,
+        "launch_seq": 1,
+        "parent_event_id": "vt-e1",
+        "pass_id": "measure-0001",
+        "pass_state": "completed",
+        "pass_type": "measure",
+        "queue_id": null,
+        "scope_id": "vt-s2",
+        "source_pid": 1,
+        "source_tid": 1,
+        "stream": "vt"
+      },
+      "cat": "vt",
+      "dur": 15000.0,
+      "name": "generate_ptx_via_sbt",
+      "ph": "X",
+      "pid": 1,
+      "tid": 2,
+      "ts": 20000.0
+    },
+    {
+      "args": {
+        "attrs": {},
+        "event_id": "vt-e1",
+        "kernel_name": "demo_kernel",
+        "kernel_occurrence": 1,
+        "kernel_signature_hash": 4660,
+        "launch_seq": 1,
+        "parent_event_id": null,
+        "pass_id": "measure-0001",
+        "pass_state": "completed",
+        "pass_type": "measure",
+        "queue_id": null,
+        "scope_id": "vt-s1",
+        "source_pid": 1,
+        "source_tid": 1,
+        "stream": "vt"
+      },
+      "cat": "vt",
+      "dur": 32000.0,
+      "name": "vt_start",
+      "ph": "X",
+      "pid": 1,
+      "tid": 2,
+      "ts": 20000.0
+    },
+    {
+      "args": {
+        "attrs": {},
+        "event_id": "pocl-e2",
+        "kernel_name": "demo_kernel",
+        "kernel_occurrence": 1,
+        "kernel_signature_hash": 4660,
+        "launch_seq": 1,
+        "parent_event_id": null,
+        "pass_id": "measure-0001",
+        "pass_state": "completed",
+        "pass_type": "measure",
+        "queue_id": null,
+        "scope_id": "pocl-s2",
+        "source_pid": 1,
+        "source_tid": 1,
+        "stream": "pocl"
+      },
+      "cat": "pocl",
+      "dur": 65000.0,
+      "name": "kernel_submit",
+      "ph": "X",
+      "pid": 1,
+      "tid": 1,
+      "ts": 20000.0
+    },
+    {
+      "args": {
+        "attrs": {},
+        "event_id": "vt-e3",
+        "kernel_name": "demo_kernel",
+        "kernel_occurrence": 1,
+        "kernel_signature_hash": 4660,
+        "launch_seq": 1,
+        "parent_event_id": "vt-e1",
+        "pass_id": "measure-0001",
+        "pass_state": "completed",
+        "pass_type": "measure",
+        "queue_id": null,
+        "scope_id": "vt-s3",
+        "source_pid": 1,
+        "source_tid": 1,
+        "stream": "vt"
+      },
+      "cat": "vt",
+      "dur": 3000.0,
+      "name": "read_generated_ptx",
+      "ph": "X",
+      "pid": 1,
+      "tid": 2,
+      "ts": 35000.0
+    },
+    {
+      "args": {
+        "attrs": {},
+        "event_id": "vt-e4",
+        "kernel_name": "demo_kernel",
+        "kernel_occurrence": 1,
+        "kernel_signature_hash": 4660,
+        "launch_seq": 1,
+        "parent_event_id": "vt-e1",
+        "pass_id": "measure-0001",
+        "pass_state": "completed",
+        "pass_type": "measure",
+        "queue_id": null,
+        "scope_id": "vt-s4",
+        "source_pid": 1,
+        "source_tid": 1,
+        "stream": "vt"
+      },
+      "cat": "vt",
+      "dur": 7000.0,
+      "name": "cuModuleLoadDataEx",
+      "ph": "X",
+      "pid": 1,
+      "tid": 2,
+      "ts": 38000.0
+    },
+    {
+      "args": {
+        "attrs": {},
+        "event_id": "vt-e5",
+        "kernel_name": "demo_kernel",
+        "kernel_occurrence": 1,
+        "kernel_signature_hash": 4660,
+        "launch_seq": 1,
+        "parent_event_id": "vt-e1",
+        "pass_id": "measure-0001",
+        "pass_state": "completed",
+        "pass_type": "measure",
+        "queue_id": null,
+        "scope_id": "vt-s5",
+        "source_pid": 1,
+        "source_tid": 1,
+        "stream": "vt"
+      },
+      "cat": "vt",
+      "dur": 5000.0,
+      "name": "cuModuleGetFunction",
+      "ph": "X",
+      "pid": 1,
+      "tid": 2,
+      "ts": 45000.0
+    },
+    {
+      "args": {
+        "attrs": {},
+        "event_id": "vt-e6",
+        "kernel_name": "demo_kernel",
+        "kernel_occurrence": 1,
+        "kernel_signature_hash": 4660,
+        "launch_seq": 1,
+        "parent_event_id": "vt-e1",
+        "pass_id": "measure-0001",
+        "pass_state": "completed",
+        "pass_type": "measure",
+        "queue_id": null,
+        "scope_id": "vt-s6",
+        "source_pid": 1,
+        "source_tid": 1,
+        "stream": "vt"
+      },
+      "cat": "vt",
+      "dur": 2000.0,
+      "name": "cuLaunchKernel",
+      "ph": "X",
+      "pid": 1,
+      "tid": 2,
+      "ts": 50000.0
+    },
+    {
+      "args": {
+        "attrs": {},
+        "event_id": "pocl-e3",
+        "kernel_name": "demo_kernel",
+        "kernel_occurrence": 1,
+        "kernel_signature_hash": 4660,
+        "launch_seq": 1,
+        "parent_event_id": "pocl-e2",
+        "pass_id": "measure-0001",
+        "pass_state": "completed",
+        "pass_type": "measure",
+        "queue_id": null,
+        "scope_id": "pocl-s3",
+        "source_pid": 1,
+        "source_tid": 1,
+        "stream": "pocl"
+      },
+      "cat": "pocl",
+      "dur": 33000.0,
+      "name": "kernel_wait",
+      "ph": "X",
+      "pid": 1,
+      "tid": 1,
+      "ts": 52000.0
+    },
+    {
+      "args": {
+        "attrs": {},
+        "event_id": "vt-e7",
+        "kernel_name": "demo_kernel",
+        "kernel_occurrence": 1,
+        "kernel_signature_hash": 4660,
+        "launch_seq": 1,
+        "parent_event_id": null,
+        "pass_id": "measure-0001",
+        "pass_state": "completed",
+        "pass_type": "measure",
+        "queue_id": null,
+        "scope_id": "vt-s7",
+        "source_pid": 1,
+        "source_tid": 1,
+        "stream": "vt"
+      },
+      "cat": "vt",
+      "dur": 33000.0,
+      "name": "vt_ready_wait",
+      "ph": "X",
+      "pid": 1,
+      "tid": 2,
+      "ts": 52000.0
+    },
+    {
+      "args": {
+        "attrs": {},
+        "event_id": "vt-e8",
+        "kernel_name": "demo_kernel",
+        "kernel_occurrence": 1,
+        "kernel_signature_hash": 4660,
+        "launch_seq": 1,
+        "parent_event_id": "vt-e7",
+        "pass_id": "measure-0001",
+        "pass_state": "completed",
+        "pass_type": "measure",
+        "queue_id": null,
+        "scope_id": "vt-s8",
+        "source_pid": 1,
+        "source_tid": 1,
+        "stream": "vt"
+      },
+      "cat": "vt",
+      "dur": 31000.0,
+      "name": "cuCtxSynchronize",
+      "ph": "X",
+      "pid": 1,
+      "tid": 2,
+      "ts": 53000.0
+    },
+    {
+      "args": {
+        "attrs": {
+          "bytes": 4096
+        },
+        "event_id": "pocl-e4",
+        "kernel_name": null,
+        "kernel_occurrence": 0,
+        "kernel_signature_hash": 0,
+        "launch_seq": 0,
+        "parent_event_id": null,
+        "pass_id": "measure-0001",
+        "pass_state": "completed",
+        "pass_type": "measure",
+        "queue_id": null,
+        "scope_id": "pocl-s4",
+        "source_pid": 1,
+        "source_tid": 1,
+        "stream": "pocl"
+      },
+      "cat": "pocl",
+      "dur": 5000.0,
+      "name": "buffer_read",
+      "ph": "X",
+      "pid": 1,
+      "tid": 1,
+      "ts": 85000.0
+    }
+  ]
+}

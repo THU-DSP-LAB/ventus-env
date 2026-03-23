@@ -1,0 +1,9 @@
+{
+  "pass_id": "measure-0001",
+  "pass_type": "measure",
+  "backend": "ptx",
+  "pid": 999,
+  "start_mono_ns": 0,
+  "stdout_path": "stdout.log",
+  "stderr_path": "stderr.log"
+}

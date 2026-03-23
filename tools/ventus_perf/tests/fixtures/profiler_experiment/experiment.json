@@ -1,0 +1,9 @@
+{
+  "experiment_id": "exp-profiler",
+  "state": "completed",
+  "actual_passes": [
+    "passes/measure-0001",
+    "passes/nsys-0001",
+    "passes/ncu-0001"
+  ]
+}

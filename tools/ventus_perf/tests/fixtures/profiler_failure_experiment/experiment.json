@@ -1,0 +1,8 @@
+{
+  "experiment_id": "exp-profiler-failure",
+  "state": "failed",
+  "actual_passes": [
+    "passes/measure-0001",
+    "passes/nsys-0001"
+  ]
+}

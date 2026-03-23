@@ -1,0 +1,9 @@
+{
+  "experiment_id": "exp-multi-backend",
+  "state": "completed",
+  "actual_passes": [
+    "passes/measure-0001",
+    "passes/measure-0002",
+    "passes/measure-0003"
+  ]
+}

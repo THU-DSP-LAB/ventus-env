@@ -17,8 +17,24 @@ TOP_LEVEL_BUCKETS = (
     "uncategorized",
 )
 
-MEMCPY_H2D_EVENTS = {"buffer_write", "buffer_copy", "buffer_fill", "map_mem", "vt_copy_to_dev"}
-MEMCPY_D2H_EVENTS = {"buffer_read", "vt_copy_from_dev", "unmap_mem"}
+MEMCPY_H2D_EVENTS = {
+    "buffer_write",
+    "buffer_copy",
+    "buffer_fill",
+    "map_mem",
+    "vt_copy_to_dev",
+    "vmemcpy_h2d",
+    "pmemcpy_h2d",
+    "copy_to_dev",
+}
+MEMCPY_D2H_EVENTS = {
+    "buffer_read",
+    "vt_copy_from_dev",
+    "unmap_mem",
+    "vmemcpy_d2h",
+    "pmemcpy_d2h",
+    "copy_from_dev",
+}
 KERNEL_LAUNCH_EVENTS = {
     "kernel_submit",
     "kernel_arg_pack",
@@ -26,15 +42,18 @@ KERNEL_LAUNCH_EVENTS = {
     "kernel_elf_upload",
     "kernel_metadata_upload",
     "vt_start",
+    "add_kernel",
     "generate_ptx_via_sbt",
     "read_generated_ptx",
     "cuModuleLoadDataEx",
     "cuModuleGetFunction",
     "cuLaunchKernel",
 }
-KERNEL_WAIT_EVENTS = {"kernel_wait", "vt_ready_wait", "cuCtxSynchronize"}
+KERNEL_WAIT_EVENTS = {"kernel_wait", "vt_ready_wait", "cuCtxSynchronize", "ready_wait_loop"}
 DERIVED_BUCKETS = ("memcpy_h2d", "kernel_launch", "kernel_wait", "memcpy_d2h")
 SUB_BUCKET_NAMES = ("kernel_launch", "kernel_wait")
+PROFILER_PASS_TYPES = {"nsys", "ncu"}
+AUXILIARY_FACT_EVENT_TYPES = {"sim_time_ns", "sim_time", "step_count", "flush_tail_steps"}
 NS_PER_US = 1_000
 NS_PER_MS = 1_000_000
 NS_PER_S = 1_000_000_000
@@ -146,6 +165,32 @@ def _bucket_for_event(event_type: str) -> str | None:
     if event_type in KERNEL_WAIT_EVENTS:
         return "kernel_wait"
     return None
+
+
+def _auxiliary_value_for_event(event: dict) -> int:
+    attrs = event.get("attrs", {})
+    value = attrs.get("value")
+    if isinstance(value, (int, float)):
+        return int(value)
+    raise ValueError(f"missing numeric attrs.value for auxiliary fact event: {event['event_type']}")
+
+
+def _summarize_auxiliary_facts(pass_events: list[dict]) -> dict[str, dict[str, int]]:
+    values_by_type: dict[str, list[int]] = {}
+    for event in pass_events:
+        event_type = str(event["event_type"])
+        if event_type not in AUXILIARY_FACT_EVENT_TYPES:
+            continue
+        values_by_type.setdefault(event_type, []).append(_auxiliary_value_for_event(event))
+    summary = {}
+    for event_type, values in values_by_type.items():
+        summary[event_type] = {
+            "count": len(values),
+            "mean_value": int(round(sum(values) / len(values))),
+            "min_value": min(values),
+            "max_value": max(values),
+        }
+    return summary
 
 
 def _pass_duration_ns(pass_manifest: dict, pass_events: list[dict]) -> int:
@@ -269,8 +314,112 @@ def _build_pass_summary(pass_manifest: dict, pass_events: list[dict]) -> dict:
         "wall_time_ns": wall_time_ns,
         "buckets": buckets,
         "sub_buckets": _summarize_sub_buckets(pass_events),
+        "auxiliary_facts": _summarize_auxiliary_facts(pass_events),
         "concurrency_detected": concurrency_detected,
     }
+
+
+def _build_profiler_view(profiler_passes: list[dict]) -> dict:
+    rendered_passes = []
+    for pass_manifest in profiler_passes:
+        artifacts = []
+        for artifact in pass_manifest.get("artifacts", []):
+            relative_path = artifact["path"]
+            artifact_path = Path(pass_manifest["path"]) / relative_path
+            artifacts.append(
+                {
+                    "kind": artifact.get("kind"),
+                    "path": relative_path,
+                    "exists": artifact_path.exists(),
+                }
+            )
+        rendered_passes.append(
+            {
+                "pass_id": pass_manifest["pass_id"],
+                "pass_type": pass_manifest["pass_type"],
+                "state": pass_manifest.get("state"),
+                "profile_target": pass_manifest.get("profile_target"),
+                "artifacts": artifacts,
+            }
+        )
+    return {"passes": rendered_passes}
+
+
+def _build_nsys_reference(profiler_passes: list[dict]) -> dict | None:
+    nsys_pass = next(
+        (pass_manifest for pass_manifest in profiler_passes if pass_manifest.get("pass_type") == "nsys"),
+        None,
+    )
+    if nsys_pass is None:
+        return None
+    summary_artifact = next(
+        (
+            artifact
+            for artifact in nsys_pass.get("artifacts", [])
+            if artifact.get("kind") == "nsys_summary"
+        ),
+        None,
+    )
+    artifact_exists = False
+    top_kernels: list[dict[str, int | str]] = []
+    error = None
+    if summary_artifact is not None:
+        artifact_path = Path(nsys_pass["path"]) / summary_artifact["path"]
+        artifact_exists = artifact_path.exists()
+        if artifact_exists:
+            try:
+                payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+                top_kernels = [
+                    {
+                        "kernel_name": str(kernel["kernel_name"]),
+                        "gpu_time_ns": int(kernel["gpu_time_ns"]),
+                    }
+                    for kernel in payload.get("top_kernels", [])
+                    if "kernel_name" in kernel and "gpu_time_ns" in kernel
+                ]
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                error = str(exc)
+        else:
+            error = f"missing nsys summary artifact: {summary_artifact['path']}"
+    recorder_errors = nsys_pass.get("recorder_errors") or []
+    if error is None and recorder_errors:
+        error = str(recorder_errors[-1])
+    reference = {
+        "pass_id": nsys_pass["pass_id"],
+        "state": nsys_pass.get("state"),
+        "artifact_exists": artifact_exists,
+        "top_kernels": top_kernels,
+    }
+    if error is not None:
+        reference["error"] = error
+    return reference
+
+
+def _build_profiler_reference(profiler_passes: list[dict]) -> dict:
+    reference = {}
+    nsys_reference = _build_nsys_reference(profiler_passes)
+    if nsys_reference is not None:
+        reference["nsys"] = nsys_reference
+    return reference
+
+
+def _collect_auxiliary_facts(events_by_pass: dict[str, list[dict]]) -> dict[str, dict[str, int]]:
+    values_by_type: dict[str, list[int]] = {}
+    for pass_events in events_by_pass.values():
+        for event in pass_events:
+            event_type = str(event["event_type"])
+            if event_type not in AUXILIARY_FACT_EVENT_TYPES:
+                continue
+            values_by_type.setdefault(event_type, []).append(_auxiliary_value_for_event(event))
+    summary = {}
+    for event_type, values in values_by_type.items():
+        summary[event_type] = {
+            "count": len(values),
+            "mean_value": int(round(sum(values) / len(values))),
+            "min_value": min(values),
+            "max_value": max(values),
+        }
+    return summary
 
 
 def _render_wall_time_stats(wall_times: list[int]) -> dict[str, int]:
@@ -344,27 +493,48 @@ def load_input_report(input_dir: Path) -> dict:
         for bucket_name, bucket_values in aggregate_sub_buckets.items():
             for event_type, value in list(bucket_values.items()):
                 bucket_values[event_type] = int(round(value / measured_count))
+    if measured_completed:
+        baseline_passes = measured_completed
+    else:
+        baseline_passes = [
+            pass_manifest for pass_manifest in passes if pass_manifest.get("pass_type") == "measure"
+        ]
+    baseline_events_by_pass = {
+        pass_manifest["pass_id"]: events_by_pass[pass_manifest["pass_id"]]
+        for pass_manifest in baseline_passes
+    }
+    auxiliary_facts = _collect_auxiliary_facts(baseline_events_by_pass)
     wall_time_stats = _render_wall_time_stats(wall_times)
     wall_time_ns = wall_time_stats["mean_ns"]
     concurrency_detected = any(summary["concurrency_detected"] for summary in pass_summaries.values())
-    return {
+    report = {
         "experiment_id": experiment.get("experiment_id"),
         "state": experiment.get("state", "completed"),
         "best_effort": bool(experiment.get("best_effort", False)),
         "measured_pass_count": measured_count,
         "concurrency_detected": concurrency_detected,
         "passes": passes,
-        "timeline": [event for events in events_by_pass.values() for event in events],
-        "perfetto": _render_perfetto_trace(passes, events_by_pass),
-        "kernels": _render_kernel_view(events_by_pass),
+        "timeline": [event for events in baseline_events_by_pass.values() for event in events],
+        "perfetto": _render_perfetto_trace(baseline_passes, baseline_events_by_pass),
+        "kernels": _render_kernel_view(baseline_events_by_pass),
         "summary": {
             "wall_time_ns": wall_time_ns,
             "top_level_total_ns": sum(aggregate_buckets.values()),
             "buckets": aggregate_buckets,
             "sub_buckets": aggregate_sub_buckets,
+            "auxiliary_facts": auxiliary_facts,
             "wall_time_stats": wall_time_stats,
         },
     }
+    profiler_passes = [
+        pass_manifest for pass_manifest in passes if pass_manifest.get("pass_type") in PROFILER_PASS_TYPES
+    ]
+    if profiler_passes:
+        report["profiler"] = _build_profiler_view(profiler_passes)
+        profiler_reference = _build_profiler_reference(profiler_passes)
+        if profiler_reference:
+            report["summary"]["profiler_reference"] = profiler_reference
+    return report
 
 
 def render_summary_text(report: dict) -> str:
@@ -379,6 +549,27 @@ def render_summary_text(report: dict) -> str:
     ]
     for bucket in TOP_LEVEL_BUCKETS:
         lines.append(f"{bucket}: {_format_duration_ns(summary['buckets'][bucket])}")
+    profiler_reference = summary.get("profiler_reference", {})
+    nsys_reference = profiler_reference.get("nsys")
+    if nsys_reference is not None:
+        lines.extend(
+            [
+                "",
+                "Profiler Reference",
+                (
+                    f"nsys: {nsys_reference.get('state')} "
+                    f"(artifact_exists: {str(bool(nsys_reference.get('artifact_exists'))).lower()})"
+                ),
+            ]
+        )
+        top_kernels = nsys_reference.get("top_kernels", [])
+        if top_kernels:
+            for kernel in top_kernels[:3]:
+                lines.append(
+                    f"top_kernel: {kernel['kernel_name']} {_format_duration_ns(kernel['gpu_time_ns'])}"
+                )
+        if nsys_reference.get("error"):
+            lines.append(f"nsys_error: {nsys_reference['error']}")
     return "\n".join(lines)
 
 
@@ -403,4 +594,9 @@ def write_report_outputs(input_dir: Path, report: dict) -> Path:
         json.dumps(report["kernels"], indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    if "profiler" in report:
+        (output_dir / "profiler.json").write_text(
+            json.dumps(report["profiler"], indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     return output_dir

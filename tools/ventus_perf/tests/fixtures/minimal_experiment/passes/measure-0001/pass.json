@@ -1,0 +1,14 @@
+{
+  "pass_id": "measure-0001",
+  "pass_type": "measure",
+  "backend": "ptx",
+  "state": "completed",
+  "exit_code": 0,
+  "start_mono_ns": 0,
+  "end_mono_ns": 100000000,
+  "duration_ns": 100000000,
+  "event_files": [
+    "events.pocl.jsonl",
+    "events.vt.jsonl"
+  ]
+}

@@ -1,0 +1,2 @@
+{"stream":"vt","event_type":"vt_start","ts_start_ns":100000,"ts_end_ns":400000,"event_id":"pf-e1","parent_event_id":null,"scope_id":"pf-s1","pid":21,"tid":21,"queue_id":null,"launch_seq":1,"kernel_occurrence":1,"kernel_signature_hash":4660,"kernel_name":"matadd","attrs":{}}
+{"stream":"vt","event_type":"vt_ready_wait","ts_start_ns":400000,"ts_end_ns":700000,"event_id":"pf-e2","parent_event_id":null,"scope_id":"pf-s2","pid":21,"tid":21,"queue_id":null,"launch_seq":1,"kernel_occurrence":1,"kernel_signature_hash":4660,"kernel_name":"matadd","attrs":{}}

@@ -36,3 +36,7 @@
 [submodule "testcases"]
 	path = testcases
 	url = https://github.com/THU-DSP-LAB/Ventus-OpenCL-Testcase.git
+[submodule "sbtsim"]
+	path = sbtsim
+	url = https://github.com/THU-DSP-LAB/ventus-gpgpu-sbt-simulator.git
+	branch = main

@@ -8,6 +8,7 @@
 * 推荐系统环境：Ubuntu 24.04
 * 推荐编译安装Verilator 5.034加入PATH
 * 下载解压安装CIRCT [firtool 1.62.0](https://github.com/llvm/circt/releases/download/firtool-1.62.0/firrtl-bin-linux-x64.tar.gz)加入PATH
+* CUDA（可选，仅 `VENTUS_BACKEND=ptx` 需要）：运行时需要 NVIDIA driver（`libcuda.so`），编译 `driver/ptx_device` 需要 CUDA toolkit（用于 `find_package(CUDAToolkit)` 和头文件）。
 * 其它系统依赖：
 ```bash
 apt-get install \
@@ -54,10 +55,11 @@ make
 VENTUS_BACKEND=spike    ./run # 和上一条等效
 VENTUS_BACKEND=rtlsim   ./run # 使用verilator仿真Chisel RTL
 VENTUS_BACKEND=cyclesim ./run # 使用周期仿真器
+VENTUS_BACKEND=ptx      ./run # PTX 后端（SBT ELF->PTX + CUDA Driver API）
 ```
 
 提供一些环境变量用来调整仿真行为，罗列如下：
-* `VENTUS_BACKEND=XXX`选取使用哪种底层设备，可选值`spike`|`isa`, `rtl`|`rtlsim`|`gpgpu`, `cyclesim`|`systemc`|`simulator`
+* `VENTUS_BACKEND=XXX`选取使用哪种底层设备，可选值`spike`|`isa`, `rtl`|`rtlsim`|`gpgpu`, `cyclesim`|`systemc`|`simulator`，以及 `ptx`（需 CUDA，且需构建 `build-ventus.sh --build "ptx"`）
 * `VENTUS_WAVEFORM=1`时可以使rtlsim后端导出fst波形文件，让cyclesim后端导出vcd波形文件
 * `VENTUS_WAVEFORM_BEGIN`和`VENTUS_WAVEFORM_END`设定为一对数字可以使rtlsim后端只导出这一段仿真时间内的波形，以加速仿真。cyclesim后端不支持此功能
 * `VENTUS_DUMP_RESULT=filename.json`可以将所有OpenCL程序从device端拷贝回host端的数据及其在设备端的地址保存到指定json文件中，辅助调试
@@ -77,6 +79,7 @@ python3 ./regression-test.py  # 默认使用spike
 VENTUS_BACKEND=spike    python3 ./regression-test.py # 和上一条等效
 VENTUS_BACKEND=rtlsim   python3 ./regression-test.py # 使用verilator仿真Chisel RTL
 VENTUS_BACKEND=cyclesim python3 ./regression-test.py # 使用周期仿真器
+VENTUS_BACKEND=ptx      python3 ./regression-test.py # PTX 后端（需 CUDA）
 ```
 
 运行前推荐您先指定`regression-test.py`的命令行参数：

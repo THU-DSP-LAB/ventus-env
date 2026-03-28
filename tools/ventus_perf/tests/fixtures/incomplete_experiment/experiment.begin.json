@@ -1,0 +1,7 @@
+{
+  "experiment_id": "exp-incomplete",
+  "state": "running",
+  "actual_passes": [
+    "passes/measure-0001"
+  ]
+}

@@ -8,6 +8,7 @@
 * **OS:** Ubuntu 24.04 recommended
 * **Verilator:** 5.034 (build from source and add to `PATH`)
 * **CIRCT firtool:** Install [firtool 1.62.0](https://github.com/llvm/circt/releases/download/firtool-1.62.0/firrtl-bin-linux-x64.tar.gz) and add to `PATH`
+* **CUDA (optional, for `VENTUS_BACKEND=ptx`):** NVIDIA driver + CUDA toolkit (for headers/tools). The PTX backend uses CUDA Driver API (`libcuda.so`) at runtime and `find_package(CUDAToolkit)` at build time.
 * **Other system dependencies:**
 
 ```bash
@@ -65,17 +66,81 @@ make
 VENTUS_BACKEND=spike    ./run # Same as above
 VENTUS_BACKEND=rtlsim   ./run # Verilator-based Chisel RTL simulation
 VENTUS_BACKEND=cyclesim ./run # Cycle-accurate simulator
+VENTUS_BACKEND=ptx      ./run # PTX backend (SBT ELF->PTX + CUDA Driver API)
 ```
 
 The following environment variables adjust simulation behavior:
 
 * `VENTUS_BACKEND=XXX` — Select the device/backend: `spike`|`isa`, `rtl`|`rtlsim`|`gpgpu`, `cyclesim`|`systemc`|`simulator`.
+  * PTX backend: `ptx` (requires building `build-ventus.sh --build "ptx"` and CUDA availability).
 * `VENTUS_WAVEFORM=1` — Enable waveform dump: `rtlsim` → FST, `cyclesim` → VCD.
 * `VENTUS_WAVEFORM_BEGIN` / `VENTUS_WAVEFORM_END` — Dump only a selected simulation interval for `rtlsim` (speeds up simulation). Not supported by `cyclesim`.
 * `VENTUS_DUMP_RESULT=filename.json` — Save all device→host copies from OpenCL programs and their device addresses to a JSON file (useful for debugging).
 * `VENTUS_TIMING_DDR=0` — Disable DDR timing in `cyclesim` (enabled by default). Current RTL simulation does not support DDR timing.
 * `NUM_THREAD=32` — Number of threads per warp reported by the POCL device. For `rtlsim`/`cyclesim`, this should match hardware specs; for `spike`, any value is acceptable.
 * `NUM_WARP=8` — Max warps per thread block reported by the POCL device. For `rtlsim`/`cyclesim`, match hardware specs; for `spike`, any value is acceptable.
+
+### Performance Attribution for PTX Backend
+
+Use `tools/ventus-perf.py` to run a wrapper-managed PTX performance pass and generate offline reports:
+
+```bash
+source env.sh
+export VENTUS_BACKEND=ptx
+
+python3 tools/ventus-perf.py run --repeat 1 -- ./run
+```
+
+The `run` subcommand currently supports:
+
+```bash
+python3 tools/ventus-perf.py run \
+  --warmup 1 \
+  --repeat 3 \
+  -- ./run
+```
+
+Profiler passes can also be scheduled explicitly on supported phase1 backends:
+
+```bash
+python3 tools/ventus-perf.py run \
+  --repeat 1 \
+  --profile nsys \
+  -- ./run
+
+python3 tools/ventus-perf.py run \
+  --repeat 1 \
+  --profile ncu \
+  --ncu-kernel matadd \
+  -- ./run
+```
+
+Rules:
+
+* `--ncu-kernel` requires `--profile ncu`
+* profiler passes are accepted only for the wrapper-supported phase1 backends: `ptx`, `sbt`, `ptxsim`, `sbtsim`
+* missing profiler tools are recorded as failed profiler passes; they are not silently skipped
+
+The wrapper creates an experiment directory under `build/ventus-perf/<experiment-id>/` and writes:
+
+* per-pass manifests such as `pass.begin.json` and `pass.json`
+* canonical event logs such as `events.pocl.jsonl` and `events.vt.jsonl`
+* offline reports under `reports/`, including `summary.txt`, `summary.json`, raw `timeline.json`, `kernels.json`, and Perfetto-compatible `perfetto.json`
+* when an experiment contains profiler passes, `summary.txt` / `summary.json` also include a brief reference-only profiler summary; baseline attribution buckets still come only from measured passes
+* `reports/profiler.json` only when the experiment contains profiler passes
+
+To re-render reports from an existing experiment or a single wrapper-managed pass:
+
+```bash
+python3 tools/ventus-perf.py report build/ventus-perf/<experiment-id>/
+python3 tools/ventus-perf.py report build/ventus-perf/<experiment-id>/passes/measure-0001/
+```
+
+Current support boundary:
+
+* baseline wrapper-managed attribution currently supports only the wrapper-supported phase1 backends: `ptx`, `sbt`, `ptxsim`, `sbtsim`
+* profiler pass orchestration is also limited to those same wrapper-supported phase1 backends
+* unsupported backends are rejected explicitly by the wrapper
 
 ## Testing
 
@@ -90,6 +155,7 @@ python3 ./regression-test.py                 # Uses spike by default
 VENTUS_BACKEND=spike    python3 ./regression-test.py
 VENTUS_BACKEND=rtlsim   python3 ./regression-test.py # Verilator-based Chisel RTL
 VENTUS_BACKEND=cyclesim python3 ./regression-test.py # Cycle-accurate simulator
+VENTUS_BACKEND=ptx      python3 ./regression-test.py # PTX backend (requires CUDA)
 ```
 
 Before running, we recommend tuning these options:

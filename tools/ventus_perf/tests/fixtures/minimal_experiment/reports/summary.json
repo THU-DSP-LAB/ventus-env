@@ -1,0 +1,35 @@
+{
+  "buckets": {
+    "host_overhead": 0,
+    "kernel_launch": 32000000,
+    "kernel_wait": 33000000,
+    "memcpy_d2h": 5000000,
+    "memcpy_h2d": 10000000,
+    "teardown": 0,
+    "uncategorized": 20000000
+  },
+  "sub_buckets": {
+    "kernel_launch": {
+      "cuLaunchKernel": 2000000,
+      "cuModuleGetFunction": 5000000,
+      "cuModuleLoadDataEx": 7000000,
+      "generate_ptx_via_sbt": 15000000,
+      "kernel_submit": 65000000,
+      "read_generated_ptx": 3000000,
+      "vt_start": 32000000
+    },
+    "kernel_wait": {
+      "cuCtxSynchronize": 31000000,
+      "kernel_wait": 33000000,
+      "vt_ready_wait": 33000000
+    }
+  },
+  "top_level_total_ns": 100000000,
+  "wall_time_ns": 100000000,
+  "wall_time_stats": {
+    "max_ns": 100000000,
+    "mean_ns": 100000000,
+    "min_ns": 100000000,
+    "stddev_ns": 0
+  }
+}

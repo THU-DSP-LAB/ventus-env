@@ -1,0 +1,19 @@
+{
+  "pass_id": "nsys-0001",
+  "pass_type": "nsys",
+  "backend": "ptx",
+  "state": "completed",
+  "exit_code": 0,
+  "event_files": [
+    "events.vt.jsonl"
+  ],
+  "profile_target": {
+    "strategy": "aggregate_by_kernel"
+  },
+  "artifacts": [
+    {
+      "kind": "nsys_summary",
+      "path": "artifacts/nsys/summary.json"
+    }
+  ]
+}

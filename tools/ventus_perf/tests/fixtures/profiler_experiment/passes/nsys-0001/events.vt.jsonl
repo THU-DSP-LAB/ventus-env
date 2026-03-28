@@ -1,0 +1,1 @@
+{"stream":"vt","event_type":"kernel_wait","ts_start_ns":1000,"ts_end_ns":2000,"event_id":"nsys-e1","parent_event_id":null,"scope_id":"nsys-s1","pid":12,"tid":12,"queue_id":null,"launch_seq":99,"kernel_occurrence":1,"kernel_signature_hash":9999,"kernel_name":"nsys_only_kernel","attrs":{}}

@@ -1,0 +1,6 @@
+{
+  "tool": "ncu",
+  "metrics": {
+    "sm__cycles_elapsed.avg": 2048
+  }
+}

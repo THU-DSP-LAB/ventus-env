@@ -1,0 +1,9 @@
+{
+  "tool": "nsys",
+  "top_kernels": [
+    {
+      "kernel_name": "matadd",
+      "gpu_time_ns": 123456
+    }
+  ]
+}

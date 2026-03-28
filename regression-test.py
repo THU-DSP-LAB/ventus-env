@@ -267,7 +267,7 @@ if __name__ == "__main__":
     if exit_code != 0:
         print(f"Required testcases not all passed (--checklist={args.checklist}): {checklist_failed}")
 
-    if 'NOTEBOOK_BASH_KERNEL_CAPABILITIES' not in os.environ: # not in JupyterNotebook bash_kernel
-        os.system("stty echo") # spike sometimes messes up terminal echo
+    if 'NOTEBOOK_BASH_KERNEL_CAPABILITIES' not in os.environ and sys.stdin.isatty():  # not in JupyterNotebook bash_kernel
+        os.system("stty echo")  # spike sometimes messes up terminal echo
 
     sys.exit(exit_code)

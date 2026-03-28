@@ -1,0 +1,8 @@
+[
+  {
+    "event_count": 10,
+    "kernel_name": "demo_kernel",
+    "launch_seq": 1,
+    "pass_id": "measure-0001"
+  }
+]

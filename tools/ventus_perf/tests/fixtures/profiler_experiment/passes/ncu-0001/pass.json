@@ -1,0 +1,17 @@
+{
+  "pass_id": "ncu-0001",
+  "pass_type": "ncu",
+  "backend": "ptx",
+  "state": "completed",
+  "exit_code": 0,
+  "profile_target": {
+    "kernel_name": "matadd",
+    "strategy": "targeted_kernel"
+  },
+  "artifacts": [
+    {
+      "kind": "ncu_summary",
+      "path": "artifacts/ncu/summary.json"
+    }
+  ]
+}

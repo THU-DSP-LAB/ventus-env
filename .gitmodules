@@ -8,10 +8,8 @@
 	branch = develop
 [submodule "driver"]
 	path = driver
-	#url = https://github.com/THU-DSP-LAB/ventus-driver.git
-	#branch = develop
-	url = git@git.tsinghua.edu.cn:yh-w24/ventus-driver.git
-	branch = ptxsim
+	url = https://github.com/THU-DSP-LAB/ventus-driver.git
+	branch = develop
 [submodule "pocl"]
 	path = pocl
 	url = https://github.com/THU-DSP-LAB/pocl.git
@@ -40,5 +38,5 @@
 	url = https://github.com/THU-DSP-LAB/Ventus-OpenCL-Testcase.git
 [submodule "sbtsim"]
 	path = sbtsim
-	url = git@git.tsinghua.edu.cn:yh-w24/sbtsim.git
+	url = https://github.com/THU-DSP-LAB/ventus-gpgpu-sbt-simulator.git
 	branch = main

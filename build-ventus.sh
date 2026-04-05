@@ -233,8 +233,12 @@ build_gpgpu_rtlsim() {
 
 build_gvm() {
   cd ${GPGPU_DIR}/sim-verilator
-  make -f gvm.mk -j${BUILD_PARALLEL} RELEASE=1 GVM_TRACE=1
-  make -f gvm.mk install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX}
+  make -f gvm.mk -j${BUILD_PARALLEL} RELEASE=1 GVM_TRACE=1 GVM_REF_DIR=${VENTUS_INSTALL_PREFIX}/lib
+  make -f gvm.mk install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX} GVM_REF_DIR=${VENTUS_INSTALL_PREFIX}/lib
+
+  cd ${GPGPU_DIR}/sim-verilator-nocache
+  make -f gvm.mk -j${BUILD_PARALLEL} RELEASE=1 GVM_TRACE=1 GVM_REF_DIR=${VENTUS_INSTALL_PREFIX}/lib
+  make -f gvm.mk install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX} GVM_REF_DIR=${VENTUS_INSTALL_PREFIX}/lib
 }
 
 # Build pocl from THU
@@ -398,8 +402,12 @@ check_if_rtlsim_built() {
 }
 
 check_if_gvm_built() {
-  if [ ! -f "${VENTUS_INSTALL_PREFIX}/lib/libVentusGVM.so" ]; then
-    echo "Please build Ventus GVM backend first (use --build gvm)!"
+  if [ ! -f "${VENTUS_INSTALL_PREFIX}/lib/libVentusGVM-withcache.so" ]; then
+    echo "Please build Ventus GVM backend (withcache) first (use --build gvm)!"
+    exit 1
+  fi
+  if [ ! -f "${VENTUS_INSTALL_PREFIX}/lib/libVentusGVM-nocache.so" ]; then
+    echo "Please build Ventus GVM backend (nocache) first (use --build gvm)!"
     exit 1
   fi
 }

@@ -11,7 +11,7 @@ jobs:
   build-and-test:
     runs-on: self-hosted
     container:
-      image: humber186/ventus:base-20251010
+      image: humber186/ventus:base-latest
       options: --add-host=host.docker.internal:host-gateway
       volumes:
         # Mount host directory for ccache persistence

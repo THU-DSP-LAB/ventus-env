@@ -335,9 +335,9 @@ if __name__ == "__main__":
     parser.add_argument("-t", "--timeout-scale", type=float, default=None, help="Timeout scale (default: 1)")
     parser.add_argument("-j", "--jobs", type=int, default=None, help="Parallel multiprocess num (default: auto)")
     # 注意两个参数默认值都用 None 作为"未显式指定"的 sentinel：
-    # - 都不给 → 走默认 matrix "rtl-both"（一次命令覆盖带/不带 Cache 两套回归）
+    # - 都不给 → 单模式，继承父进程 VENTUS_BACKEND 环境变量，checklist 默认 all
     # - 只给 --checklist → 走单模式 checklist，保持旧用法
-    # - 给 --matrix → 显式 matrix；同时给 --checklist 也被覆盖
+    # - 给 --matrix → 显式 matrix，覆盖 VENTUS_BACKEND；同时给 --checklist 也被覆盖
     parser.add_argument(
         "--checklist",
         type=str,
@@ -359,13 +359,13 @@ if __name__ == "__main__":
             "Per-mode logs go to regression-test-logs/<backend>/. "
             "Accepts a preset name (" + ", ".join(sorted(MATRIX_PRESETS.keys())) + ") "
             "or explicit form 'backend1:checklist1,backend2:checklist2'. "
-            "Default when neither --matrix nor --checklist is set: rtl-both."
+            "When given, overrides VENTUS_BACKEND for each step in the matrix."
         ),
     )
     args = parser.parse_args()
 
     # 解析 matrix / checklist 成统一的 [(backend, checklist_set), ...] 列表。
-    # 优先级：显式 --matrix > 显式 --checklist > 默认 matrix "rtl-both"。
+    # 优先级：显式 --matrix > 显式 --checklist > 默认单模式（继承 VENTUS_BACKEND）。
     # - matrix 模式：每项显式指定后端 + checklist，日志按后端分子目录，每模式只跑自己那套测集
     # - 单模式退化为 [(None, checklist_set)]：沿用父进程 VENTUS_BACKEND、日志写根目录、跑全部测例
     try:
@@ -378,9 +378,9 @@ if __name__ == "__main__":
             matrix = [(None, parse_checklist(args.checklist))]
             matrix_mode = False
         else:
-            # 默认：matrix rtl-both（带/不带 Cache 一条命令全跑完）
-            matrix = [(backend, cls) for backend, cls in parse_matrix("rtl-both")]
-            matrix_mode = True
+            # 默认：单模式，继承环境变量 VENTUS_BACKEND，跑全部测例
+            matrix = [(None, parse_checklist("all"))]
+            matrix_mode = False
     except argparse.ArgumentTypeError as e:
         parser.error(str(e))
 

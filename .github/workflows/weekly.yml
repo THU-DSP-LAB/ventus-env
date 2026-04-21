@@ -5,7 +5,8 @@ on:
     # Run at 00:00 on Sunday
     - cron: '0 0 * * 0'
   push:
-    branches: [ "main", "develop", "dev/ci" ]
+    # branches: [ "main", "develop", "dev/ci" ]
+    branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:

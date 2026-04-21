@@ -83,7 +83,7 @@ BUILD_TYPE=${BUILD_TYPE:-Release}
 NVIDIA_DRIVER_AVAILABLE=false
 check_nvidia_driver() {
   # Check for nvidia-smi, /dev/nvidia0, or libcuda.so as indicators of a working nvidia driver
-  if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
+  if nvidia-smi &> /dev/null 2>&1; then
     NVIDIA_DRIVER_AVAILABLE=true
   elif [ -e /dev/nvidia0 ]; then
     NVIDIA_DRIVER_AVAILABLE=true
@@ -197,7 +197,7 @@ build_driver() {
   local driver_enable_ptx="ON"
   if [ "${NVIDIA_DRIVER_AVAILABLE}" = "false" ]; then
     driver_enable_ptx="OFF"
-    echo "WARNING: Building driver without PTX support (sbtsim skipped — NVIDIA driver not available)."
+    echo "WARNING: Building driver without PTX support (sbtsim skipped -- NVIDIA driver not available)."
   fi
   mkdir -p ${DRIVER_BUILD_DIR}
   cd ${DRIVER_DIR}
@@ -495,7 +495,7 @@ do
     if [ "${NVIDIA_DRIVER_AVAILABLE}" = "true" ]; then
       build_sbtsim
     else
-      echo "WARNING: Skipping sbtsim build — NVIDIA driver not available."
+      echo "WARNING: Skipping sbtsim build -- NVIDIA driver not available."
     fi
   elif [ "${program}" == "gvm" ]; then
     build_gvm

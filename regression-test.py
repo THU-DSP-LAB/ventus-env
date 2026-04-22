@@ -67,6 +67,7 @@ test_cases = [
     TestCase(name="kmeans_512"   , path=RODINIA_DIR/"opencl/kmeans"     , cmd=["./kmeans.out", "-o", "-r", "-i", "../../data/kmeans/512_34f.txt", "-g", "nvidia_result_512_34f_k5", "-p", "0", "-d", "0"]),
     TestCase(name="mnist_conv_small", path=VENTUS_TESTCASE_DIR/"_get_case/MNIST_conv_small", cmd=["./conv.out"]),
     TestCase(name="mnist"           , path=VENTUS_TESTCASE_DIR/"_get_case/MNIST"           , cmd=["./nn_forward.out"]),
+    TestCase(name="lds_corruption", path=VENTUS_TESTCASE_DIR/"others/lds_corruption", cmd=["./run"], timeout=180),
     # 以下测例可以跑通，但十分缓慢
     # TestCase(name="bfs_65536"    , path=RODINIA_DIR/"opencl/bfs"        , cmd=["./bfs.out", "../../data/bfs/graph65536.txt"], timeout=1000),
     # TestCase(name="b+tree_1024"  , path=RODINIA_DIR/"opencl/b+tree"     , cmd=["./b+tree.out", "file", "../../data/b+tree/mil.txt", "command", "../../data/b+tree/command_1024.txt", "--ref", "output_1024.nvidia.txt"], timeout=300),
@@ -76,14 +77,14 @@ test_cases = [
 
 # Checklist 预设：一次运行中"必须通过"的 TestCase 索引子集。
 # 任一索引对应的测例未 pass 就以非零退出码返回，用于 CI 卡控。
-# - rtl-with-cache: 带 Cache 版本 RTL 目前能稳定 pass 的 8 个
+# - rtl-with-cache: 带 Cache 版本 RTL 目前能稳定 pass 的 9 个
 #                   （b+tree_128 / bfs_4096 / kmeans_512 在带 Cache 时尚未通过，故未纳入）
-# - rtl-no-cache:   不带 Cache 版本 RTL 目前全部 11 个都能通过
+# - rtl-no-cache:   不带 Cache 版本 RTL 目前全部 12 个都能通过
 REQUIRED_PRESETS = {
     "all":            list(range(len(test_cases))),
-    "cycle":          [0,1,2,4,5,6,7,8,9,10],
-    "rtl-with-cache": [0,1,2,4,6,7,9,10],
-    "rtl-no-cache":   [0,1,2,3,4,5,6,7,8,9,10],
+    "cycle":          [0,1,2,4,5,6,7,8,9,10,11],
+    "rtl-with-cache": [0,1,2,4,6,7,9,10,11],
+    "rtl-no-cache":   [0,1,2,3,4,5,6,7,8,9,10,11],
 }
 
 # Matrix 预设：一次调用里按序跑多个 (VENTUS_BACKEND, checklist) 组合。

@@ -54,4 +54,4 @@ jobs:
       run: |
         . ./env.sh
         # RTL simulation is slower, so we might need to increase timeout
-        VENTUS_BACKEND=rtl-cache python3 regression-test.py -j 4 -t 10 --checklist=rtl-with-cache
+        VENTUS_BACKEND=rtl-cache python3 regression-test.py -j 4 -t 10 --repeat=5 --checklist=rtl-with-cache

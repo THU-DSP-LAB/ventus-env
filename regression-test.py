@@ -40,6 +40,23 @@ def suggest_default_jobs(max_cap: int = 32, backend: Optional[str] = None) -> in
         cpu = max(1, cpu // 8)
     return max(1, min(max_cap, cpu * 3 // 2))
 
+# 带 cache 的 RTL 后端默认强制重跑次数。
+# 自 b1bce67 起 GVM/RTL 引入随机初始化，with-cache 路径上观察到测例通过率不稳定
+# （X 态在某些初始路径上传播导致选择器死锁/写丢失等）。
+#
+# 为什么是 10 而不是 5：2026-04-25 backprop_1024 在 5 次循环里凑巧 5/5 通过，
+# 但跑 10 次只过 7/10——5 次循环对 70% 通过率级别的 flaky 测例容易误判为稳定。
+# 10 次循环把"5/5 误判稳态"的概率从 ~17% (0.7^5) 压到 ~3% (0.7^10)，更可靠。
+# 更高重复数（如 20）收益边际递减、wall-clock 翻倍，不划算。
+WITHCACHE_DEFAULT_REPEAT = 10
+
+def detect_default_repeat(backend: Optional[str]) -> int:
+    """根据后端推断默认 repeat 次数。
+    含 'withcache' 的后端默认 5 次；其它后端 1 次。matrix / 单模式都按这个规则各自判一次。
+    """
+    effective = backend if backend else os.environ.get('VENTUS_BACKEND', '')
+    return WITHCACHE_DEFAULT_REPEAT if 'withcache' in effective.lower() else 1
+
 @dataclass
 class TestCase:
     name: str
@@ -122,20 +139,29 @@ def format_list_with_quotes(lst):
             formatted.append(s)
     return ' '.join(formatted)
 
-def run_test_case(arg: Tuple[int, TestCase, Dict[str, str], Path]) -> Tuple[int, Tuple[int, str]]:
-    """运行单个测试用例，返回 (索引, (返回码, 标签))
+def run_test_case(arg: Tuple[int, TestCase, Dict[str, str], Path, int]) -> Tuple[int, List[Tuple[int, str]]]:
+    """运行单个测试用例 repeat 次，返回 (索引, [(rc1, tag1), (rc2, tag2), ...])
     arg 解包：
       - env: 注入给 subprocess 的环境变量副本，matrix 模式下会被覆写 VENTUS_BACKEND；
              父进程 os.environ 不受影响，避免跨模式污染或泄漏到调用方 shell。
       - log_dir: 该模式下写日志的目录（matrix 模式下每个后端一个子目录）。
+      - repeat: 重跑次数。repeat==1 时日志写到 <name>.log（保持旧布局）；
+                repeat>1 时每次单独写到 <name>.run<i>.log，方便定位是哪一次失败。
+    编译只做一次。若编译失败，把同一条 (2, TAG_COMPILE_FAIL) 复制 repeat 份返回，
+    保持外层"按 run 数计数"的统计口径一致。
     """
-    index, testcase, env, log_dir = arg
-    log_file = log_dir/f"{testcase.name}.log"
+    index, testcase, env, log_dir, repeat = arg
+    multi = repeat > 1
 
-    with open(log_file, "w") as f:
-        # 先编译。编译过程本身不依赖 VENTUS_BACKEND（backend 只在运行时 dlopen 决定），
-        # 因此 matrix 模式下 compile_paths 缓存跨后端共享，第二轮自动跳过重复编译。
-        if testcase.need_make:
+    # 编译输出：单次跑时与 run 日志合并到 <name>.log（保留旧行为）；
+    # 多次跑时单独写到 <name>.compile.log，避免被某次 run 的 stdout 淹没。
+    if multi:
+        compile_log_path = log_dir / f"{testcase.name}.compile.log"
+    else:
+        compile_log_path = log_dir / f"{testcase.name}.log"
+
+    if testcase.need_make:
+        with open(compile_log_path, "w") as f:
             f.write("=== Compile Testcase ===\n")
             lock = get_compile_path_lock(testcase.path)
             with lock:
@@ -144,39 +170,50 @@ def run_test_case(arg: Tuple[int, TestCase, Dict[str, str], Path]) -> Tuple[int,
                         result = subprocess.run(["make"], stdout=f, stderr=f, timeout=60, cwd=testcase.path, env=env)
                         if result.returncode != 0:
                             f.write("Compile Failed\n")
-                            return index, (2, TAG_COMPILE_FAIL)
+                            return index, [(2, TAG_COMPILE_FAIL)] * repeat
                         f.write("Compile OK\n")
                         compile_paths[testcase.path] = True  # 标记为已编译
                     except subprocess.TimeoutExpired:
                         f.write("Compile Timeout, Failed\n")
-                        return index, (2, TAG_COMPILE_FAIL)
+                        return index, [(2, TAG_COMPILE_FAIL)] * repeat
                     except Exception as e:
                         f.write(f"Compile Failed: {e}\n")
-                        return index, (2, TAG_COMPILE_FAIL)
+                        return index, [(2, TAG_COMPILE_FAIL)] * repeat
                 else:
                     f.write("Already Compiled, Skipping...\n")
 
-        # 运行测试
-        f.write("=== Run Test ===\n")
-        f.flush()
-        try:
-            f.write(f"TestCase {index}: {testcase.name} begin...\nCOMMAND: ")
-            f.write(format_list_with_quotes(testcase.cmd));
-            f.write("\n")
-            # 把本次实际生效的 VENTUS_BACKEND 写到日志头，便于事后按后端排查
-            f.write(f"VENTUS_BACKEND: {env.get('VENTUS_BACKEND', '<unset>')}\n")
+    # 运行测试 repeat 次。每次单独 open log，多次 run 时各 run 之间日志互不覆盖。
+    runs: List[Tuple[int, str]] = []
+    for run_idx in range(1, repeat + 1):
+        if multi:
+            run_log_path = log_dir / f"{testcase.name}.run{run_idx}.log"
+            mode = "w"
+        else:
+            run_log_path = compile_log_path  # 复用 <name>.log，保留旧布局
+            mode = "a" if testcase.need_make else "w"
+
+        with open(run_log_path, mode) as f:
+            f.write(f"=== Run Test ({run_idx}/{repeat}) ===\n")
             f.flush()
-            result = subprocess.run(testcase.cmd, stdout=f, stderr=f, timeout=testcase.timeout * TIMEOUT_SCALE, cwd=testcase.path, env=env)
-            rc = result.returncode
-            tag = TAG_OK if rc == 0 else TAG_FAIL
-            return index, (rc, tag)
-        except subprocess.TimeoutExpired:
-            f.write("\nTestcase execution timeout, Failed\n")
-            # 用一个超出常规范围的返回码以避免与被测程序冲突
-            return index, (9999, TAG_TIMEOUT)
-        except Exception as e:
-            f.write(f"\nTestcase execution failed with exception: {e}\n")
-            return index, (9998, TAG_FAIL)
+            try:
+                f.write(f"TestCase {index}: {testcase.name} begin (run {run_idx}/{repeat})...\nCOMMAND: ")
+                f.write(format_list_with_quotes(testcase.cmd))
+                f.write("\n")
+                # 把本次实际生效的 VENTUS_BACKEND 写到日志头，便于事后按后端排查
+                f.write(f"VENTUS_BACKEND: {env.get('VENTUS_BACKEND', '<unset>')}\n")
+                f.flush()
+                result = subprocess.run(testcase.cmd, stdout=f, stderr=f, timeout=testcase.timeout * TIMEOUT_SCALE, cwd=testcase.path, env=env)
+                rc = result.returncode
+                tag = TAG_OK if rc == 0 else TAG_FAIL
+                runs.append((rc, tag))
+            except subprocess.TimeoutExpired:
+                f.write("\nTestcase execution timeout, Failed\n")
+                # 用一个超出常规范围的返回码以避免与被测程序冲突
+                runs.append((9999, TAG_TIMEOUT))
+            except Exception as e:
+                f.write(f"\nTestcase execution failed with exception: {e}\n")
+                runs.append((9998, TAG_FAIL))
+    return index, runs
 
 def signal_handler(signum, frame):
     """处理外部中断信号，终止所有子进程"""
@@ -243,10 +280,43 @@ def format_status(rc: int, tag: str) -> str:
         return "\033[91mTime Exceeded\033[0m"  # 红
     return "\033[91mFailed\033[0m"             # 红
 
+def summarize_runs(runs: List[Tuple[int, str]]) -> Tuple[int, int, str]:
+    """把多次运行结果聚合成 (passed, total, tag)。
+    tag 用于颜色判定：
+      - 全 pass → TAG_OK
+      - 全失败且原因一致 → 该原因（compile_failed / timeout / failed）
+      - 部分通过部分失败 → "flaky"（黄色，对应随机初始化下的不稳定测例）
+    """
+    total = len(runs)
+    passed = sum(1 for rc, _ in runs if rc == 0)
+    if passed == total:
+        return passed, total, TAG_OK
+    if passed == 0:
+        # 全部失败：若所有失败原因一致，沿用原 tag；否则归为 failed
+        tags = {tag for rc, tag in runs if rc != 0}
+        if len(tags) == 1:
+            return passed, total, tags.pop()
+        return passed, total, TAG_FAIL
+    return passed, total, "flaky"
+
+def format_run_status(runs: List[Tuple[int, str]]) -> str:
+    """渲染 'Passed K/N' / 'Flaky K/N' / 'Failed 0/N' 等带颜色字符串。"""
+    passed, total, tag = summarize_runs(runs)
+    if tag == TAG_OK:
+        return f"\033[92mPassed {passed}/{total}\033[0m"
+    if tag == "flaky":
+        return f"\033[93mFlaky {passed}/{total}\033[0m"
+    if tag == TAG_COMPILE_FAIL:
+        return f"\033[93mCompile Failed {passed}/{total}\033[0m"
+    if tag == TAG_TIMEOUT:
+        return f"\033[91mTime Exceeded {passed}/{total}\033[0m"
+    return f"\033[91mFailed {passed}/{total}\033[0m"
+
 def run_mode(backend: Optional[str], selected_indices: List[int], checklist_set: set,
-             log_subdir: Optional[str]) \
-        -> Tuple[int, List[Optional[Tuple[int, str]]], List[int]]:
-    """在指定后端下跑 selected_indices 指定的测例子集，返回 (exit_code, results, checklist_failed)。
+             log_subdir: Optional[str], repeat: int) \
+        -> Tuple[int, List[Optional[List[Tuple[int, str]]]], List[int]]:
+    """在指定后端下跑 selected_indices 指定的测例子集，每个测例重跑 repeat 次。
+    返回 (exit_code, results, checklist_failed)。
 
     参数：
       - backend: None 表示沿用父进程的 VENTUS_BACKEND（单模式行为）；否则将其
@@ -254,11 +324,13 @@ def run_mode(backend: Optional[str], selected_indices: List[int], checklist_set:
       - selected_indices: 本模式下实际要运行的测例索引列表。
                  matrix 模式下等于 checklist（每个模式只跑自己那套测集）；
                  单模式下等于全部索引（保留旧脚本"跑全、checklist 判"的行为）。
-      - checklist_set: 必须全部 pass 才算通过的测例索引集合。通常是 selected_indices
-                 的子集；不在 selected_indices 里但在 checklist_set 里的索引会被判 fail
-                 （理论上不应出现，作为防御性处理）。
+      - checklist_set: 必须全部 run 都 pass 才算通过的测例索引集合。
       - log_subdir: None 表示日志写到 LOG_DIR 根下（单模式）；
                     非 None 时日志写到 LOG_DIR/<log_subdir>/（matrix 模式，一般传 backend 名）。
+      - repeat: 每个测例重跑次数。任何一次失败即把该测例判 fail（用于过滤随机初始化下的偶发通过）。
+
+    results 形状：List[Optional[List[(rc, tag)]]]，每项是该测例 repeat 次运行的全部结果；
+    未选中的索引保持 None。
     """
     global pool
     mode_log_dir = LOG_DIR / log_subdir if log_subdir else LOG_DIR
@@ -273,23 +345,34 @@ def run_mode(backend: Optional[str], selected_indices: List[int], checklist_set:
 
     pool = multiprocessing.Pool(processes=MULTIPROCESS_NUM)
     # results 用原 test_cases 长度的稀疏列表，未选中的索引保持 None，方便 print/统计统一处理
-    results: List[Optional[Tuple[int, str]]] = [None] * len(test_cases)
+    results: List[Optional[List[Tuple[int, str]]]] = [None] * len(test_cases)
     # 只把 selected_indices 对应的测例丢进池子，其余跳过（matrix 模式下节省 kmeans_512
     # 这种已知 timeout 的白等时间）
-    iterable = [(i, test_cases[i], env, mode_log_dir) for i in selected_indices]
+    iterable = [(i, test_cases[i], env, mode_log_dir, repeat) for i in selected_indices]
     total = len(iterable)
 
     print(f"\n>>> Running mode [{effective_backend}] "
           f"(jobs={MULTIPROCESS_NUM}, timeout scale={TIMEOUT_SCALE}, log dir={mode_log_dir}, "
-          f"cases={total}/{len(test_cases)})")
+          f"cases={total}/{len(test_cases)}, repeat={repeat})")
     with tqdm(total=total, desc=f"Running [{effective_backend}]", unit="test") as pbar:
-        for index, payload in pool.imap_unordered(run_test_case, iterable):
-            rc, tag = payload
-            results[index] = (rc, tag)
-            # 更新进度条（统计通过/失败）
-            pass_count = sum(1 for r in results if (r is not None and r[0] == 0))
-            fail_count = sum(1 for r in results if (r is not None and r[0] != 0))
-            pbar.set_postfix_str(f"pass={pass_count}, fail={fail_count}")
+        for index, runs in pool.imap_unordered(run_test_case, iterable):
+            results[index] = runs
+            # 更新进度条：以测例为单位计数（每个 testcase 算一个 unit），
+            # 区分稳定通过 / 失败 / flaky（部分通过）三档，让 with-cache 偶发问题立刻可见。
+            pass_count = 0
+            fail_count = 0
+            flaky_count = 0
+            for r in results:
+                if r is None:
+                    continue
+                p, t, tag = summarize_runs(r)
+                if tag == TAG_OK:
+                    pass_count += 1
+                elif tag == "flaky":
+                    flaky_count += 1
+                else:
+                    fail_count += 1
+            pbar.set_postfix_str(f"pass={pass_count}, fail={fail_count}, flaky={flaky_count}")
             pbar.update(1)
 
     # 等待所有进程完成并关闭进程池，并把全局 pool 置空，让 signal_handler 在模式间不误触
@@ -297,37 +380,66 @@ def run_mode(backend: Optional[str], selected_indices: List[int], checklist_set:
     pool.join()
     pool = None
 
-    # 未跑到的 checklist 项按 fail 处理（防御性；正常情况不会发生）
-    checklist_failed = sorted(i for i in checklist_set
-                              if results[i] is None or results[i][0] != 0)
+    # checklist 判定口径：必须全部 run 都 pass 才算过；任意一次失败 / 未跑到 都判 fail
+    def _all_passed(idx: int) -> bool:
+        r = results[idx]
+        return r is not None and all(rc == 0 for rc, _ in r)
+
+    checklist_failed = sorted(i for i in checklist_set if not _all_passed(i))
     exit_code = 0 if not checklist_failed else 1
     return exit_code, results, checklist_failed
 
 def print_mode_report(backend_name: str, selected_indices: List[int],
-                      results: List[Optional[Tuple[int, str]]],
+                      results: List[Optional[List[Tuple[int, str]]]],
                       checklist_set: set, checklist_failed: List[int], exit_code: int):
     """打印单个模式的详细结果表 + checklist 结论。matrix 和单模式都走这里。
     只列本模式实际跑过的测例（selected_indices），未运行的索引不会出现在报告里。
+    每行展示 'Passed K/N' / 'Flaky K/N' / 'Failed 0/N'，K=通过次数，N=总跑数。
     """
     print(f"\n=== Mode: {backend_name} — Test result ===")
     for i in selected_indices:
         testcase = test_cases[i]
-        res = results[i]
-        rc, tag = res if res is not None else (-1, "not_run")
-        print(f"{i:2d} {testcase.name}: {format_status(rc, tag)}")
+        runs = results[i]
+        if runs is None:
+            status = format_status(-1, "not_run")
+        else:
+            status = format_run_status(runs)
+        print(f"{i:2d} {testcase.name}: {status}")
 
-    # pass/fail 只在本模式实际跑过的测例里统计，未跑的索引不计入（results[i] is None）
-    pass_count = sum(1 for r in results if (r is not None and r[0] == 0))
-    fail_count = sum(1 for r in results if (r is not None and r[0] != 0))
+    # 三档统计：稳定通过 / 失败 / flaky；只统计本模式跑过的测例
+    pass_count = 0
+    fail_count = 0
+    flaky_count = 0
+    for r in results:
+        if r is None:
+            continue
+        _, _, tag = summarize_runs(r)
+        if tag == TAG_OK:
+            pass_count += 1
+        elif tag == "flaky":
+            flaky_count += 1
+        else:
+            fail_count += 1
+
     symbol = "\033[92m✔\033[0m" if exit_code == 0 else "\033[91m✘\033[0m"
     cls_sorted = sorted(checklist_set)
     if exit_code == 0:
-        result_descript = f"All required testcases in checklist({cls_sorted}) passed."
+        result_descript = f"All required testcases in checklist({cls_sorted}) passed all runs."
     else:
+        # 标注 flaky / fail 各占 checklist 多少，便于一眼定位是哪类失败
+        flaky_in_cls = sorted(i for i in checklist_failed
+                              if results[i] is not None
+                              and summarize_runs(results[i])[2] == "flaky")
+        hard_fail_in_cls = sorted(i for i in checklist_failed if i not in flaky_in_cls)
+        bits = []
+        if hard_fail_in_cls:
+            bits.append(f"hard-fail={hard_fail_in_cls}")
+        if flaky_in_cls:
+            bits.append(f"flaky={flaky_in_cls}")
         result_descript = (f"Some testcases in checklist({cls_sorted}) failed. "
-                           f"Missing: {checklist_failed}")
-    print(f"Summary [{backend_name}]: {pass_count} passed, {fail_count} failed. "
-          f"{result_descript} {symbol}")
+                           + ", ".join(bits))
+    print(f"Summary [{backend_name}]: {pass_count} passed, {fail_count} failed, "
+          f"{flaky_count} flaky. {result_descript} {symbol}")
 
 
 if __name__ == "__main__":
@@ -363,6 +475,19 @@ if __name__ == "__main__":
             "When given, overrides VENTUS_BACKEND for each step in the matrix."
         ),
     )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=None,
+        help=(
+            "Repeat each testcase N times; the case is considered passed only if all N "
+            "runs pass (any failure marks it as failed/flaky). Per-iteration logs are "
+            "written to <name>.run<i>.log so a flaky run can be located. "
+            f"Default: {WITHCACHE_DEFAULT_REPEAT} for backends containing 'withcache' "
+            "(applied even without this flag), 1 otherwise. Explicitly setting this flag "
+            "overrides the default for all modes."
+        ),
+    )
     args = parser.parse_args()
 
     # 解析 matrix / checklist 成统一的 [(backend, checklist_set), ...] 列表。
@@ -393,6 +518,10 @@ if __name__ == "__main__":
                 f"checklist for backend '{backend or '<default>'}' contains invalid indices: "
                 f"{invalid} (valid range: 0..{len(test_cases)-1})"
             )
+
+    # 校验 --repeat：必须 >= 1
+    if args.repeat is not None and args.repeat < 1:
+        parser.error(f"--repeat must be >= 1, got {args.repeat}")
 
     # 应用命令行参数或自动检测默认值
     if args.timeout_scale is not None:
@@ -425,21 +554,26 @@ if __name__ == "__main__":
     # - matrix 模式：每个模式只跑自己 checklist 里那套测集；不在 checklist 里的测例
     #   在这个模式下本来就已知不通过（或跑不了），没必要白耗时间和让报告飘红。
     # - 单模式：保留旧脚本"跑全部、checklist 只当 CI 判据"的行为，不破坏既有用法。
-    mode_outputs: List[Tuple[str, int, List[int], List[Optional[Tuple[int, str]]], set, List[int]]] = []
+    mode_outputs: List[Tuple[str, int, List[int], List[Optional[List[Tuple[int, str]]]], set, List[int], int]] = []
     overall_exit = 0
     for backend, cls in matrix:
         # matrix 模式下按后端名分子目录；单模式保持旧行为（日志直接写 LOG_DIR 根）。
         log_subdir = backend if matrix_mode else None
         # matrix 只跑 checklist 子集；单模式跑全部
         selected_indices = sorted(cls) if matrix_mode else list(range(len(test_cases)))
-        exit_code, results, checklist_failed = run_mode(backend, selected_indices, cls, log_subdir)
+        # 每模式独立判 repeat：显式 --repeat 覆盖全局；否则 with-cache 后端默认 5 次，其它 1 次。
+        # 这样 matrix 同时跑 withcache + nocache 时，前者重跑、后者单跑，开销可控。
+        repeat = args.repeat if args.repeat is not None else detect_default_repeat(backend)
+        exit_code, results, checklist_failed = run_mode(backend, selected_indices, cls, log_subdir, repeat)
         # 展示名：matrix 用设定的 backend；单模式用当前 env 里的 VENTUS_BACKEND
         backend_name = backend if backend is not None else os.environ.get("VENTUS_BACKEND", "default")
-        mode_outputs.append((backend_name, exit_code, selected_indices, results, cls, checklist_failed))
+        mode_outputs.append((backend_name, exit_code, selected_indices, results, cls, checklist_failed, repeat))
         overall_exit = overall_exit or exit_code
 
     # 报告：每个模式打印一段；多模式再追加 Overall 汇总。
-    for backend_name, exit_code, selected_indices, results, cls, checklist_failed in mode_outputs:
+    for backend_name, exit_code, selected_indices, results, cls, checklist_failed, repeat in mode_outputs:
+        if repeat > 1:
+            print(f"\n[{backend_name}] repeat={repeat} per testcase")
         print_mode_report(backend_name, selected_indices, results, cls, checklist_failed, exit_code)
 
     if len(mode_outputs) > 1:

@@ -18,7 +18,10 @@ jobs:
         # Ensure this directory exists on the host and is writable by the container user (uid 1000)
         - /ci/ventus-env/ccache:/ccache
         - /ci/ventus-env/artifacts:/artifacts
-    
+    defaults:
+      run:
+        shell: bash
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4

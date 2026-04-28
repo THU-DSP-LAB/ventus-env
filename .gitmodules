@@ -39,4 +39,4 @@
 [submodule "sbtsim"]
 	path = sbtsim
 	url = https://github.com/THU-DSP-LAB/ventus-gpgpu-sbt-simulator.git
-	branch = main
+	branch = develop

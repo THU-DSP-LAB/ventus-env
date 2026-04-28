@@ -82,6 +82,13 @@ test_cases = [
     TestCase(name="nn_1024"      , path=RODINIA_DIR/"opencl/nn"         , cmd=["./nn.out", "../../data/nn/list1k.txt", "-r", "20", "-lat", "13", "-lng", "27", "-f", "../../data/nn", "-t", "-p", "0", "-d", "0", "--ref", "nvidia-result-1k-lat13-lng27"]),
     TestCase(name="nn_64k"       , path=RODINIA_DIR/"opencl/nn"         , cmd=["./nn.out", "../../data/nn/list64k.txt", "-r", "20", "-lat", "30", "-lng", "90", "-f", "../../data/nn", "-t", "-p", "0", "-d", "0", "--ref", "nvidia-result-64k-lat30-lng90"], timeout=600),
     TestCase(name="kmeans_512"   , path=RODINIA_DIR/"opencl/kmeans"     , cmd=["./kmeans.out", "-o", "-r", "-i", "../../data/kmeans/512_34f.txt", "-g", "nvidia_result_512_34f_k5", "-p", "0", "-d", "0"]),
+    TestCase(name="pathfinder_4x32_h1", path=RODINIA_DIR/"opencl/pathfinder", cmd=["./pathfinder.out", "-c", "32", "-r", "4", "-h", "1", "-p", "0", "-d", "0"]),
+    TestCase(name="hotspot_64_1_1", path=RODINIA_DIR/"opencl/hotspot", cmd=["./hotspot.out", "64", "1", "1", "../../data/hotspot/temp_64", "../../data/hotspot/power_64", "output.txt", "-p", "0", "-d", "0", "--ref", "nvidia-ref-64-1-1.txt"]),
+    TestCase(name="hotspot3D_64x8_i1", path=RODINIA_DIR/"opencl/hotspot3D", cmd=["./hotspot3D.out", "-n", "64", "-l", "8", "-i", "1", "-f", "../../data/hotspot3D/power_64x8", "../../data/hotspot3D/temp_64x8", "output.txt", "-p", "0", "-d", "0"]),
+    TestCase(name="nw_16"        , path=RODINIA_DIR/"opencl/nw"         , cmd=["./nw.out", "16", "10", "./nw.cl", "-p", "0", "-d", "0"]),
+    TestCase(name="heartwall_1"  , path=RODINIA_DIR/"opencl/heartwall"  , cmd=["./run"], timeout=180),
+    TestCase(name="srad_1_1_64"  , path=RODINIA_DIR/"opencl/srad"       , cmd=["./run"], timeout=180),
+    TestCase(name="lud_64"       , path=RODINIA_DIR/"opencl/lud"        , cmd=["./lud.out", "-v", "-i", "../../data/lud/64.dat", "-p", "0", "-d", "0"], timeout=180),
     TestCase(name="mnist_conv_small", path=VENTUS_TESTCASE_DIR/"_get_case/MNIST_conv_small", cmd=["./conv.out"]),
     TestCase(name="mnist"           , path=VENTUS_TESTCASE_DIR/"_get_case/MNIST"           , cmd=["./nn_forward.out"]),
     TestCase(name="lds_corruption", path=VENTUS_TESTCASE_DIR/"others/lds_corruption", cmd=["./run"], timeout=180),
@@ -94,14 +101,17 @@ test_cases = [
 
 # Checklist 预设：一次运行中"必须通过"的 TestCase 索引子集。
 # 任一索引对应的测例未 pass 就以非零退出码返回，用于 CI 卡控。
-# - rtl-with-cache: 带 Cache 版本 RTL 目前能稳定 pass 的 9 个
-#                   （b+tree_128 / bfs_4096 / kmeans_512 在带 Cache 时尚未通过，故未纳入）
-# - rtl-no-cache:   不带 Cache 版本 RTL 目前全部 12 个都能通过
+# - isa/sbt:        旧回归集沿用当前稳定基线；本轮新补入的 Rodinia case 只把已验证通过者加入
+# - cycle:          目前能稳定通过的 case；新补入中仅 pathfinder / hotspot3D 已验证通过
+# - rtl-with-cache: 带 Cache 版本 RTL 稳定通过集合；不包含 b+tree_128 / bfs_4096 / kmeans_512 / lud_64
+# - rtl-no-cache:   不带 Cache 版本 RTL 稳定通过集合；不包含 lud_64
 REQUIRED_PRESETS = {
     "all":            list(range(len(test_cases))),
-    "cycle":          [0,1,2,4,5,6,7,8,9,10,11],
-    "rtl-with-cache": [0,1,2,4,6,7,9,10,11],
-    "rtl-no-cache":   [0,1,2,3,4,5,6,7,8,9,10,11],
+    "isa":            [0,1,2,3,4,5,6,7,8,9,11,12,13,15,16,17,18],
+    "sbt":            [0,1,2,4,5,6,7,8,9,10,11,13,14,16,17,18],
+    "cycle":          [0,1,2,3,4,5,6,7,8,9,11,16,17,18],
+    "rtl-with-cache": [0,1,2,4,6,7,9,10,11,12,13,14,16,17,18],
+    "rtl-no-cache":   [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,16,17,18],
 }
 
 # Matrix 预设：一次调用里按序跑多个 (VENTUS_BACKEND, checklist) 组合。
@@ -372,8 +382,8 @@ def run_mode(backend: Optional[str], selected_indices: List[int], checklist_set:
                     flaky_count += 1
                 else:
                     fail_count += 1
-            pbar.set_postfix_str(f"pass={pass_count}, fail={fail_count}, flaky={flaky_count}")
             pbar.update(1)
+            pbar.set_postfix_str(f"pass={pass_count}, fail={fail_count}, flaky={flaky_count}")
 
     # 等待所有进程完成并关闭进程池，并把全局 pool 置空，让 signal_handler 在模式间不误触
     pool.close()
@@ -440,6 +450,15 @@ def print_mode_report(backend_name: str, selected_indices: List[int],
                            + ", ".join(bits))
     print(f"Summary [{backend_name}]: {pass_count} passed, {fail_count} failed, "
           f"{flaky_count} flaky. {result_descript} {symbol}")
+
+    extra_passed = [
+        test_cases[i].name for i in selected_indices
+        if i not in checklist_set
+        and results[i] is not None
+        and summarize_runs(results[i])[2] == TAG_OK
+    ]
+    for testcase_name in extra_passed:
+        print(f"\033[92mNote: testcase {testcase_name} passed but is not in checklist for backend [{backend_name}].\033[0m")
 
 
 if __name__ == "__main__":

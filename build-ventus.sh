@@ -268,6 +268,14 @@ build_gvm() {
   make -f gvm.mk install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX} GVM_REF_DIR=${VENTUS_INSTALL_PREFIX}/lib
 }
 
+build_gpgpu_rtlsim_gvm() {
+  make -C ${GPGPU_DIR} --output-sync=target -j${BUILD_PARALLEL} rtlsim-gvm-install \
+    RELEASE=1 \
+    PREFIX=${VENTUS_INSTALL_PREFIX} \
+    GVM_REF_DIR=${VENTUS_INSTALL_PREFIX}/lib \
+    GVM_TRACE=1
+}
+
 # Build pocl from THU
 build_pocl() {
   mkdir -p ${POCL_BUILD_DIR}
@@ -471,6 +479,23 @@ check_if_pocl_built() {
   fi
 }
 
+is_rtlsim_program() {
+  [ "$1" = "rtlsim" ] || [ "$1" = "rtl" ] || [ "$1" = "gpgpu" ]
+}
+
+rtlsim_requested=false
+gvm_requested=false
+rtlsim_gvm_built=false
+
+for program in "${PROGRAMS_TOBUILD[@]}"
+do
+  if is_rtlsim_program "${program}"; then
+    rtlsim_requested=true
+  elif [ "${program}" = "gvm" ]; then
+    gvm_requested=true
+  fi
+done
+
 # Process build options
 for program in "${PROGRAMS_TOBUILD[@]}"
 do
@@ -487,7 +512,14 @@ do
   elif [ "${program}" == "spike" ]; then
     build_spike
   elif [ "${program}" == "rtlsim" ] || [ "${program}" == "rtl" ] || [ "${program}" == "gpgpu" ]; then
-    build_gpgpu_rtlsim
+    if [ "${rtlsim_requested}" = "true" ] && [ "${gvm_requested}" = "true" ]; then
+      if [ "${rtlsim_gvm_built}" = "false" ]; then
+        build_gpgpu_rtlsim_gvm
+        rtlsim_gvm_built=true
+      fi
+    else
+      build_gpgpu_rtlsim
+    fi
   elif [ "${program}" == "cyclesim" ] || [ "${program}" == "simulator" ]; then
     check_if_systemc_built
     build_gpgpu_cyclesim
@@ -498,7 +530,14 @@ do
       echo "WARNING: Skipping sbtsim build -- NVIDIA driver not available."
     fi
   elif [ "${program}" == "gvm" ]; then
-    build_gvm
+    if [ "${rtlsim_requested}" = "true" ] && [ "${gvm_requested}" = "true" ]; then
+      if [ "${rtlsim_gvm_built}" = "false" ]; then
+        build_gpgpu_rtlsim_gvm
+        rtlsim_gvm_built=true
+      fi
+    else
+      build_gvm
+    fi
   elif [ "${program}" == "driver" ]; then
     check_if_spike_built
     check_if_cyclesim_built

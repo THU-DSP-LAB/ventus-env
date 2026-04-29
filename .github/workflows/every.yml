@@ -32,29 +32,14 @@ jobs:
       id: build
       uses: ./.github/actions/build-ventus
 
-    - name: Run Regression Tests (ISA)
+    - name: Run Regression Tests (Spike extra)
       if: steps.build.outcome == 'success'
       run: |
         VENTUS_SPIKE_LOG=0 python3 testcases/_get_case/run_ventus_tests.py --cases cases_fast.csv --ref=results_nv --backends spike --rtol 1e-2 --atol 1e-2 --jobs 4 --timeout 7200
-        . ./env.sh
-        VENTUS_SPIKE_LOG=0 VENTUS_BACKEND=isa python3 regression-test.py --checklist=all -t 2
 
-    - name: Run Regression Tests (Cycle)
-      if: steps.build.outcome == 'success'
-      run: |
-        . ./env.sh
-        VENTUS_BACKEND=cyclesim python3 regression-test.py --checklist=cycle -t 2
-
-    - name: Run Regression Tests (RTL-without-cache)
+    - name: Run Regression Tests (ALL)
       if: steps.build.outcome == 'success'
       run: |
         . ./env.sh
         # RTL simulation is slower, so we might need to increase timeout
-        VENTUS_BACKEND=rtl-nocache python3 regression-test.py -j 4 -t 10 --checklist=rtl-no-cache
-
-    - name: Run Regression Tests (RTL-with-cache)
-      if: steps.build.outcome == 'success'
-      run: |
-        . ./env.sh
-        # RTL simulation is slower, so we might need to increase timeout
-        VENTUS_BACKEND=rtl-cache python3 regression-test.py -j 4 -t 10 --repeat=5 --checklist=rtl-with-cache
+        python3 regression-test.py --matrix all -t 10 --repeat=5

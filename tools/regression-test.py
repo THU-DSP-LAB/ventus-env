@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
+# Ventus regression test entrypoint.
+# Loads the multi-file implementation from tools/regression-test/
+# and preserves the standard invocation form:
+#   python3 tools/regression-test.py [options]
 import importlib.util
 import sys
 from pathlib import Path
 
 
 PACKAGE_NAME = "ventus_regression_test"
-PACKAGE_DIR = Path(__file__).resolve().parent / "tools" / "regression-test"
+PACKAGE_DIR = Path(__file__).resolve().parent / "regression-test"
 
 
 def load_main():

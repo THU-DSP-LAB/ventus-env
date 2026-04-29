@@ -2,6 +2,14 @@
 
 @README.md
 
+* ventus 有关的软件工具使用 `./install` 目录下的可执行程序或库，通过 `source ./env.sh` 设置环境变量让 OpenCL App 在 ventus 环境中运行
+* ventus 编译器：`./install/bin/clang -cl-std=CL2.0 -target riscv32 -mcpu=ventus-gpgpu kernel.cl -o kernel.riscv -nodefaultlibs -Wl,${VENTUS_ENV_PATH}/install/lib/crt0.o -Wl,${VENTUS_ENV_PATH}/install/lib/riscv32clc.o -Wl,--gc-sections -L${VENTUS_ENV_PATH}/install/lib -lworkitem -I${VENTUS_ENV_PATH}/installinclude/clc -O1 -Wl,-T,${VENTUS_ENV_PATH}/install/lib/ldscripts/ventus/elf32lriscv.ld -Wl,--init=${KERNEL_FUNC_NAME} -w -D__opencl_c_generic_address_space=1 -D__opencl_c_named_address_space_builtins=1 -D__OPENCL_VERSION__=200` 注意替换 `${VENTUS_ENV_PATH}` 和 `${KERNEL_FUNC_NAME}`
+* ventus 反汇编器：`./install/bin/llvm-objdump -d --mattr=+v,+zfinx kernel.riscv > kernel.dump`
+
+运行仿真时 rtl, rtl-nocache, gvm 等会直接输出日志到 stdout
+使用 `VENTUS_SPIKE_LOG=1` 时 spike 会输出日志到当前 cwd 下的文件
+通常日志文件都极长，禁止直接读入上下文，即使搜索也推荐限制最大输出长度
+
 ## Tools Script Rules
 
 - `tools/` 一级目录只放用户直接执行的入口脚本，避免把同一工具的实现文件散落在 `tools/` 根目录。

@@ -32,14 +32,102 @@ jobs:
       id: build
       uses: ./.github/actions/build-ventus
 
+    - name: Run Regression Tests (Spike)
+      id: test_isa
+      if: always() && steps.build.outcome == 'success'
+      continue-on-error: true
+      run: |
+        . ./env.sh
+        VENTUS_SPIKE_LOG=0 VENTUS_BACKEND=isa python3 regression-test.py --repeat=5 --checklist=all -t 2
+
     - name: Run Regression Tests (Spike extra)
+      id: test_spike_extra
       if: steps.build.outcome == 'success'
+      continue-on-error: true
       run: |
         VENTUS_SPIKE_LOG=0 python3 testcases/_get_case/run_ventus_tests.py --cases cases_fast.csv --ref=results_nv --backends spike --rtol 1e-2 --atol 1e-2 --jobs 4 --timeout 7200
 
-    - name: Run Regression Tests (ALL)
-      if: steps.build.outcome == 'success'
+    - name: Run Regression Tests (CycleSim)
+      id: test_cycle
+      if: always() && steps.build.outcome == 'success'
+      continue-on-error: true
+      run: |
+        . ./env.sh
+        VENTUS_BACKEND=cyclesim python3 regression-test.py --repeat=5 --checklist=cycle -t 4
+
+    - name: Run Regression Tests (RTL-without-cache)
+      id: test_rtl_no_cache
+      if: always() && steps.build.outcome == 'success'
+      continue-on-error: true
       run: |
         . ./env.sh
         # RTL simulation is slower, so we might need to increase timeout
-        python3 regression-test.py --matrix all -t 10 --repeat=5
+        VENTUS_BACKEND=rtl-nocache python3 regression-test.py -j 4 -t 10 --repeat=5 --checklist=rtl-no-cache
+
+    - name: Run Regression Tests (RTL-with-cache)
+      id: test_rtl_cache
+      if: always() && steps.build.outcome == 'success'
+      continue-on-error: true
+      run: |
+        . ./env.sh
+        # RTL simulation is slower, so we might need to increase timeout
+        VENTUS_BACKEND=rtl-cache python3 regression-test.py -j 4 -t 10 --repeat=5 --checklist=rtl-with-cache
+
+    - name: Run Regression Tests (RTL-without-cache-gvm)
+      id: test_gvm_no_cache
+      if: always() && steps.build.outcome == 'success'
+      continue-on-error: true
+      run: |
+        . ./env.sh
+        # RTL simulation is slower, so we might need to increase timeout
+        VENTUS_BACKEND=gvm-nocache python3 regression-test.py -j 4 -t 10 --repeat=5 --checklist=rtl-no-cache
+
+    - name: Run Regression Tests (RTL-with-cache-gvm)
+      id: test_gvm_cache
+      if: always() && steps.build.outcome == 'success'
+      continue-on-error: true
+      run: |
+        . ./env.sh
+        # RTL simulation is slower, so we might need to increase timeout
+        VENTUS_BACKEND=gvm-cache python3 regression-test.py -j 4 -t 10 --repeat=5 --checklist=rtl-with-cache
+
+    - name: Check Regression Test Results
+      if: always() && steps.build.outcome == 'success'
+      env:
+        TEST_SPIKE_EXTRA_OUTCOME: ${{ steps.test_spike_extra.outcome }}
+        TEST_ISA_OUTCOME: ${{ steps.test_isa.outcome }}
+        TEST_CYCLE_OUTCOME: ${{ steps.test_cycle.outcome }}
+        TEST_RTL_NO_CACHE_OUTCOME: ${{ steps.test_rtl_no_cache.outcome }}
+        TEST_RTL_CACHE_OUTCOME: ${{ steps.test_rtl_cache.outcome }}
+        TEST_GVM_NO_CACHE_OUTCOME: ${{ steps.test_gvm_no_cache.outcome }}
+        TEST_GVM_CACHE_OUTCOME: ${{ steps.test_gvm_cache.outcome }}
+      run: |
+        failed_steps=()
+
+        if [ "$TEST_SPIKE_EXTRA_OUTCOME" != "success" ]; then
+          failed_steps+=("Run Regression Tests (Spike extra)")
+        fi
+        if [ "$TEST_ISA_OUTCOME" != "success" ]; then
+          failed_steps+=("Run Regression Tests (ISA)")
+        fi
+        if [ "$TEST_CYCLE_OUTCOME" != "success" ]; then
+          failed_steps+=("Run Regression Tests (Cycle)")
+        fi
+        if [ "$TEST_RTL_NO_CACHE_OUTCOME" != "success" ]; then
+          failed_steps+=("Run Regression Tests (RTL-without-cache)")
+        fi
+        if [ "$TEST_RTL_CACHE_OUTCOME" != "success" ]; then
+          failed_steps+=("Run Regression Tests (RTL-with-cache)")
+        fi
+        if [ "$TEST_GVM_NO_CACHE_OUTCOME" != "success" ]; then
+          failed_steps+=("Run Regression Tests (RTL-without-cache-gvm)")
+        fi
+        if [ "$TEST_GVM_CACHE_OUTCOME" != "success" ]; then
+          failed_steps+=("Run Regression Tests (RTL-with-cache-gvm)")
+        fi
+
+        if [ "${#failed_steps[@]}" -gt 0 ]; then
+          printf 'Failed regression test steps:\n'
+          printf ' - %s\n' "${failed_steps[@]}"
+          exit 1
+        fi

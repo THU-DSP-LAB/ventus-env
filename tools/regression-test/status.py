@@ -1,6 +1,7 @@
 TAG_OK = "ok"
 TAG_FAIL = "failed"
 TAG_TIMEOUT = "timeout"
+TAG_HANG = "hang"
 TAG_COMPILE_FAIL = "compile_failed"
 TAG_FLAKY = "flaky"
 

@@ -1,5 +1,5 @@
 from .cases import TEST_CASES
-from .status import TAG_COMPILE_FAIL, TAG_OK, TAG_TIMEOUT, summarize_runs
+from .status import TAG_COMPILE_FAIL, TAG_HANG, TAG_OK, TAG_TIMEOUT, summarize_runs
 
 
 def format_status(rc: int, tag: str) -> str:
@@ -9,6 +9,8 @@ def format_status(rc: int, tag: str) -> str:
         return "\033[93mCompile Failed\033[0m"
     if tag == TAG_TIMEOUT:
         return "\033[91mTime Exceeded\033[0m"
+    if tag == TAG_HANG:
+        return "\033[91mHang\033[0m"
     return "\033[91mFailed\033[0m"
 
 
@@ -22,6 +24,8 @@ def format_run_status(runs: list[tuple[int, str]]) -> str:
         return f"\033[93mCompile Failed {passed}/{total}\033[0m"
     if tag == TAG_TIMEOUT:
         return f"\033[91mTime Exceeded {passed}/{total}\033[0m"
+    if tag == TAG_HANG:
+        return f"\033[91mHang {passed}/{total}\033[0m"
     return f"\033[91mFailed {passed}/{total}\033[0m"
 
 

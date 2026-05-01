@@ -6,12 +6,18 @@ import shutil
 import signal
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from tqdm import tqdm
 
 from .cases import LOG_DIR, TEST_CASES, TestCase
+from .numa import (
+    NumaAllocator,
+    NumaBinding,
+    create_allocator,
+    wrap_command,
+)
 from .process import run_command, terminate_process_group
 from .status import TAG_COMPILE_FAIL, TAG_FAIL, TAG_HANG, TAG_OK, TAG_TIMEOUT, summarize_runs
 
@@ -64,6 +70,7 @@ class TestJob:
     run_idx: int
     total_reps: int
     timeout_scale: float
+    numa_binding: NumaBinding | None = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +107,8 @@ def run_plan(
     jobs: int,
     timeout_scale: float,
     shared_state: dict,
+    *,
+    numactl_policy: str,
 ) -> tuple[list[tuple], int]:
     global _active_pids, _active_rep_cwds, _job_events, _pool
     _active_pids = shared_state["active_pids"]
@@ -115,13 +124,32 @@ def run_plan(
         for config in backend_configs
     }
     test_jobs = _build_test_jobs(backend_configs, selected_indices, timeout_scale)
-    _print_plan_header(backend_configs, jobs, timeout_scale, test_jobs, selected_indices)
+    _print_plan_header(
+        backend_configs,
+        jobs,
+        timeout_scale,
+        test_jobs,
+        selected_indices,
+        numactl_policy,
+    )
     _validate_worker_thread_budget(jobs, test_jobs)
+    numa_allocator = _create_numa_allocator(numactl_policy, test_jobs)
 
     pool_processes = _pool_process_count(jobs, test_jobs)
-    _pool = multiprocessing.Pool(processes=pool_processes, initializer=_init_worker, initargs=(_worker_state(shared_state),))
+    _pool = multiprocessing.Pool(
+        processes=pool_processes,
+        initializer=_init_worker,
+        initargs=(_worker_state(shared_state),),
+    )
     try:
-        _collect_plan_results(backend_configs, test_jobs, results_by_backend, len(selected_indices), jobs)
+        _collect_plan_results(
+            backend_configs,
+            test_jobs,
+            results_by_backend,
+            len(selected_indices),
+            jobs,
+            numa_allocator,
+        )
     except BaseException:
         _terminate_pool()
         _cleanup_active_rep_cwds()
@@ -204,6 +232,26 @@ def worker_threads_for_job(job: TestJob) -> int:
     return worker_threads_for_backend(job.backend.env_backend)
 
 
+def should_bind_numa(job: TestJob) -> bool:
+    return worker_threads_for_job(job) > DEFAULT_WORKER_THREADS
+
+
+def _create_numa_allocator(policy: str, test_jobs: list[TestJob]) -> NumaAllocator:
+    min_cpus_per_node = max(
+        (worker_threads_for_job(job) for job in test_jobs if should_bind_numa(job)),
+        default=0,
+    )
+    allocator, warning = create_allocator(policy, min_cpus_per_node)
+    if warning is not None:
+        tqdm.write(f"NUMA auto-bind disabled: {warning}")
+    elif allocator.enabled:
+        tqdm.write(
+            "NUMA auto-bind enabled for RTL/GVM jobs "
+            f"(min cpus per node={min_cpus_per_node}, numa nodes={allocator.capacity})"
+        )
+    return allocator
+
+
 def _validate_worker_thread_budget(worker_threads: int, test_jobs: list[TestJob]) -> None:
     largest_job = max((worker_threads_for_job(job) for job in test_jobs), default=0)
     if largest_job > worker_threads:
@@ -225,12 +273,14 @@ def _print_plan_header(
     timeout_scale: float,
     test_jobs: list[TestJob],
     selected_indices: list[int],
+    numactl_policy: str,
 ) -> None:
     names = ", ".join(config.name for config in backend_configs)
     print(
         f"\n>>> Running regression plan [{names}] "
         f"(worker threads={jobs}, timeout scale={timeout_scale}, "
-        f"cases={len(selected_indices)}, total_reps={len(test_jobs)})"
+        f"cases={len(selected_indices)}, total_reps={len(test_jobs)}, "
+        f"numactl={numactl_policy})"
     )
 
 
@@ -266,6 +316,7 @@ def _collect_plan_results(
     results_by_backend: dict[str, list[list[tuple[int, str] | None] | None]],
     selected_count: int,
     worker_thread_budget: int,
+    numa_allocator: NumaAllocator,
 ) -> None:
     repeat_by_backend = {config.name: config.repeat for config in backend_configs}
     started_by_backend: dict[str, list[list[bool] | None]] = {
@@ -274,7 +325,7 @@ def _collect_plan_results(
     }
     bars = _create_progress_bars(backend_configs, len(test_jobs), selected_count)
     try:
-        scheduler = WeightedJobScheduler(_pool, test_jobs, worker_thread_budget)
+        scheduler = WeightedJobScheduler(_pool, test_jobs, worker_thread_budget, numa_allocator)
         while not scheduler.done:
             scheduler.submit_ready()
             _drain_job_events(started_by_backend, results_by_backend, repeat_by_backend, bars)
@@ -293,7 +344,13 @@ def _collect_plan_results(
 
 
 class WeightedJobScheduler:
-    def __init__(self, pool, test_jobs: list[TestJob], worker_thread_budget: int):
+    def __init__(
+        self,
+        pool,
+        test_jobs: list[TestJob],
+        worker_thread_budget: int,
+        numa_allocator: NumaAllocator | None = None,
+    ):
         self._pool = pool
         self._pending = list(test_jobs)
         self._active: list[ActiveJob] = []
@@ -301,6 +358,7 @@ class WeightedJobScheduler:
         self._used_worker_threads = 0
         self._total = len(test_jobs)
         self._worker_thread_budget = worker_thread_budget
+        self._numa_allocator = numa_allocator or NumaAllocator([])
 
     @property
     def done(self) -> bool:
@@ -337,9 +395,16 @@ class WeightedJobScheduler:
 
     def _submit_job(self, pending_index: int, worker_threads: int) -> None:
         job = self._pending.pop(pending_index)
-        async_result = self._pool.apply_async(run_test_job, (job,))
-        self._active.append(ActiveJob(job, async_result, worker_threads))
+        numa_binding = self._allocate_numa_binding(job)
+        bound_job = replace(job, numa_binding=numa_binding) if numa_binding is not None else job
+        async_result = self._pool.apply_async(run_test_job, (bound_job,))
+        self._active.append(ActiveJob(bound_job, async_result, worker_threads))
         self._used_worker_threads += worker_threads
+
+    def _allocate_numa_binding(self, job: TestJob) -> NumaBinding | None:
+        if not should_bind_numa(job) or not self._numa_allocator.enabled:
+            return None
+        return self._numa_allocator.allocate()
 
 
 def _record_job_result(
@@ -551,10 +616,17 @@ def _run_single_rep(job: TestJob, env: dict[str, str], compile_env: dict[str, st
     rep_cwd: Path | None = None
     try:
         rep_cwd = _make_rep_cwd(job.testcase.path, job.run_idx, os.getpid())
+        run_cmd = wrap_command(job.testcase.cmd, job.numa_binding)
         with open(run_log_path, "w") as log_file:
             log_file.write(f"=== Run Test ({job.run_idx}/{job.total_reps}) ===\n")
-            log_file.write(f"TestCase {job.testcase_index}: {job.testcase.name} begin (run {job.run_idx}/{job.total_reps})...\n")
-            log_file.write(f"COMMAND: {format_command(job.testcase.cmd)}\n")
+            log_file.write(
+                f"TestCase {job.testcase_index}: {job.testcase.name} "
+                f"begin (run {job.run_idx}/{job.total_reps})...\n"
+            )
+            if job.numa_binding is not None:
+                log_file.write(f"NUMACTL_NODE: {job.numa_binding.node}\n")
+                log_file.write(f"NUMACTL_CPUS: {format_cpu_list(job.numa_binding.cpus)}\n")
+            log_file.write(f"COMMAND: {format_command(run_cmd)}\n")
             log_file.write(f"VENTUS_BACKEND: {env.get('VENTUS_BACKEND', '<unset>')}\n")
             log_file.write(f"REP_CWD: {rep_cwd}\n")
             log_file.flush()
@@ -567,7 +639,14 @@ def _run_single_rep(job: TestJob, env: dict[str, str], compile_env: dict[str, st
                 log_file.write("=== Execute Testcase ===\n")
                 log_file.flush()
             try:
-                rc = run_command(job.testcase.cmd, rep_cwd, env, log_file, job.testcase.timeout * job.timeout_scale, _active_pids)
+                rc = run_command(
+                    run_cmd,
+                    rep_cwd,
+                    env,
+                    log_file,
+                    job.testcase.timeout * job.timeout_scale,
+                    _active_pids,
+                )
             except subprocess.TimeoutExpired:
                 log_file.write("\nTestcase execution timeout, Failed\n")
                 log_file.flush()
@@ -693,3 +772,7 @@ def _classify_timeout(log_path: Path, tail_bytes: int = 16384) -> str:
 
 def format_command(cmd: list[str]) -> str:
     return " ".join(repr(part) if " " in part else part for part in cmd)
+
+
+def format_cpu_list(cpus: tuple[int, ...]) -> str:
+    return ",".join(str(cpu) for cpu in cpus)

@@ -4,6 +4,7 @@ import os
 import sys
 
 from .cases import LOG_DIR, MATRIX_PRESETS, REQUIRED_PRESETS, TEST_CASES
+from .numa import NUMACTL_AUTO, NUMACTL_CHOICES
 from .options import (
     WITHCACHE_DEFAULT_REPEAT,
     detect_default_repeat,
@@ -92,6 +93,16 @@ def build_parser() -> argparse.ArgumentParser:
             "suffix, 1 otherwise. Explicitly setting this flag overrides the default for all modes."
         ),
     )
+    parser.add_argument(
+        "--numactl",
+        choices=NUMACTL_CHOICES,
+        default=NUMACTL_AUTO,
+        help=(
+            "CPU/memory bind RTL/GVM testcase execution with numactl. "
+            "auto binds when numactl and lscpu topology are available; "
+            "require exits if binding cannot be prepared; off disables binding."
+        ),
+    )
     return parser
 
 
@@ -131,7 +142,14 @@ def run_all_modes(
             checklist,
             repeat,
         ))
-    return run_plan(backend_configs, selected_indices, jobs, timeout_scale, shared_state)
+    return run_plan(
+        backend_configs,
+        selected_indices,
+        jobs,
+        timeout_scale,
+        shared_state,
+        numactl_policy=args.numactl,
+    )
 
 
 def print_reports(mode_outputs: list[tuple], overall_exit: int) -> None:

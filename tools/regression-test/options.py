@@ -8,11 +8,8 @@ from .cases import MATRIX_PRESETS, REQUIRED_PRESETS, TEST_CASES
 
 
 WITHCACHE_DEFAULT_REPEAT = 10
-DEFAULT_JOBS_CAP = 32
-RTL_CPU_DIVISOR = 8
-JOBS_NUMERATOR = 3
-JOBS_DENOMINATOR = 2
-RTL_BACKENDS = {"rtl", "rtlsim", "gpgpu", "gvm"}
+JOBS_NUMERATOR = 2
+JOBS_DENOMINATOR = 3
 WITH_CACHE_SUFFIXES = {"cache", "withcache", "with-cache", "with"}
 NO_CACHE_SUFFIXES = {"nocache", "no-cache", "withoutcache", "without-cache", "without"}
 
@@ -67,17 +64,13 @@ def _normalize_cache_suffix(suffix: str) -> str:
     return suffix
 
 
-def suggest_default_jobs(max_cap: int = DEFAULT_JOBS_CAP, backend: str | None = None) -> int:
+def suggest_default_jobs() -> int:
     cpu = _available_cpu_count()
-    effective_backend = normalize_backend(backend).env_backend
-    backend_name = effective_backend.split("-")[0].lower()
-    if backend_name in RTL_BACKENDS:
-        cpu = max(1, cpu // RTL_CPU_DIVISOR)
-    return _cap_jobs(cpu, max_cap)
+    return _default_worker_threads(cpu)
 
 
 def suggest_default_matrix_jobs(total_jobs: int) -> int:
-    return _cap_jobs(_available_cpu_count(), min(DEFAULT_JOBS_CAP, total_jobs))
+    return suggest_default_jobs()
 
 
 def _available_cpu_count() -> int:
@@ -86,8 +79,8 @@ def _available_cpu_count() -> int:
     return os.cpu_count() or multiprocessing.cpu_count() or 1
 
 
-def _cap_jobs(cpu: int, max_cap: int) -> int:
-    return max(1, min(max_cap, cpu * JOBS_NUMERATOR // JOBS_DENOMINATOR))
+def _default_worker_threads(cpu: int) -> int:
+    return max(1, cpu * JOBS_NUMERATOR // JOBS_DENOMINATOR)
 
 
 def detect_default_repeat(backend: str | None) -> int:

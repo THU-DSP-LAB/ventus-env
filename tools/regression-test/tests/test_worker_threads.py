@@ -1,0 +1,100 @@
+import importlib.util
+import sys
+import unittest
+from pathlib import Path
+from unittest import mock
+
+
+PACKAGE_NAME = "ventus_regression_test_for_tests"
+PACKAGE_DIR = Path(__file__).resolve().parents[1]
+
+
+def load_module(module_name: str):
+    if PACKAGE_NAME not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            PACKAGE_NAME,
+            PACKAGE_DIR / "__init__.py",
+            submodule_search_locations=[str(PACKAGE_DIR)],
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[PACKAGE_NAME] = module
+        spec.loader.exec_module(module)
+    return __import__(f"{PACKAGE_NAME}.{module_name}", fromlist=[module_name])
+
+
+class FakeAsyncResult:
+    def __init__(self, result):
+        self._result = result
+
+    def ready(self):
+        return True
+
+    def get(self):
+        return self._result
+
+
+class FakePool:
+    def __init__(self):
+        self.submitted = []
+
+    def apply_async(self, func, args):
+        job = args[0]
+        self.submitted.append(job)
+        return FakeAsyncResult(func(job))
+
+
+def make_job(backend):
+    runner = load_module("runner")
+    cases = load_module("cases")
+    config = runner.BackendRunConfig(backend, backend, {0}, 1)
+    return runner.TestJob(config, 0, cases.TEST_CASES[0], 1, 1, 1)
+
+
+class WorkerThreadTests(unittest.TestCase):
+    def test_default_jobs_is_two_thirds_of_available_cpu(self):
+        options = load_module("options")
+        with mock.patch.object(options, "_available_cpu_count", return_value=12):
+            self.assertEqual(options.suggest_default_jobs(), 8)
+
+    def test_worker_threads_for_backends(self):
+        runner = load_module("runner")
+
+        self.assertEqual(runner.worker_threads_for_backend("rtlsim-with-cache"), 8)
+        self.assertEqual(runner.worker_threads_for_backend("gvm-no-cache"), 8)
+        self.assertEqual(runner.worker_threads_for_backend("spike"), 1)
+        self.assertEqual(runner.worker_threads_for_backend("cyclesim"), 1)
+
+    def test_scheduler_uses_weighted_worker_thread_budget(self):
+        runner = load_module("runner")
+        jobs = [make_job("rtlsim-with-cache"), make_job("gvm-no-cache"), make_job("spike")]
+        pool = FakePool()
+        with mock.patch.object(runner, "run_test_job", self._fake_run_test_job):
+            scheduler = runner.WeightedJobScheduler(pool, jobs, worker_thread_budget=9)
+            scheduler.submit_ready()
+
+        self.assertEqual(
+            [job.backend.env_backend for job in pool.submitted],
+            ["rtlsim-with-cache", "spike"],
+        )
+
+    def test_scheduler_allows_two_rtl_jobs_with_sixteen_worker_threads(self):
+        runner = load_module("runner")
+        jobs = [make_job("rtlsim-with-cache"), make_job("gvm-no-cache"), make_job("spike")]
+        pool = FakePool()
+        with mock.patch.object(runner, "run_test_job", self._fake_run_test_job):
+            scheduler = runner.WeightedJobScheduler(pool, jobs, worker_thread_budget=16)
+            scheduler.submit_ready()
+
+        self.assertEqual(
+            [job.backend.env_backend for job in pool.submitted],
+            ["rtlsim-with-cache", "gvm-no-cache"],
+        )
+
+    @staticmethod
+    def _fake_run_test_job(job):
+        runner = load_module("runner")
+        return runner.JobResult(job.backend.name, job.testcase_index, job.run_idx, 0, "OK")
+
+
+if __name__ == "__main__":
+    unittest.main()

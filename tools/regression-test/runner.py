@@ -1,10 +1,11 @@
-import fnmatch
 import multiprocessing
 import os
+import queue
 import re
 import shutil
 import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,10 @@ from .status import TAG_COMPILE_FAIL, TAG_FAIL, TAG_HANG, TAG_OK, TAG_TIMEOUT, s
 
 COMPILE_TIMEOUT_SECONDS = 60
 TEST_TIMEOUT_RETURN_CODE = 9999
+OVERALL_PROGRESS_KEY = "_overall"
+RTL_GVM_WORKER_THREADS = 8
+DEFAULT_WORKER_THREADS = 1
+RTL_GVM_BACKEND_BASES = {"rtl", "rtlsim", "gpgpu", "gvm"}
 BACKEND_SCHEDULE_RANKS = {
     "gvm-with-cache": 0,
     "rtlsim-with-cache": 1,
@@ -27,18 +32,6 @@ BACKEND_SCHEDULE_RANKS = {
     "spike": 6,
 }
 
-# Per-rep cwd 的 symlink 排除清单：测例自己 runtime 重写/重新生成的产物。
-# 把它们排除在 symlink 之外，否则多个并行 rep 会通过 symlink 写穿透到原始
-# 文件、相互覆盖，引发 "ELF: cannot open file 'object0.riscv'" 等 race。
-# 让每个 rep 在自己的 cwd 里 fresh 生成这些文件即可。
-_RUNTIME_PRODUCT_GLOBS = (
-    "object0.*",                                  # PoCL kernel artifacts: cl/dump/riscv/vmem/riscv.log
-    "*_0.log", "*_0.data", "*_0.metadata",        # PoCL per-kernel runtime files
-    "gvm.log", "mygvm.log",                       # GVM trace
-    "*.fst", "*.fst.hier",                        # Verilator/wave dumps
-    "*.kernel.log",
-)
-
 # 触发 hang 分类的"仿真还在干活"标志。命中 = 仿真在 commit 指令 / 做 lsu / 在
 # 输出 testcase 友好结果——这些都说明只是慢，不是死锁。
 # 没命中且 timeout = 仿真只剩 [RTL debug]@<cycle> 在递增、kernel 已经 hang。
@@ -48,10 +41,11 @@ _HANG_ACTIVITY_RE = re.compile(
 )
 
 _pool = None
-_compile_status = None
-_compile_locks = None
 _active_pids = None
+_active_rep_cwds = None
+_job_events = None
 _interrupting = False
+JOB_EVENT_STARTED = "started"
 
 
 @dataclass(frozen=True)
@@ -81,16 +75,22 @@ class JobResult:
     tag: str
 
 
+@dataclass(frozen=True)
+class ActiveJob:
+    job: TestJob
+    async_result: object
+    worker_threads: int
+
+
 def install_signal_handler() -> None:
     signal.signal(signal.SIGINT, _signal_handler)
 
 
 def create_shared_state(manager) -> dict:
-    paths = {str(tc.path) for tc in TEST_CASES}
     return {
-        "compile_status": manager.dict(),
-        "compile_locks": {path: manager.Lock() for path in paths},
         "active_pids": manager.dict(),
+        "active_rep_cwds": manager.dict(),
+        "job_events": manager.Queue(),
     }
 
 
@@ -101,11 +101,12 @@ def run_plan(
     timeout_scale: float,
     shared_state: dict,
 ) -> tuple[list[tuple], int]:
-    global _active_pids, _pool
+    global _active_pids, _active_rep_cwds, _job_events, _pool
     _active_pids = shared_state["active_pids"]
+    _active_rep_cwds = shared_state["active_rep_cwds"]
+    _job_events = shared_state["job_events"]
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    _prepare_log_dir(LOG_DIR / "compile")
     for config in backend_configs:
         _prepare_log_dir(LOG_DIR / config.name)
 
@@ -115,12 +116,15 @@ def run_plan(
     }
     test_jobs = _build_test_jobs(backend_configs, selected_indices, timeout_scale)
     _print_plan_header(backend_configs, jobs, timeout_scale, test_jobs, selected_indices)
+    _validate_worker_thread_budget(jobs, test_jobs)
 
-    _pool = multiprocessing.Pool(processes=jobs, initializer=_init_worker, initargs=(_worker_state(shared_state),))
+    pool_processes = _pool_process_count(jobs, test_jobs)
+    _pool = multiprocessing.Pool(processes=pool_processes, initializer=_init_worker, initargs=(_worker_state(shared_state),))
     try:
-        _collect_plan_results(backend_configs, test_jobs, results_by_backend, len(selected_indices))
+        _collect_plan_results(backend_configs, test_jobs, results_by_backend, len(selected_indices), jobs)
     except BaseException:
         _terminate_pool()
+        _cleanup_active_rep_cwds()
         raise
     else:
         _close_pool()
@@ -129,22 +133,13 @@ def run_plan(
 
 
 def run_test_job(job: TestJob) -> JobResult:
-    """Run a single rep of one (backend, testcase). Compile is gated by a per-path
-    lock + shared compile_status so parallel reps of the same case make-once.
-    The actual run happens in a per-rep sibling cwd so reps of the same case can
-    safely run concurrently without clobbering each other's runtime products."""
+    _emit_job_started(job)
     run_env = os.environ.copy()
     run_env["VENTUS_BACKEND"] = job.backend.env_backend
     compile_env = os.environ.copy()
     compile_env.pop("VENTUS_BACKEND", None)
 
-    if job.testcase.need_make:
-        compile_result = _compile_testcase(job.testcase, compile_env, job.backend.name)
-        if compile_result is not None:
-            rc, tag = compile_result
-            return JobResult(job.backend.name, job.testcase_index, job.run_idx, rc, tag)
-
-    rc, tag = _run_single_rep(job, run_env)
+    rc, tag = _run_single_rep(job, run_env, compile_env)
     return JobResult(job.backend.name, job.testcase_index, job.run_idx, rc, tag)
 
 
@@ -159,6 +154,7 @@ def _signal_handler(signum, frame) -> None:
             terminate_process_group(int(pid))
     if _pool is not None:
         _pool.terminate()
+    _cleanup_active_rep_cwds()
     raise KeyboardInterrupt
 
 
@@ -167,10 +163,8 @@ def _build_test_jobs(
     selected_indices: list[int],
     timeout_scale: float,
 ) -> list[TestJob]:
-    """把 (backend × case × rep) 完全摊平进 pool。慢 case (nn_64k 900s, backprop_1024
-    300s) 的多个 reps 也能在不同 worker 上同时跑，避免被串行化把 wall time 推到很长。
-    Per-rep cwd isolation (_make_rep_cwd) 保证同 case 的多 reps 不会互相覆盖
-    cwd 下的 runtime 产物 (object0.riscv / gvm.log / *.fst 等)。"""
+    """把 (backend × case × rep) 完全摊平进 pool。每个 rep 在同级 .rep_* cwd
+    中从干净 Git tree 或 reflink copy 独立编译、运行，避免同源目录运行产物互相覆盖。"""
     ordered_configs = _schedule_backend_configs(backend_configs)
     if not ordered_configs or not selected_indices:
         return []
@@ -199,6 +193,32 @@ def _backend_schedule_rank(config: BackendRunConfig) -> int:
     return BACKEND_SCHEDULE_RANKS.get(config.env_backend, len(BACKEND_SCHEDULE_RANKS))
 
 
+def worker_threads_for_backend(backend: str) -> int:
+    backend_base = backend.split("-")[0].lower()
+    if backend_base in RTL_GVM_BACKEND_BASES:
+        return RTL_GVM_WORKER_THREADS
+    return DEFAULT_WORKER_THREADS
+
+
+def worker_threads_for_job(job: TestJob) -> int:
+    return worker_threads_for_backend(job.backend.env_backend)
+
+
+def _validate_worker_thread_budget(worker_threads: int, test_jobs: list[TestJob]) -> None:
+    largest_job = max((worker_threads_for_job(job) for job in test_jobs), default=0)
+    if largest_job > worker_threads:
+        raise ValueError(
+            f"--jobs={worker_threads} is too small for selected backends; "
+            f"largest testcase requires {largest_job} worker threads"
+        )
+
+
+def _pool_process_count(worker_threads: int, test_jobs: list[TestJob]) -> int:
+    if not test_jobs:
+        return 1
+    return min(worker_threads, len(test_jobs))
+
+
 def _print_plan_header(
     backend_configs: list[BackendRunConfig],
     jobs: int,
@@ -209,7 +229,7 @@ def _print_plan_header(
     names = ", ".join(config.name for config in backend_configs)
     print(
         f"\n>>> Running regression plan [{names}] "
-        f"(jobs={jobs}, timeout scale={timeout_scale}, "
+        f"(worker threads={jobs}, timeout scale={timeout_scale}, "
         f"cases={len(selected_indices)}, total_reps={len(test_jobs)})"
     )
 
@@ -228,16 +248,16 @@ def _prepare_log_dir(log_dir: Path) -> None:
 
 def _worker_state(shared_state: dict) -> tuple:
     return (
-        shared_state["compile_status"],
-        shared_state["compile_locks"],
         shared_state["active_pids"],
+        shared_state["active_rep_cwds"],
+        shared_state["job_events"],
     )
 
 
 def _init_worker(state: tuple) -> None:
-    global _active_pids, _compile_locks, _compile_status
+    global _active_pids, _active_rep_cwds, _job_events
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    _compile_status, _compile_locks, _active_pids = state
+    _active_pids, _active_rep_cwds, _job_events = state
 
 
 def _collect_plan_results(
@@ -245,21 +265,103 @@ def _collect_plan_results(
     test_jobs: list[TestJob],
     results_by_backend: dict[str, list[list[tuple[int, str] | None] | None]],
     selected_count: int,
+    worker_thread_budget: int,
 ) -> None:
     repeat_by_backend = {config.name: config.repeat for config in backend_configs}
+    started_by_backend: dict[str, list[list[bool] | None]] = {
+        config.name: [None] * len(TEST_CASES)
+        for config in backend_configs
+    }
     bars = _create_progress_bars(backend_configs, len(test_jobs), selected_count)
     try:
-        for result in _pool.imap_unordered(run_test_job, test_jobs):
-            backend_results = results_by_backend[result.backend_name]
-            current = backend_results[result.testcase_index]
-            if current is None:
-                current = [None] * repeat_by_backend[result.backend_name]
-                backend_results[result.testcase_index] = current
-            current[result.run_idx - 1] = (result.rc, result.tag)
-            _update_progress_bars(bars, result.backend_name, backend_results)
+        scheduler = WeightedJobScheduler(_pool, test_jobs, worker_thread_budget)
+        while not scheduler.done:
+            scheduler.submit_ready()
+            _drain_job_events(started_by_backend, results_by_backend, repeat_by_backend, bars)
+            if scheduler.collect_ready_results(
+                results_by_backend,
+                repeat_by_backend,
+                started_by_backend,
+                bars,
+            ):
+                continue
+            time.sleep(0.1)
+        _drain_job_events(started_by_backend, results_by_backend, repeat_by_backend, bars)
     finally:
         for bar in bars.values():
             bar.close()
+
+
+class WeightedJobScheduler:
+    def __init__(self, pool, test_jobs: list[TestJob], worker_thread_budget: int):
+        self._pool = pool
+        self._pending = list(test_jobs)
+        self._active: list[ActiveJob] = []
+        self._completed = 0
+        self._used_worker_threads = 0
+        self._total = len(test_jobs)
+        self._worker_thread_budget = worker_thread_budget
+
+    @property
+    def done(self) -> bool:
+        return self._completed >= self._total
+
+    def submit_ready(self) -> None:
+        next_index = 0
+        while next_index < len(self._pending):
+            job = self._pending[next_index]
+            worker_threads = worker_threads_for_job(job)
+            if self._used_worker_threads + worker_threads > self._worker_thread_budget:
+                next_index += 1
+                continue
+            self._submit_job(next_index, worker_threads)
+
+    def collect_ready_results(
+        self,
+        results_by_backend: dict[str, list[list[tuple[int, str] | None] | None]],
+        repeat_by_backend: dict[str, int],
+        started_by_backend: dict[str, list[list[bool] | None]],
+        bars: dict[str, tqdm],
+    ) -> bool:
+        collected = False
+        for active in list(self._active):
+            if not active.async_result.ready():
+                continue
+            result = active.async_result.get()
+            self._active.remove(active)
+            self._used_worker_threads -= active.worker_threads
+            self._completed += 1
+            _record_job_result(result, results_by_backend, repeat_by_backend, started_by_backend, bars)
+            collected = True
+        return collected
+
+    def _submit_job(self, pending_index: int, worker_threads: int) -> None:
+        job = self._pending.pop(pending_index)
+        async_result = self._pool.apply_async(run_test_job, (job,))
+        self._active.append(ActiveJob(job, async_result, worker_threads))
+        self._used_worker_threads += worker_threads
+
+
+def _record_job_result(
+    result: JobResult,
+    results_by_backend: dict[str, list[list[tuple[int, str] | None] | None]],
+    repeat_by_backend: dict[str, int],
+    started_by_backend: dict[str, list[list[bool] | None]],
+    bars: dict[str, tqdm],
+) -> None:
+    backend_results = results_by_backend[result.backend_name]
+    current = backend_results[result.testcase_index]
+    if current is None:
+        current = [None] * repeat_by_backend[result.backend_name]
+        backend_results[result.testcase_index] = current
+    current[result.run_idx - 1] = (result.rc, result.tag)
+    _update_progress_bars(
+        bars,
+        result.backend_name,
+        backend_results,
+        started_by_backend[result.backend_name],
+        completed=True,
+    )
 
 
 def _create_progress_bars(
@@ -267,10 +369,14 @@ def _create_progress_bars(
     total_reps: int,
     selected_count: int,
 ) -> dict[str, tqdm]:
-    bars: dict[str, tqdm] = {
-        "_overall": tqdm(total=total_reps, desc="Overall", unit="rep", position=0),
-    }
-    for position, config in enumerate(backend_configs, start=1):
+    show_overall = len(backend_configs) > 1
+    bars: dict[str, tqdm] = {}
+    start_position = 0
+    if show_overall:
+        bars[OVERALL_PROGRESS_KEY] = tqdm(total=total_reps, desc="Overall", unit="rep", position=0)
+        start_position = 1
+
+    for position, config in enumerate(backend_configs, start=start_position):
         bars[config.name] = tqdm(
             total=selected_count * config.repeat,
             desc=f"Running [{config.name}]",
@@ -285,10 +391,17 @@ def _update_progress_bars(
     bars: dict[str, tqdm],
     backend_name: str,
     backend_results: list[list[tuple[int, str] | None] | None],
+    backend_started: list[list[bool] | None],
+    completed: bool,
 ) -> None:
-    bars["_overall"].update(1)
-    bars[backend_name].update(1)
-    pass_count, fail_count, flaky_count, running_count = _count_statuses_with_running(backend_results)
+    if completed and OVERALL_PROGRESS_KEY in bars:
+        bars[OVERALL_PROGRESS_KEY].update(1)
+    if completed:
+        bars[backend_name].update(1)
+    pass_count, fail_count, flaky_count, running_count = _count_statuses_with_running(
+        backend_results,
+        backend_started,
+    )
     bars[backend_name].set_postfix_str(
         f"pass={pass_count}, fail={fail_count}, flaky={flaky_count}, running={running_count}"
     )
@@ -296,15 +409,17 @@ def _update_progress_bars(
 
 def _count_statuses_with_running(
     backend_results: list[list[tuple[int, str] | None] | None],
+    backend_started: list[list[bool] | None],
 ) -> tuple[int, int, int, int]:
-    """Per-case 完成度统计：跑完的 case 算 pass/fail/flaky；只有部分 reps
-    回收的 case 算 running，让中途状态在进度条 postfix 里直观可见。"""
+    """Per-case 完成度统计：跑完的 case 算 pass/fail/flaky；已 launch 但尚未
+    回收全部 reps 的 case 算 running，让中途状态在进度条 postfix 里直观可见。"""
     pass_count = fail_count = flaky_count = running_count = 0
-    for runs in backend_results:
+    for runs, started in zip(backend_results, backend_started):
+        if _has_running_rep(runs, started):
+            running_count += 1
         if runs is None:
             continue
         if any(r is None for r in runs):
-            running_count += 1
             continue
         _, _, tag = summarize_runs(runs)
         if tag == TAG_OK:
@@ -314,6 +429,51 @@ def _count_statuses_with_running(
         else:
             fail_count += 1
     return pass_count, fail_count, flaky_count, running_count
+
+
+def _has_running_rep(runs: list[tuple[int, str] | None] | None, started: list[bool] | None) -> bool:
+    if started is None:
+        return False
+    if runs is None:
+        return any(started)
+    return any(has_started and result is None for has_started, result in zip(started, runs))
+
+
+def _emit_job_started(job: TestJob) -> None:
+    if _job_events is None:
+        return
+    _job_events.put((JOB_EVENT_STARTED, job.backend.name, job.testcase_index, job.run_idx))
+
+
+def _drain_job_events(
+    started_by_backend: dict[str, list[list[bool] | None]],
+    results_by_backend: dict[str, list[list[tuple[int, str] | None] | None]],
+    repeat_by_backend: dict[str, int],
+    bars: dict[str, tqdm],
+) -> None:
+    if _job_events is None:
+        return
+    while True:
+        try:
+            event = _job_events.get_nowait()
+        except queue.Empty:
+            return
+        event_type, backend_name, testcase_index, run_idx = event
+        if event_type != JOB_EVENT_STARTED:
+            continue
+        backend_started = started_by_backend[backend_name]
+        current = backend_started[testcase_index]
+        if current is None:
+            current = [False] * repeat_by_backend[backend_name]
+            backend_started[testcase_index] = current
+        current[run_idx - 1] = True
+        _update_progress_bars(
+            bars,
+            backend_name,
+            results_by_backend[backend_name],
+            backend_started,
+            completed=False,
+        )
 
 
 def _close_pool() -> None:
@@ -371,31 +531,9 @@ def _all_passed(results: list[list[tuple[int, str]] | None], index: int) -> bool
     return runs is not None and all(rc == 0 for rc, _ in runs)
 
 
-def _compile_testcase(
-    testcase: TestCase,
-    compile_env: dict[str, str],
-    backend_name: str,
-) -> tuple[int, str] | None:
-    key = str(testcase.path)
-    compile_log_path = LOG_DIR / "compile" / f"{testcase.name}.log"
-    with _compile_locks[key]:
-        status = _compile_status.get(key)
-        with open(compile_log_path, "a") as log_file:
-            log_file.write(f"=== Compile Testcase for backend {backend_name} ===\n")
-            if status == "ok":
-                log_file.write("Already Compiled, Skipping...\n")
-                return None
-            if status == "failed":
-                log_file.write("Previous compile failed, reusing failure.\n")
-                return 2, TAG_COMPILE_FAIL
-            result = _run_compile_command(testcase, compile_env, log_file)
-            _compile_status[key] = "ok" if result is None else "failed"
-            return result
-
-
-def _run_compile_command(testcase: TestCase, compile_env: dict[str, str], log_file) -> tuple[int, str] | None:
+def _run_compile_command(cwd: Path, compile_env: dict[str, str], log_file) -> tuple[int, str] | None:
     try:
-        rc = run_command(["make"], testcase.path, compile_env, log_file, COMPILE_TIMEOUT_SECONDS, _active_pids)
+        rc = run_command(["make"], cwd, compile_env, log_file, COMPILE_TIMEOUT_SECONDS, _active_pids)
     except subprocess.TimeoutExpired:
         log_file.write("Compile Timeout, Failed\n")
         return 2, TAG_COMPILE_FAIL
@@ -406,10 +544,9 @@ def _run_compile_command(testcase: TestCase, compile_env: dict[str, str], log_fi
     return None
 
 
-def _run_single_rep(job: TestJob, env: dict[str, str]) -> tuple[int, str]:
-    """Run one rep in an isolated per-rep cwd. The cwd is a sibling of testcase.path
-    populated with symlinks to the testcase inputs (excluding runtime products),
-    so concurrent reps of the same case do not collide on object0.riscv etc."""
+def _run_single_rep(job: TestJob, env: dict[str, str], compile_env: dict[str, str]) -> tuple[int, str]:
+    """Run one rep in an isolated sibling cwd so relative ../../data paths keep
+    the same meaning while run-generated files stay local to that rep."""
     run_log_path = _run_log_path(job.backend.name, job.testcase.name, job.run_idx, job.total_reps)
     rep_cwd: Path | None = None
     try:
@@ -421,6 +558,14 @@ def _run_single_rep(job: TestJob, env: dict[str, str]) -> tuple[int, str]:
             log_file.write(f"VENTUS_BACKEND: {env.get('VENTUS_BACKEND', '<unset>')}\n")
             log_file.write(f"REP_CWD: {rep_cwd}\n")
             log_file.flush()
+            if job.testcase.need_make:
+                log_file.write("=== Compile Testcase ===\n")
+                compile_result = _run_compile_command(rep_cwd, compile_env, log_file)
+                log_file.flush()
+                if compile_result is not None:
+                    return compile_result
+                log_file.write("=== Execute Testcase ===\n")
+                log_file.flush()
             try:
                 rc = run_command(job.testcase.cmd, rep_cwd, env, log_file, job.testcase.timeout * job.timeout_scale, _active_pids)
             except subprocess.TimeoutExpired:
@@ -443,34 +588,92 @@ def _run_log_path(backend_name: str, testcase_name: str, run_idx: int, repeat: i
     return LOG_DIR / backend_name / f"{testcase_name}.log"
 
 
-def _is_runtime_product(name: str) -> bool:
-    return any(fnmatch.fnmatch(name, pat) for pat in _RUNTIME_PRODUCT_GLOBS)
-
-
 def _make_rep_cwd(testcase_path: Path, rep_idx: int, run_pid: int) -> Path:
-    """Build sibling cwd `<parent>/.rep_<name>_<pid>_<idx>/` for one rep.
-    Inputs are symlinked from the original; runtime products (object0.*, *_0.log,
-    gvm.log, *.fst) are excluded so each rep generates them fresh in its own cwd.
-
-    Sibling location matters: many cmds use '../../data/...' relative paths,
-    which still resolve correctly because parent.parent is identical to the
-    original testcase.path.parent.parent."""
+    """Build sibling cwd `<parent>/.rep_<name>_<pid>_<idx>/` for one rep."""
     rep_cwd = testcase_path.parent / f".rep_{testcase_path.name}_{run_pid}_{rep_idx}"
+    _register_rep_cwd(rep_cwd)
     if rep_cwd.exists():
-        shutil.rmtree(rep_cwd, ignore_errors=True)
-    rep_cwd.mkdir(parents=True, exist_ok=False)
-    src_abs = testcase_path.resolve()
-    for entry in testcase_path.iterdir():
-        if _is_runtime_product(entry.name):
-            continue
-        os.symlink(src_abs / entry.name, rep_cwd / entry.name)
+        shutil.rmtree(rep_cwd)
+    if not _try_export_git_tree(testcase_path, rep_cwd):
+        _copy_tree_with_reflink(testcase_path, rep_cwd)
     return rep_cwd
+
+
+def _try_export_git_tree(testcase_path: Path, rep_cwd: Path) -> bool:
+    try:
+        repo_root = _git_toplevel(testcase_path)
+        rel_path = testcase_path.resolve().relative_to(repo_root)
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return False
+
+    rep_cwd.mkdir(parents=True, exist_ok=False)
+    archive = subprocess.Popen(
+        ["git", "-C", str(repo_root), "archive", "--format=tar", "HEAD", str(rel_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        strip_components = str(len(rel_path.parts))
+        tar = subprocess.run(
+            ["tar", "-xf", "-", "--strip-components", strip_components, "-C", str(rep_cwd)],
+            stdin=archive.stdout,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if archive.stdout is not None:
+            archive.stdout.close()
+        archive_rc = archive.wait()
+    except OSError:
+        archive.kill()
+        archive.wait()
+        shutil.rmtree(rep_cwd, ignore_errors=True)
+        return False
+
+    if archive_rc == 0 and tar.returncode == 0:
+        return True
+
+    shutil.rmtree(rep_cwd, ignore_errors=True)
+    return False
+
+
+def _git_toplevel(path: Path) -> Path:
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    return Path(result.stdout.strip()).resolve()
+
+
+def _copy_tree_with_reflink(testcase_path: Path, rep_cwd: Path) -> None:
+    rep_cwd.mkdir(parents=True, exist_ok=False)
+    subprocess.run(
+        ["cp", "-a", "--reflink=auto", f"{testcase_path}/.", str(rep_cwd)],
+        check=True,
+    )
+
+
+def _register_rep_cwd(rep_cwd: Path) -> None:
+    if _active_rep_cwds is not None:
+        _active_rep_cwds[str(rep_cwd)] = True
 
 
 def _cleanup_rep_cwd(rep_cwd: Path | None) -> None:
     if rep_cwd is None:
         return
     shutil.rmtree(rep_cwd, ignore_errors=True)
+    if _active_rep_cwds is not None:
+        _active_rep_cwds.pop(str(rep_cwd), None)
+
+
+def _cleanup_active_rep_cwds() -> None:
+    if _active_rep_cwds is None:
+        return
+    for rep_cwd in list(_active_rep_cwds.keys()):
+        shutil.rmtree(rep_cwd, ignore_errors=True)
+        _active_rep_cwds.pop(rep_cwd, None)
 
 
 def _classify_timeout(log_path: Path, tail_bytes: int = 16384) -> str:

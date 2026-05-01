@@ -50,7 +50,13 @@ def main() -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Ventus regression test runner")
     parser.add_argument("-t", "--timeout-scale", type=float, default=None, help="Timeout scale (default: 1)")
-    parser.add_argument("-j", "--jobs", type=int, default=None, help="Parallel multiprocess num (default: auto)")
+    parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=None,
+        help="Worker thread budget (default: nproc * 2 / 3)",
+    )
     parser.add_argument(
         "--checklist",
         type=str,
@@ -103,8 +109,7 @@ def build_matrix(args: argparse.Namespace, parser: argparse.ArgumentParser) -> t
 def choose_default_jobs(matrix: list[tuple[str | None, set[int]]], matrix_mode: bool) -> int:
     if matrix_mode:
         return suggest_default_matrix_jobs(len(TEST_CASES) * len(matrix))
-    backend, _ = matrix[0]
-    return suggest_default_jobs(len(TEST_CASES), backend)
+    return suggest_default_jobs()
 
 
 def run_all_modes(

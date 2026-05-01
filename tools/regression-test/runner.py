@@ -27,6 +27,7 @@ TEST_TIMEOUT_RETURN_CODE = 9999
 OVERALL_PROGRESS_KEY = "_overall"
 RTL_GVM_WORKER_THREADS = 8
 DEFAULT_WORKER_THREADS = 1
+POCL_CACHE_DIR_NAME = ".pocl-cache"
 RTL_GVM_BACKEND_BASES = {"rtl", "rtlsim", "gpgpu", "gvm"}
 BACKEND_SCHEDULE_RANKS = {
     "gvm-with-cache": 0,
@@ -616,6 +617,8 @@ def _run_single_rep(job: TestJob, env: dict[str, str], compile_env: dict[str, st
     rep_cwd: Path | None = None
     try:
         rep_cwd = _make_rep_cwd(job.testcase.path, job.run_idx, os.getpid())
+        rep_env = _env_with_rep_pocl_cache(env, rep_cwd)
+        rep_compile_env = _env_with_rep_pocl_cache(compile_env, rep_cwd)
         run_cmd = wrap_command(job.testcase.cmd, job.numa_binding)
         with open(run_log_path, "w") as log_file:
             log_file.write(f"=== Run Test ({job.run_idx}/{job.total_reps}) ===\n")
@@ -627,12 +630,13 @@ def _run_single_rep(job: TestJob, env: dict[str, str], compile_env: dict[str, st
                 log_file.write(f"NUMACTL_NODE: {job.numa_binding.node}\n")
                 log_file.write(f"NUMACTL_CPUS: {format_cpu_list(job.numa_binding.cpus)}\n")
             log_file.write(f"COMMAND: {format_command(run_cmd)}\n")
-            log_file.write(f"VENTUS_BACKEND: {env.get('VENTUS_BACKEND', '<unset>')}\n")
+            log_file.write(f"VENTUS_BACKEND: {rep_env.get('VENTUS_BACKEND', '<unset>')}\n")
             log_file.write(f"REP_CWD: {rep_cwd}\n")
+            log_file.write(f"POCL_CACHE_DIR: {rep_env['POCL_CACHE_DIR']}\n")
             log_file.flush()
             if job.testcase.need_make:
                 log_file.write("=== Compile Testcase ===\n")
-                compile_result = _run_compile_command(rep_cwd, compile_env, log_file)
+                compile_result = _run_compile_command(rep_cwd, rep_compile_env, log_file)
                 log_file.flush()
                 if compile_result is not None:
                     return compile_result
@@ -642,7 +646,7 @@ def _run_single_rep(job: TestJob, env: dict[str, str], compile_env: dict[str, st
                 rc = run_command(
                     run_cmd,
                     rep_cwd,
-                    env,
+                    rep_env,
                     log_file,
                     job.testcase.timeout * job.timeout_scale,
                     _active_pids,
@@ -659,6 +663,12 @@ def _run_single_rep(job: TestJob, env: dict[str, str], compile_env: dict[str, st
             return rc, (TAG_OK if rc == 0 else TAG_FAIL)
     finally:
         _cleanup_rep_cwd(rep_cwd)
+
+
+def _env_with_rep_pocl_cache(base_env: dict[str, str], rep_cwd: Path) -> dict[str, str]:
+    env = base_env.copy()
+    env["POCL_CACHE_DIR"] = str(rep_cwd / POCL_CACHE_DIR_NAME)
+    return env
 
 
 def _run_log_path(backend_name: str, testcase_name: str, run_idx: int, repeat: int) -> Path:

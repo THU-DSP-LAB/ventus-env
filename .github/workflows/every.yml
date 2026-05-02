@@ -12,7 +12,9 @@ jobs:
     runs-on: self-hosted
     container:
       image: humber186/ventus:base-latest
-      options: --add-host=host.docker.internal:host-gateway
+      options: >-
+        --add-host=host.docker.internal:host-gateway
+        --security-opt seccomp=/ci/ventus-env/seccomp-numa.json
       volumes:
         # Mount host directory for ccache persistence
         # Ensure this directory exists on the host and is writable by the container user (uid 1000)

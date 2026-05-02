@@ -9,6 +9,7 @@ NUMACTL_AUTO = "auto"
 NUMACTL_OFF = "off"
 NUMACTL_REQUIRE = "require"
 NUMACTL_CHOICES = (NUMACTL_AUTO, NUMACTL_OFF, NUMACTL_REQUIRE)
+NUMACTL_PROBE_TIMEOUT_SECONDS = 5
 
 
 class NumaBindingError(RuntimeError):
@@ -77,6 +78,14 @@ def create_allocator(policy: str, min_cpus_per_node: int) -> tuple[NumaAllocator
             raise NumaBindingError(message)
         return NumaAllocator([]), message
 
+    try:
+        probe_binding(bindings[0])
+    except NumaBindingError as exc:
+        message = f"numactl binding probe failed: {exc}"
+        if policy == NUMACTL_REQUIRE:
+            raise NumaBindingError(message) from exc
+        return NumaAllocator([]), message
+
     return NumaAllocator(bindings), None
 
 
@@ -93,6 +102,25 @@ def wrap_command(cmd: list[str], binding: NumaBinding | None) -> list[str]:
     if binding is None:
         return list(cmd)
     return binding.command_prefix() + list(cmd)
+
+
+def probe_binding(binding: NumaBinding) -> None:
+    try:
+        subprocess.run(
+            binding.command_prefix() + ["true"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=NUMACTL_PROBE_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError as exc:
+        raise NumaBindingError("numactl executable not found") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise NumaBindingError("probe timed out") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = _format_command_error(exc)
+        raise NumaBindingError(detail) from exc
 
 
 def parse_lscpu(output: str, allowed_cpus: set[int] | None = None) -> list[CpuRecord]:
@@ -163,3 +191,12 @@ def _build_bindings(records: list[CpuRecord], min_cpus_per_node: int) -> list[Nu
 
 def _binding_sort_key(binding: NumaBinding) -> tuple[int, int]:
     return binding.node, binding.cpus[0]
+
+
+def _format_command_error(exc: subprocess.CalledProcessError) -> str:
+    stderr = exc.stderr.strip() if exc.stderr else ""
+    stdout = exc.stdout.strip() if exc.stdout else ""
+    detail = stderr or stdout
+    if detail:
+        return detail
+    return f"exit code {exc.returncode}"

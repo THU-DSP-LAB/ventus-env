@@ -112,6 +112,29 @@ class NumaTests(unittest.TestCase):
 
         self.assertEqual(command, ["numactl", "-m", "0", "-C", "0,1,2,3", "--", "./matadd"])
 
+    def test_auto_disables_binding_when_probe_is_not_permitted(self):
+        numa = load_module("numa")
+        binding = numa.NumaBinding(node=0, cpus=(0, 1, 2, 3))
+
+        with mock.patch.object(numa, "discover_bindings", return_value=[binding]):
+            with mock.patch.object(numa, "probe_binding", side_effect=numa.NumaBindingError("setting membind: Operation not permitted")):
+                allocator, warning = numa.create_allocator(numa.NUMACTL_AUTO, 4)
+
+        self.assertFalse(allocator.enabled)
+        self.assertEqual(
+            warning,
+            "numactl binding probe failed: setting membind: Operation not permitted",
+        )
+
+    def test_require_fails_when_probe_is_not_permitted(self):
+        numa = load_module("numa")
+        binding = numa.NumaBinding(node=0, cpus=(0, 1, 2, 3))
+
+        with mock.patch.object(numa, "discover_bindings", return_value=[binding]):
+            with mock.patch.object(numa, "probe_binding", side_effect=numa.NumaBindingError("setting membind: Operation not permitted")):
+                with self.assertRaisesRegex(numa.NumaBindingError, "numactl binding probe failed"):
+                    numa.create_allocator(numa.NUMACTL_REQUIRE, 4)
+
     def test_scheduler_reuses_numa_nodes_without_blocking_second_rtl_job(self):
         runner = load_module("runner")
         numa = load_module("numa")

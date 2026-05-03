@@ -3,49 +3,120 @@ description: 'Setup and build Ventus environment'
 runs:
   using: "composite"
   steps:
+    - name: Prepare build logs
+      shell: bash
+      run: |
+        mkdir -p regression-test-logs/setup-and-build
+
     - name: Add tools to PATH
       shell: bash
       run: |
-        echo "/opt/verilator/5.034/bin" >> $GITHUB_PATH
-        echo "/opt/firtool-1.62.0/bin" >> $GITHUB_PATH
+        set +e
+        (
+          set -e
+          echo "/opt/verilator/5.034/bin" >> "$GITHUB_PATH"
+          echo "/opt/firtool-1.62.0/bin" >> "$GITHUB_PATH"
+        ) 2>&1 | tee regression-test-logs/setup-and-build/add-tools-to-path.log
+        pipe_status=("${PIPESTATUS[@]}")
+        status=${pipe_status[0]}
+        tee_status=${pipe_status[1]}
+        if [ "$tee_status" -ne 0 ]; then
+          echo "Warning: failed to write build log regression-test-logs/setup-and-build/add-tools-to-path.log (tee exit $tee_status)"
+        fi
+        set -e
+        exit "$status"
 
     - name: Initialize dependencies
       shell: bash
       run: |
-        # Fix git "dubious ownership" error because of container/host user mismatch
-        git config --global --add safe.directory '*'
-        make init
+        set +e
+        (
+          set -e
+          # Fix git "dubious ownership" error because of container/host user mismatch
+          git config --global --add safe.directory '*'
+          make init
+        ) 2>&1 | tee regression-test-logs/setup-and-build/initialize-dependencies.log
+        pipe_status=("${PIPESTATUS[@]}")
+        status=${pipe_status[0]}
+        tee_status=${pipe_status[1]}
+        if [ "$tee_status" -ne 0 ]; then
+          echo "Warning: failed to write build log regression-test-logs/setup-and-build/initialize-dependencies.log (tee exit $tee_status)"
+        fi
+        set -e
+        exit "$status"
 
     - name: Restore Build Artifacts
       id: restore-build
       shell: bash
       run: |
-        if [ -d "/artifacts/${{ github.sha }}" ]; then
-          echo "Found existing artifacts for ${{ github.sha }}"
-          cp -r /artifacts/${{ github.sha }}/* .
-          env CCACHE_DIR=/ccache bash build-ventus.sh --build pocl
-          echo "cache-hit=true" >> $GITHUB_OUTPUT
-        else
-          echo "No artifacts found"
-          echo "cache-hit=false" >> $GITHUB_OUTPUT
+        set +e
+        (
+          set -e
+          if [ -d "/artifacts/${{ github.sha }}" ]; then
+            echo "Found existing artifacts for ${{ github.sha }}"
+            cp -r /artifacts/${{ github.sha }}/* .
+            env CCACHE_DIR=/ccache bash build-ventus.sh --build pocl
+            echo "cache-hit=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No artifacts found"
+            echo "cache-hit=false" >> "$GITHUB_OUTPUT"
+          fi
+        ) 2>&1 | tee regression-test-logs/setup-and-build/restore-build-artifacts.log
+        pipe_status=("${PIPESTATUS[@]}")
+        status=${pipe_status[0]}
+        tee_status=${pipe_status[1]}
+        if [ "$tee_status" -ne 0 ]; then
+          echo "Warning: failed to write build log regression-test-logs/setup-and-build/restore-build-artifacts.log (tee exit $tee_status)"
         fi
+        set -e
+        exit "$status"
 
     - name: Build Ventus
       if: steps.restore-build.outputs.cache-hit != 'true'
       shell: bash
       run: |
-        env CCACHE_DIR=/ccache bash build-ventus.sh
+        set +e
+        env CCACHE_DIR=/ccache bash build-ventus.sh 2>&1 | tee regression-test-logs/setup-and-build/build-ventus.log
+        pipe_status=("${PIPESTATUS[@]}")
+        status=${pipe_status[0]}
+        tee_status=${pipe_status[1]}
+        if [ "$tee_status" -ne 0 ]; then
+          echo "Warning: failed to write build log regression-test-logs/setup-and-build/build-ventus.log (tee exit $tee_status)"
+        fi
+        set -e
+        exit "$status"
 
     - name: Save Build Artifacts
       if: steps.restore-build.outputs.cache-hit != 'true' && success()
       shell: bash
       run: |
-        mkdir -p /artifacts/${{ github.sha }}
-        if [ -d "install" ]; then cp -r install /artifacts/${{ github.sha }}/; fi
-        touch /artifacts/${{ github.sha }}
+        set +e
+        (
+          set -e
+          mkdir -p /artifacts/${{ github.sha }}
+          if [ -d "install" ]; then cp -r install /artifacts/${{ github.sha }}/; fi
+          touch /artifacts/${{ github.sha }}
+        ) 2>&1 | tee regression-test-logs/setup-and-build/save-build-artifacts.log
+        pipe_status=("${PIPESTATUS[@]}")
+        status=${pipe_status[0]}
+        tee_status=${pipe_status[1]}
+        if [ "$tee_status" -ne 0 ]; then
+          echo "Warning: failed to write build log regression-test-logs/setup-and-build/save-build-artifacts.log (tee exit $tee_status)"
+        fi
+        set -e
+        exit "$status"
 
     - name: Cleanup Old Artifacts
       if: always()
       shell: bash
       run: |
-        find /artifacts -maxdepth 1 -mindepth 1 -type d -mtime +7 -exec rm -rf {} +
+        set +e
+        find /artifacts -maxdepth 1 -mindepth 1 -type d -mtime +7 -exec rm -rf {} + 2>&1 | tee regression-test-logs/setup-and-build/cleanup-old-artifacts.log
+        pipe_status=("${PIPESTATUS[@]}")
+        status=${pipe_status[0]}
+        tee_status=${pipe_status[1]}
+        if [ "$tee_status" -ne 0 ]; then
+          echo "Warning: failed to write build log regression-test-logs/setup-and-build/cleanup-old-artifacts.log (tee exit $tee_status)"
+        fi
+        set -e
+        exit "$status"

@@ -43,6 +43,17 @@ class FakePool:
         return FakeAsyncResult(func(job))
 
 
+class FakeBar:
+    def update(self, value):
+        pass
+
+    def set_postfix_str(self, value):
+        pass
+
+    def close(self):
+        pass
+
+
 def make_job(backend):
     runner = load_module("runner")
     cases = load_module("cases")
@@ -94,15 +105,34 @@ class NumaTests(unittest.TestCase):
 
         self.assertEqual(bindings, [numa.NumaBinding(node=1, cpus=(4, 5, 6, 7, 8, 9, 10, 11))])
 
-    def test_allocator_reuses_nodes_round_robin(self):
+    def test_allocator_returns_none_when_no_node_has_capacity(self):
         numa = load_module("numa")
         node0 = numa.NumaBinding(node=0, cpus=(0, 1, 2, 3))
         node1 = numa.NumaBinding(node=1, cpus=(4, 5, 6, 7))
         allocator = numa.NumaAllocator([node0, node1])
 
-        self.assertEqual(allocator.allocate(), node0)
-        self.assertEqual(allocator.allocate(), node1)
-        self.assertEqual(allocator.allocate(), node0)
+        self.assertEqual(allocator.allocate(4), node0)
+        self.assertEqual(allocator.allocate(4), node1)
+        self.assertIsNone(allocator.allocate(4))
+
+    def test_allocator_reuses_node_after_release(self):
+        numa = load_module("numa")
+        node0 = numa.NumaBinding(node=0, cpus=(0, 1, 2, 3))
+        allocator = numa.NumaAllocator([node0])
+
+        binding = allocator.allocate(4)
+        allocator.release(binding, 4)
+
+        self.assertEqual(allocator.allocate(4), node0)
+
+    def test_allocator_reports_capacity_without_reserving_it(self):
+        numa = load_module("numa")
+        node0 = numa.NumaBinding(node=0, cpus=(0, 1, 2, 3))
+        allocator = numa.NumaAllocator([node0])
+
+        self.assertTrue(allocator.has_capacity(4))
+        self.assertEqual(allocator.allocate(4), node0)
+        self.assertFalse(allocator.has_capacity(4))
 
     def test_wrap_command_prefixes_numactl(self):
         numa = load_module("numa")
@@ -135,7 +165,7 @@ class NumaTests(unittest.TestCase):
                 with self.assertRaisesRegex(numa.NumaBindingError, "numactl binding probe failed"):
                     numa.create_allocator(numa.NUMACTL_REQUIRE, 4)
 
-    def test_scheduler_reuses_numa_nodes_without_blocking_second_rtl_job(self):
+    def test_scheduler_leaves_second_single_node_rtl_job_unbound(self):
         runner = load_module("runner")
         numa = load_module("numa")
         jobs = [make_job("rtlsim-with-cache"), make_job("gvm-no-cache"), make_job("spike")]
@@ -151,12 +181,113 @@ class NumaTests(unittest.TestCase):
             ["rtlsim-with-cache", "gvm-no-cache"],
         )
         self.assertEqual(pool.submitted[0].numa_binding, numa.NumaBinding(node=0, cpus=(0, 1, 2, 3, 4, 5, 6, 7)))
-        self.assertEqual(pool.submitted[1].numa_binding, numa.NumaBinding(node=0, cpus=(0, 1, 2, 3, 4, 5, 6, 7)))
+        self.assertIsNone(pool.submitted[1].numa_binding)
+
+    def test_scheduler_does_not_overfill_physical_numa_nodes(self):
+        runner = load_module("runner")
+        numa = load_module("numa")
+        jobs = [
+            make_job("rtlsim-with-cache"),
+            make_job("gvm-no-cache"),
+            make_job("rtlsim-no-cache"),
+        ]
+        pool = FakePool()
+        node0 = numa.NumaBinding(node=0, cpus=tuple(range(0, 28, 2)))
+        node1 = numa.NumaBinding(node=1, cpus=tuple(range(1, 28, 2)))
+        allocator = numa.NumaAllocator([node0, node1])
+
+        with mock.patch.object(runner, "run_test_job", self._fake_run_test_job):
+            scheduler = runner.WeightedJobScheduler(pool, jobs, worker_thread_budget=24, numa_allocator=allocator)
+            scheduler.submit_ready()
+
+        self.assertEqual(
+            [job.backend.env_backend for job in pool.submitted],
+            ["rtlsim-with-cache", "gvm-no-cache", "rtlsim-no-cache"],
+        )
+        self.assertEqual(pool.submitted[0].numa_binding, node0)
+        self.assertEqual(pool.submitted[1].numa_binding, node1)
+        self.assertIsNone(pool.submitted[2].numa_binding)
+
+    def test_scheduler_requires_numa_capacity_before_submitting_heavy_job(self):
+        runner = load_module("runner")
+        numa = load_module("numa")
+        jobs = [
+            make_job("rtlsim-with-cache"),
+            make_job("gvm-no-cache"),
+            make_job("rtlsim-no-cache"),
+        ]
+        pool = FakePool()
+        node0 = numa.NumaBinding(node=0, cpus=tuple(range(0, 28, 2)))
+        node1 = numa.NumaBinding(node=1, cpus=tuple(range(1, 28, 2)))
+        allocator = numa.NumaAllocator([node0, node1])
+
+        with mock.patch.object(runner, "run_test_job", self._fake_run_test_job):
+            scheduler = runner.WeightedJobScheduler(
+                pool,
+                jobs,
+                worker_thread_budget=24,
+                numa_allocator=allocator,
+                numactl_policy=numa.NUMACTL_REQUIRE,
+            )
+            scheduler.submit_ready()
+            self.assertEqual(
+                [job.backend.env_backend for job in pool.submitted],
+                ["rtlsim-with-cache", "gvm-no-cache"],
+            )
+
+            self._collect_finished_jobs(runner, scheduler, jobs)
+            scheduler.submit_ready()
+
+        self.assertEqual(
+            [job.backend.env_backend for job in pool.submitted],
+            ["rtlsim-with-cache", "gvm-no-cache", "rtlsim-no-cache"],
+        )
+        self.assertEqual(pool.submitted[2].numa_binding, node0)
+
+    def test_collect_plan_results_passes_numactl_policy_to_scheduler(self):
+        runner = load_module("runner")
+        numa = load_module("numa")
+        cases = load_module("cases")
+        config = runner.BackendRunConfig("spike", "spike", {0}, 1)
+        jobs = [runner.TestJob(config, 0, cases.TEST_CASES[0], 1, 1, 1)]
+        results_by_backend = {"spike": [None] * len(cases.TEST_CASES)}
+        captured_policies = []
+
+        class CapturingScheduler(runner.WeightedJobScheduler):
+            def __init__(self, *args, **kwargs):
+                captured_policies.append(kwargs["numactl_policy"])
+                super().__init__(*args, **kwargs)
+
+        with mock.patch.object(runner, "_pool", FakePool()), \
+             mock.patch.object(runner, "_create_progress_bars", return_value={"spike": FakeBar()}), \
+             mock.patch.object(runner, "_drain_job_events"), \
+             mock.patch.object(runner, "run_test_job", self._fake_run_test_job), \
+             mock.patch.object(runner, "WeightedJobScheduler", CapturingScheduler):
+            runner._collect_plan_results(
+                [config],
+                jobs,
+                results_by_backend,
+                selected_count=1,
+                worker_thread_budget=1,
+                numa_allocator=numa.NumaAllocator([]),
+                numactl_policy=numa.NUMACTL_REQUIRE,
+            )
+
+        self.assertEqual(captured_policies, [numa.NUMACTL_REQUIRE])
 
     @staticmethod
     def _fake_run_test_job(job):
         runner = load_module("runner")
         return runner.JobResult(job.backend.name, job.testcase_index, job.run_idx, 0, "OK")
+
+    @staticmethod
+    def _collect_finished_jobs(runner, scheduler, jobs):
+        backend_names = {job.backend.name for job in jobs}
+        results_by_backend = {name: [None] for name in backend_names}
+        repeat_by_backend = {name: 1 for name in backend_names}
+        started_by_backend = {name: [[True]] for name in backend_names}
+        bars = {name: FakeBar() for name in backend_names}
+        scheduler.collect_ready_results(results_by_backend, repeat_by_backend, started_by_backend, bars)
 
 
 if __name__ == "__main__":

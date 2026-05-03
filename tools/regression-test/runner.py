@@ -13,12 +13,15 @@ from tqdm import tqdm
 
 from .cases import LOG_DIR, TEST_CASES, TestCase
 from .numa import (
+    NUMACTL_AUTO,
+    NUMACTL_REQUIRE,
     NumaAllocator,
     NumaBinding,
+    NumaBindingError,
     create_allocator,
     wrap_command,
 )
-from .process import run_command, terminate_process_group
+from .process import CommandResult, ResourceUsage, run_command, terminate_process_group
 from .status import TAG_COMPILE_FAIL, TAG_FAIL, TAG_HANG, TAG_OK, TAG_TIMEOUT, summarize_runs
 
 
@@ -38,6 +41,11 @@ BACKEND_SCHEDULE_RANKS = {
     "sbt": 5,
     "spike": 6,
 }
+SECONDS_PER_MINUTE = 60
+SECONDS_PER_HOUR = 60 * SECONDS_PER_MINUTE
+KIB_PER_MIB = 1024
+KIB_PER_GIB = 1024 * KIB_PER_MIB
+NSEC_PER_SEC = 1_000_000_000
 
 # 触发 hang 分类的"仿真还在干活"标志。命中 = 仿真在 commit 指令 / 做 lsu / 在
 # 输出 testcase 友好结果——这些都说明只是慢，不是死锁。
@@ -88,6 +96,16 @@ class ActiveJob:
     job: TestJob
     async_result: object
     worker_threads: int
+
+
+@dataclass(frozen=True)
+class RunSummary:
+    result: str
+    return_code: int
+    total_wall_time_sec: float
+    timeout_limit_sec: float
+    compile_result: CommandResult | None
+    execute_result: CommandResult | None
 
 
 def install_signal_handler() -> None:
@@ -150,6 +168,7 @@ def run_plan(
             len(selected_indices),
             jobs,
             numa_allocator,
+            numactl_policy,
         )
     except BaseException:
         _terminate_pool()
@@ -318,6 +337,7 @@ def _collect_plan_results(
     selected_count: int,
     worker_thread_budget: int,
     numa_allocator: NumaAllocator,
+    numactl_policy: str,
 ) -> None:
     repeat_by_backend = {config.name: config.repeat for config in backend_configs}
     started_by_backend: dict[str, list[list[bool] | None]] = {
@@ -326,7 +346,13 @@ def _collect_plan_results(
     }
     bars = _create_progress_bars(backend_configs, len(test_jobs), selected_count)
     try:
-        scheduler = WeightedJobScheduler(_pool, test_jobs, worker_thread_budget, numa_allocator)
+        scheduler = WeightedJobScheduler(
+            _pool,
+            test_jobs,
+            worker_thread_budget,
+            numa_allocator,
+            numactl_policy=numactl_policy,
+        )
         while not scheduler.done:
             scheduler.submit_ready()
             _drain_job_events(started_by_backend, results_by_backend, repeat_by_backend, bars)
@@ -351,6 +377,7 @@ class WeightedJobScheduler:
         test_jobs: list[TestJob],
         worker_thread_budget: int,
         numa_allocator: NumaAllocator | None = None,
+        numactl_policy: str = NUMACTL_AUTO,
     ):
         self._pool = pool
         self._pending = list(test_jobs)
@@ -360,6 +387,7 @@ class WeightedJobScheduler:
         self._total = len(test_jobs)
         self._worker_thread_budget = worker_thread_budget
         self._numa_allocator = numa_allocator or NumaAllocator([])
+        self._numactl_policy = numactl_policy
 
     @property
     def done(self) -> bool:
@@ -371,6 +399,9 @@ class WeightedJobScheduler:
             job = self._pending[next_index]
             worker_threads = worker_threads_for_job(job)
             if self._used_worker_threads + worker_threads > self._worker_thread_budget:
+                next_index += 1
+                continue
+            if self._should_wait_for_numa_capacity(job, worker_threads):
                 next_index += 1
                 continue
             self._submit_job(next_index, worker_threads)
@@ -388,6 +419,7 @@ class WeightedJobScheduler:
                 continue
             result = active.async_result.get()
             self._active.remove(active)
+            self._release_numa_binding(active.job, active.worker_threads)
             self._used_worker_threads -= active.worker_threads
             self._completed += 1
             _record_job_result(result, results_by_backend, repeat_by_backend, started_by_backend, bars)
@@ -405,7 +437,24 @@ class WeightedJobScheduler:
     def _allocate_numa_binding(self, job: TestJob) -> NumaBinding | None:
         if not should_bind_numa(job) or not self._numa_allocator.enabled:
             return None
-        return self._numa_allocator.allocate()
+        binding = self._numa_allocator.allocate(worker_threads_for_job(job))
+        if binding is None and self._numactl_policy == NUMACTL_REQUIRE:
+            raise NumaBindingError("NUMA CPU binding capacity unavailable")
+        return binding
+
+    def _release_numa_binding(self, job: TestJob, worker_threads: int) -> None:
+        if job.numa_binding is None or not self._numa_allocator.enabled:
+            return
+        self._numa_allocator.release(job.numa_binding, worker_threads)
+
+    def _should_wait_for_numa_capacity(self, job: TestJob, worker_threads: int) -> bool:
+        if self._numactl_policy != NUMACTL_REQUIRE:
+            return False
+        if not should_bind_numa(job) or not self._numa_allocator.enabled:
+            return False
+        if self._numa_allocator.has_capacity(worker_threads):
+            return False
+        return any(active.job.numa_binding is not None for active in self._active)
 
 
 def _record_job_result(
@@ -597,17 +646,27 @@ def _all_passed(results: list[list[tuple[int, str]] | None], index: int) -> bool
     return runs is not None and all(rc == 0 for rc, _ in runs)
 
 
-def _run_compile_command(cwd: Path, compile_env: dict[str, str], log_file) -> tuple[int, str] | None:
-    try:
-        rc = run_command(["make"], cwd, compile_env, log_file, COMPILE_TIMEOUT_SECONDS, _active_pids)
-    except subprocess.TimeoutExpired:
+def _run_compile_command(
+    cwd: Path,
+    compile_env: dict[str, str],
+    log_file,
+) -> tuple[CommandResult, tuple[int, str] | None]:
+    result = run_command(
+        ["make"],
+        cwd,
+        compile_env,
+        log_file,
+        COMPILE_TIMEOUT_SECONDS,
+        _active_pids,
+    )
+    if result.timed_out:
         log_file.write("Compile Timeout, Failed\n")
-        return 2, TAG_COMPILE_FAIL
-    if rc != 0:
+        return result, (2, TAG_COMPILE_FAIL)
+    if result.return_code != 0:
         log_file.write("Compile Failed\n")
-        return 2, TAG_COMPILE_FAIL
+        return result, (2, TAG_COMPILE_FAIL)
     log_file.write("Compile OK\n")
-    return None
+    return result, None
 
 
 def _run_single_rep(job: TestJob, env: dict[str, str], compile_env: dict[str, str]) -> tuple[int, str]:
@@ -615,6 +674,10 @@ def _run_single_rep(job: TestJob, env: dict[str, str], compile_env: dict[str, st
     the same meaning while run-generated files stay local to that rep."""
     run_log_path = _run_log_path(job.backend.name, job.testcase.name, job.run_idx, job.total_reps)
     rep_cwd: Path | None = None
+    total_start_ns = time.monotonic_ns()
+    compile_command_result: CommandResult | None = None
+    execute_command_result: CommandResult | None = None
+    timeout_limit_sec = job.testcase.timeout * job.timeout_scale
     try:
         rep_cwd = _make_rep_cwd(job.testcase.path, job.run_idx, os.getpid())
         rep_env = _env_with_rep_pocl_cache(env, rep_cwd)
@@ -636,22 +699,37 @@ def _run_single_rep(job: TestJob, env: dict[str, str], compile_env: dict[str, st
             log_file.flush()
             if job.testcase.need_make:
                 log_file.write("=== Compile Testcase ===\n")
-                compile_result = _run_compile_command(rep_cwd, rep_compile_env, log_file)
+                compile_command_result, compile_failure = _run_compile_command(
+                    rep_cwd,
+                    rep_compile_env,
+                    log_file,
+                )
                 log_file.flush()
-                if compile_result is not None:
-                    return compile_result
+                if compile_failure is not None:
+                    rc, tag = compile_failure
+                    _write_run_summary(
+                        log_file,
+                        RunSummary(
+                            result=tag,
+                            return_code=rc,
+                            total_wall_time_sec=_elapsed_sec(total_start_ns),
+                            timeout_limit_sec=timeout_limit_sec,
+                            compile_result=compile_command_result,
+                            execute_result=None,
+                        ),
+                    )
+                    return rc, tag
                 log_file.write("=== Execute Testcase ===\n")
                 log_file.flush()
-            try:
-                rc = run_command(
-                    run_cmd,
-                    rep_cwd,
-                    rep_env,
-                    log_file,
-                    job.testcase.timeout * job.timeout_scale,
-                    _active_pids,
-                )
-            except subprocess.TimeoutExpired:
+            execute_command_result = run_command(
+                run_cmd,
+                rep_cwd,
+                rep_env,
+                log_file,
+                timeout_limit_sec,
+                _active_pids,
+            )
+            if execute_command_result.timed_out:
                 log_file.write("\nTestcase execution timeout, Failed\n")
                 log_file.flush()
                 tag = _classify_timeout(run_log_path)
@@ -659,10 +737,103 @@ def _run_single_rep(job: TestJob, env: dict[str, str], compile_env: dict[str, st
                     log_file.write("Classified: HANG (no commit/lsu activity in tail; kernel stuck)\n")
                 else:
                     log_file.write("Classified: TIMEOUT (still active in tail; ran out of wall-clock)\n")
-                return TEST_TIMEOUT_RETURN_CODE, tag
-            return rc, (TAG_OK if rc == 0 else TAG_FAIL)
+                rc = TEST_TIMEOUT_RETURN_CODE
+            else:
+                rc = execute_command_result.return_code
+                tag = TAG_OK if rc == 0 else TAG_FAIL
+            _write_run_summary(
+                log_file,
+                RunSummary(
+                    result=tag,
+                    return_code=rc,
+                    total_wall_time_sec=_elapsed_sec(total_start_ns),
+                    timeout_limit_sec=timeout_limit_sec,
+                    compile_result=compile_command_result,
+                    execute_result=execute_command_result,
+                ),
+            )
+            return rc, tag
     finally:
         _cleanup_rep_cwd(rep_cwd)
+
+
+def _write_run_summary(log_file, summary: RunSummary) -> None:
+    resources = _combined_resources(summary.compile_result, summary.execute_result)
+    log_file.write("\n=== Regression Run Summary ===\n")
+    log_file.write(f"result: {summary.result}\n")
+    log_file.write(f"return_code: {summary.return_code}\n")
+    log_file.write("time:\n")
+    log_file.write(f"  total_wall: {_format_duration(summary.total_wall_time_sec)}\n")
+    log_file.write(f"  compile_wall: {_format_phase_duration(summary.compile_result)}\n")
+    log_file.write(f"  execute_wall: {_format_phase_duration(summary.execute_result)}\n")
+    log_file.write(f"  timeout_limit: {_format_duration(summary.timeout_limit_sec)}\n")
+    log_file.write("phases:\n")
+    log_file.write(f"  compile: {_format_phase_status(summary.compile_result)}\n")
+    log_file.write(f"  execute: {_format_phase_status(summary.execute_result)}\n")
+    log_file.write("resources:\n")
+    log_file.write(f"  peak_rss: {_format_rss(resources.peak_rss_kb)}\n")
+    log_file.write(f"  user_cpu: {_format_duration(resources.user_time_sec)}\n")
+    log_file.write(f"  system_cpu: {_format_duration(resources.system_time_sec)}\n")
+    log_file.write(f"  cpu_time_total: {_format_duration(_cpu_time_total(resources))}\n")
+    log_file.write(f"  minor_page_faults: {resources.minor_page_faults}\n")
+    log_file.write(f"  major_page_faults: {resources.major_page_faults}\n")
+    log_file.write(f"  voluntary_context_switches: {resources.voluntary_context_switches}\n")
+    log_file.write(f"  involuntary_context_switches: {resources.involuntary_context_switches}\n")
+    log_file.write(f"  filesystem_input_ops: {resources.filesystem_input_ops}\n")
+    log_file.write(f"  filesystem_output_ops: {resources.filesystem_output_ops}\n")
+    log_file.flush()
+
+
+def _combined_resources(*results: CommandResult | None) -> ResourceUsage:
+    resources = ResourceUsage.zero()
+    for result in results:
+        if result is None:
+            continue
+        resources = resources.combine(result.resources)
+    return resources
+
+
+def _elapsed_sec(start_ns: int) -> float:
+    return (time.monotonic_ns() - start_ns) / NSEC_PER_SEC
+
+
+def _format_phase_duration(result: CommandResult | None) -> str:
+    if result is None:
+        return "not_run"
+    return _format_duration(result.wall_time_sec)
+
+
+def _format_phase_status(result: CommandResult | None) -> str:
+    if result is None:
+        return "not_run"
+    timed_out = "yes" if result.timed_out else "no"
+    return f"return_code={result.return_code}, timed_out={timed_out}"
+
+
+def _format_duration(seconds: float) -> str:
+    if seconds >= SECONDS_PER_HOUR:
+        hours = int(seconds // SECONDS_PER_HOUR)
+        remainder = seconds - hours * SECONDS_PER_HOUR
+        minutes = int(remainder // SECONDS_PER_MINUTE)
+        secs = remainder - minutes * SECONDS_PER_MINUTE
+        return f"{hours}h {minutes:02d}m {secs:06.3f}s"
+    if seconds >= SECONDS_PER_MINUTE:
+        minutes = int(seconds // SECONDS_PER_MINUTE)
+        secs = seconds - minutes * SECONDS_PER_MINUTE
+        return f"{minutes}m {secs:06.3f}s"
+    return f"{seconds:.3f}s"
+
+
+def _format_rss(kib: int) -> str:
+    if kib >= KIB_PER_GIB:
+        return f"{kib / KIB_PER_GIB:.2f} GiB ({kib} KiB)"
+    if kib >= KIB_PER_MIB:
+        return f"{kib / KIB_PER_MIB:.2f} MiB ({kib} KiB)"
+    return f"{kib} KiB"
+
+
+def _cpu_time_total(resources: ResourceUsage) -> float:
+    return resources.user_time_sec + resources.system_time_sec
 
 
 def _env_with_rep_pocl_cache(base_env: dict[str, str], rep_cwd: Path) -> dict[str, str]:

@@ -20,6 +20,7 @@ jobs:
       volumes:
         - /ci/ventus-env/ccache:/ccache
         - /ci/ventus-env/artifacts:/artifacts
+        - /ci/ventus-env/logs:/logs
     
     steps:
     - name: Checkout repository
@@ -44,3 +45,56 @@ jobs:
         fi
         
         exit $EXIT_CODE
+
+    - name: Save CI logs
+      if: always()
+      run: |
+        set -o pipefail
+
+        workflow_slug="$(printf '%s' "$GITHUB_WORKFLOW" | tr -cs 'A-Za-z0-9._-' '_' | sed 's/^_//;s/_$//')"
+        if [ -z "$workflow_slug" ]; then
+          workflow_slug="workflow"
+        fi
+
+        dest="/logs/${workflow_slug}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA}"
+        mkdir -p "$dest"
+
+        log_sources=()
+        if [ -d regression-test-logs ]; then
+          log_sources+=(regression-test-logs)
+        fi
+        if [ -d testcases/_get_case/results ]; then
+          log_sources+=(testcases/_get_case/results)
+        fi
+        if [ "${#log_sources[@]}" -eq 0 ]; then
+          echo "No log directories found."
+          echo "No log directories found for this run." > "$dest/no-logs.txt"
+          log_sources+=("$dest/no-logs.txt")
+        fi
+
+        archive="$dest/ci-logs.tar.xz"
+        tar -cf - "${log_sources[@]}" | xz -T0 -6e > "$archive"
+
+        {
+          echo "workflow=${GITHUB_WORKFLOW}"
+          echo "run_id=${GITHUB_RUN_ID}"
+          echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+          echo "run_url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          echo "repository=${GITHUB_REPOSITORY}"
+          echo "sha=${GITHUB_SHA}"
+          echo "ref=${GITHUB_REF}"
+          echo "event=${GITHUB_EVENT_NAME}"
+          echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        } > "$dest/metadata.txt"
+
+        du -h "$archive" || true
+        echo "Saved CI logs archive: $archive"
+        echo "Saved CI logs metadata: $dest/metadata.txt"
+
+    - name: Cleanup old local regression test logs
+      if: always()
+      run: |
+        if [ -d /logs ]; then
+          find /logs -mindepth 2 -maxdepth 2 -type d -mtime +14 -print -exec rm -rf {} +
+          find /logs -mindepth 1 -maxdepth 1 -type d -empty -delete
+        fi

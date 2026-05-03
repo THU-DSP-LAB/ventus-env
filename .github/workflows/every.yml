@@ -20,10 +20,10 @@ jobs:
         # Ensure this directory exists on the host and is writable by the container user (uid 1000)
         - /ci/ventus-env/ccache:/ccache
         - /ci/ventus-env/artifacts:/artifacts
+        - /ci/ventus-env/logs:/logs
     defaults:
       run:
         shell: bash
-
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -57,6 +57,21 @@ jobs:
         . ./env.sh
         VENTUS_BACKEND=cyclesim python3 regression-test.py --repeat=5 --checklist=cycle -t 4
 
+    - name: Configure RTL/GVM regression parallelism
+      if: always() && steps.build.outcome == 'success'
+      run: |
+        cpu_count="$(nproc)"
+        rtl_gvm_worker_threads=8
+        reserved_cpus=4
+        usable_cpus=$((cpu_count - reserved_cpus))
+        if [ "$usable_cpus" -lt "$rtl_gvm_worker_threads" ]; then
+          echo "CPU count $cpu_count is too small for one RTL/GVM regression worker group after reserving $reserved_cpus CPUs."
+          exit 1
+        fi
+        rtl_jobs=$((usable_cpus / rtl_gvm_worker_threads * rtl_gvm_worker_threads))
+        echo "REGRESSION_TEST_RTL_JOBS=$rtl_jobs" >> "$GITHUB_ENV"
+        echo "RTL/GVM regression worker budget: $rtl_jobs (cpu_count=$cpu_count, reserved_cpus=$reserved_cpus, worker_threads_per_job=$rtl_gvm_worker_threads)"
+
     - name: Run Regression Tests (RTL-without-cache)
       id: test_rtl_no_cache
       if: always() && steps.build.outcome == 'success'
@@ -64,7 +79,7 @@ jobs:
       run: |
         . ./env.sh
         # RTL simulation is slower, so we might need to increase timeout
-        VENTUS_BACKEND=rtl-nocache python3 regression-test.py -t 10 --repeat=5 --checklist=rtl-no-cache
+        VENTUS_BACKEND=rtl-nocache python3 regression-test.py -j "$REGRESSION_TEST_RTL_JOBS" -t 10 --repeat=5 --checklist=rtl-no-cache
 
     - name: Run Regression Tests (RTL-with-cache)
       id: test_rtl_cache
@@ -73,7 +88,7 @@ jobs:
       run: |
         . ./env.sh
         # RTL simulation is slower, so we might need to increase timeout
-        VENTUS_BACKEND=rtl-cache python3 regression-test.py -t 10 --repeat=5 --checklist=rtl-with-cache
+        VENTUS_BACKEND=rtl-cache python3 regression-test.py -j "$REGRESSION_TEST_RTL_JOBS" -t 10 --repeat=5 --checklist=rtl-with-cache
 
     - name: Run Regression Tests (RTL-without-cache-gvm)
       id: test_gvm_no_cache
@@ -82,7 +97,7 @@ jobs:
       run: |
         . ./env.sh
         # RTL simulation is slower, so we might need to increase timeout
-        VENTUS_BACKEND=gvm-nocache python3 regression-test.py -t 10 --repeat=5 --checklist=rtl-no-cache
+        VENTUS_BACKEND=gvm-nocache python3 regression-test.py -j "$REGRESSION_TEST_RTL_JOBS" -t 10 --repeat=5 --checklist=rtl-no-cache
 
     - name: Run Regression Tests (RTL-with-cache-gvm)
       id: test_gvm_cache
@@ -91,7 +106,7 @@ jobs:
       run: |
         . ./env.sh
         # RTL simulation is slower, so we might need to increase timeout
-        VENTUS_BACKEND=gvm-cache python3 regression-test.py -t 10 --repeat=5 --checklist=rtl-with-cache
+        VENTUS_BACKEND=gvm-cache python3 regression-test.py -j "$REGRESSION_TEST_RTL_JOBS" -t 10 --repeat=5 --checklist=rtl-with-cache
 
     - name: Check Regression Test Results
       if: always() && steps.build.outcome == 'success'
@@ -132,4 +147,57 @@ jobs:
           printf 'Failed regression test steps:\n'
           printf ' - %s\n' "${failed_steps[@]}"
           exit 1
+        fi
+
+    - name: Save CI logs
+      if: always()
+      run: |
+        set -o pipefail
+
+        workflow_slug="$(printf '%s' "$GITHUB_WORKFLOW" | tr -cs 'A-Za-z0-9._-' '_' | sed 's/^_//;s/_$//')"
+        if [ -z "$workflow_slug" ]; then
+          workflow_slug="workflow"
+        fi
+
+        dest="/logs/${workflow_slug}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA}"
+        mkdir -p "$dest"
+
+        log_sources=()
+        if [ -d regression-test-logs ]; then
+          log_sources+=(regression-test-logs)
+        fi
+        if [ -d testcases/_get_case/results ]; then
+          log_sources+=(testcases/_get_case/results)
+        fi
+        if [ "${#log_sources[@]}" -eq 0 ]; then
+          echo "No log directories found."
+          echo "No log directories found for this run." > "$dest/no-logs.txt"
+          log_sources+=("$dest/no-logs.txt")
+        fi
+
+        archive="$dest/ci-logs.tar.xz"
+        tar -cf - "${log_sources[@]}" | xz -T0 -6e > "$archive"
+
+        {
+          echo "workflow=${GITHUB_WORKFLOW}"
+          echo "run_id=${GITHUB_RUN_ID}"
+          echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+          echo "run_url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          echo "repository=${GITHUB_REPOSITORY}"
+          echo "sha=${GITHUB_SHA}"
+          echo "ref=${GITHUB_REF}"
+          echo "event=${GITHUB_EVENT_NAME}"
+          echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        } > "$dest/metadata.txt"
+
+        du -h "$archive" || true
+        echo "Saved CI logs archive: $archive"
+        echo "Saved CI logs metadata: $dest/metadata.txt"
+
+    - name: Cleanup old local regression test logs
+      if: always()
+      run: |
+        if [ -d /logs ]; then
+          find /logs -mindepth 2 -maxdepth 2 -type d -mtime +14 -print -exec rm -rf {} +
+          find /logs -mindepth 1 -maxdepth 1 -type d -empty -delete
         fi

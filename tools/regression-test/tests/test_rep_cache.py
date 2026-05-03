@@ -27,6 +27,7 @@ class RepCacheTests(unittest.TestCase):
     def test_run_single_rep_uses_rep_local_pocl_cache(self):
         runner = load_module("runner")
         cases = load_module("cases")
+        process = load_module("process")
         config = runner.BackendRunConfig("spike", "spike", {0}, 1)
         testcase = cases.TestCase("cache_case", Path("/unused/source"), ["./run"], need_make=True)
         job = runner.TestJob(config, 0, testcase, 1, 1, 1)
@@ -34,23 +35,75 @@ class RepCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             rep_cwd = Path(tmpdir) / "rep"
             rep_cwd.mkdir()
+            log_dir = Path(tmpdir) / "logs"
+            (log_dir / "spike").mkdir(parents=True)
             seen_envs = []
 
             def fake_run_command(cmd, cwd, env, log_file, timeout, active_pids):
                 seen_envs.append(env.copy())
-                return 0
+                return process.CommandResult(
+                    return_code=0,
+                    timed_out=False,
+                    wall_time_sec=0.25,
+                    resources=process.ResourceUsage.zero(),
+                )
 
             with mock.patch.object(runner, "_make_rep_cwd", return_value=rep_cwd), \
                  mock.patch.object(runner, "_cleanup_rep_cwd"), \
+                 mock.patch.object(runner, "LOG_DIR", log_dir), \
                  mock.patch.object(runner, "run_command", side_effect=fake_run_command):
                 rc, tag = runner._run_single_rep(job, {"VENTUS_BACKEND": "spike"}, {})
 
-        self.assertEqual((rc, tag), (0, runner.TAG_OK))
-        self.assertEqual(len(seen_envs), 2)
-        for env in seen_envs:
-            self.assertEqual(env["POCL_CACHE_DIR"], str(rep_cwd / runner.POCL_CACHE_DIR_NAME))
-        self.assertEqual(seen_envs[1]["VENTUS_BACKEND"], "spike")
-        self.assertNotIn("VENTUS_BACKEND", seen_envs[0])
+            self.assertEqual((rc, tag), (0, runner.TAG_OK))
+            self.assertEqual(len(seen_envs), 2)
+            for env in seen_envs:
+                self.assertEqual(env["POCL_CACHE_DIR"], str(rep_cwd / runner.POCL_CACHE_DIR_NAME))
+            self.assertEqual(seen_envs[1]["VENTUS_BACKEND"], "spike")
+            self.assertNotIn("VENTUS_BACKEND", seen_envs[0])
+            log_text = (log_dir / "spike" / "cache_case.log").read_text()
+            self.assertIn("=== Regression Run Summary ===", log_text)
+            self.assertIn("compile_wall: 0.250s", log_text)
+            self.assertIn("execute_wall: 0.250s", log_text)
+            self.assertTrue(log_text.rstrip().endswith("filesystem_output_ops: 0"))
+
+    def test_timeout_summary_is_written_after_classification(self):
+        runner = load_module("runner")
+        cases = load_module("cases")
+        process = load_module("process")
+        config = runner.BackendRunConfig("spike", "spike", {0}, 1)
+        testcase = cases.TestCase("timeout_case", Path("/unused/source"), ["./run"], need_make=False)
+        job = runner.TestJob(config, 0, testcase, 1, 1, 1)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rep_cwd = Path(tmpdir) / "rep"
+            rep_cwd.mkdir()
+            log_dir = Path(tmpdir) / "logs"
+            (log_dir / "spike").mkdir(parents=True)
+
+            def fake_run_command(cmd, cwd, env, log_file, timeout, active_pids):
+                log_file.write("stalled\n")
+                return process.CommandResult(
+                    return_code=-15,
+                    timed_out=True,
+                    wall_time_sec=1.5,
+                    resources=process.ResourceUsage.zero(),
+                )
+
+            with mock.patch.object(runner, "_make_rep_cwd", return_value=rep_cwd), \
+                 mock.patch.object(runner, "_cleanup_rep_cwd"), \
+                 mock.patch.object(runner, "LOG_DIR", log_dir), \
+                 mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                rc, tag = runner._run_single_rep(job, {"VENTUS_BACKEND": "spike"}, {})
+
+            self.assertEqual((rc, tag), (runner.TEST_TIMEOUT_RETURN_CODE, runner.TAG_HANG))
+            log_text = (log_dir / "spike" / "timeout_case.log").read_text()
+            self.assertLess(
+                log_text.index("Classified: HANG"),
+                log_text.index("=== Regression Run Summary ==="),
+            )
+            self.assertIn("result: hang", log_text)
+            self.assertIn("return_code: 9999", log_text)
+            self.assertIn("execute: return_code=-15, timed_out=yes", log_text)
 
 
 if __name__ == "__main__":

@@ -22,12 +22,17 @@ from .numa import (
     wrap_command,
 )
 from .process import CommandResult, ResourceUsage, run_command, terminate_process_group
-from .status import TAG_COMPILE_FAIL, TAG_FAIL, TAG_HANG, TAG_OK, TAG_TIMEOUT, summarize_runs
+from .progress import (
+    PROGRESS_TQDM,
+    ProgressOutput,
+    close_progress_output,
+    create_progress_output,
+)
+from .status import TAG_COMPILE_FAIL, TAG_FAIL, TAG_HANG, TAG_OK, TAG_TIMEOUT
 
 
 COMPILE_TIMEOUT_SECONDS = 60
 TEST_TIMEOUT_RETURN_CODE = 9999
-OVERALL_PROGRESS_KEY = "_overall"
 RTL_GVM_WORKER_THREADS = 8
 DEFAULT_WORKER_THREADS = 1
 POCL_CACHE_DIR_NAME = ".pocl-cache"
@@ -128,6 +133,7 @@ def run_plan(
     shared_state: dict,
     *,
     numactl_policy: str,
+    progress_mode: str = PROGRESS_TQDM,
 ) -> tuple[list[tuple], int]:
     global _active_pids, _active_rep_cwds, _job_events, _pool
     _active_pids = shared_state["active_pids"]
@@ -169,6 +175,7 @@ def run_plan(
             jobs,
             numa_allocator,
             numactl_policy,
+            progress_mode,
         )
     except BaseException:
         _terminate_pool()
@@ -338,13 +345,14 @@ def _collect_plan_results(
     worker_thread_budget: int,
     numa_allocator: NumaAllocator,
     numactl_policy: str,
+    progress_mode: str,
 ) -> None:
     repeat_by_backend = {config.name: config.repeat for config in backend_configs}
     started_by_backend: dict[str, list[list[bool] | None]] = {
         config.name: [None] * len(TEST_CASES)
         for config in backend_configs
     }
-    bars = _create_progress_bars(backend_configs, len(test_jobs), selected_count)
+    progress = create_progress_output(backend_configs, len(test_jobs), selected_count, progress_mode)
     try:
         scheduler = WeightedJobScheduler(
             _pool,
@@ -355,19 +363,19 @@ def _collect_plan_results(
         )
         while not scheduler.done:
             scheduler.submit_ready()
-            _drain_job_events(started_by_backend, results_by_backend, repeat_by_backend, bars)
+            _drain_job_events(started_by_backend, results_by_backend, repeat_by_backend, progress)
+            progress.tick(results_by_backend, started_by_backend)
             if scheduler.collect_ready_results(
                 results_by_backend,
                 repeat_by_backend,
                 started_by_backend,
-                bars,
+                progress,
             ):
                 continue
             time.sleep(0.1)
-        _drain_job_events(started_by_backend, results_by_backend, repeat_by_backend, bars)
+        _drain_job_events(started_by_backend, results_by_backend, repeat_by_backend, progress)
     finally:
-        for bar in bars.values():
-            bar.close()
+        close_progress_output(progress)
 
 
 class WeightedJobScheduler:
@@ -411,7 +419,7 @@ class WeightedJobScheduler:
         results_by_backend: dict[str, list[list[tuple[int, str] | None] | None]],
         repeat_by_backend: dict[str, int],
         started_by_backend: dict[str, list[list[bool] | None]],
-        bars: dict[str, tqdm],
+        progress: ProgressOutput,
     ) -> bool:
         collected = False
         for active in list(self._active):
@@ -422,7 +430,7 @@ class WeightedJobScheduler:
             self._release_numa_binding(active.job, active.worker_threads)
             self._used_worker_threads -= active.worker_threads
             self._completed += 1
-            _record_job_result(result, results_by_backend, repeat_by_backend, started_by_backend, bars)
+            _record_job_result(result, results_by_backend, repeat_by_backend, started_by_backend, progress)
             collected = True
         return collected
 
@@ -462,7 +470,7 @@ def _record_job_result(
     results_by_backend: dict[str, list[list[tuple[int, str] | None] | None]],
     repeat_by_backend: dict[str, int],
     started_by_backend: dict[str, list[list[bool] | None]],
-    bars: dict[str, tqdm],
+    progress: ProgressOutput,
 ) -> None:
     backend_results = results_by_backend[result.backend_name]
     current = backend_results[result.testcase_index]
@@ -470,88 +478,15 @@ def _record_job_result(
         current = [None] * repeat_by_backend[result.backend_name]
         backend_results[result.testcase_index] = current
     current[result.run_idx - 1] = (result.rc, result.tag)
-    _update_progress_bars(
-        bars,
+    progress.job_completed(
         result.backend_name,
+        result.testcase_index,
+        result.run_idx,
+        result.rc,
+        result.tag,
         backend_results,
         started_by_backend[result.backend_name],
-        completed=True,
     )
-
-
-def _create_progress_bars(
-    backend_configs: list[BackendRunConfig],
-    total_reps: int,
-    selected_count: int,
-) -> dict[str, tqdm]:
-    show_overall = len(backend_configs) > 1
-    bars: dict[str, tqdm] = {}
-    start_position = 0
-    if show_overall:
-        bars[OVERALL_PROGRESS_KEY] = tqdm(total=total_reps, desc="Overall", unit="rep", position=0)
-        start_position = 1
-
-    for position, config in enumerate(backend_configs, start=start_position):
-        bars[config.name] = tqdm(
-            total=selected_count * config.repeat,
-            desc=f"Running [{config.name}]",
-            unit="rep" if config.repeat > 1 else "test",
-            position=position,
-            leave=True,
-        )
-    return bars
-
-
-def _update_progress_bars(
-    bars: dict[str, tqdm],
-    backend_name: str,
-    backend_results: list[list[tuple[int, str] | None] | None],
-    backend_started: list[list[bool] | None],
-    completed: bool,
-) -> None:
-    if completed and OVERALL_PROGRESS_KEY in bars:
-        bars[OVERALL_PROGRESS_KEY].update(1)
-    if completed:
-        bars[backend_name].update(1)
-    pass_count, fail_count, flaky_count, running_count = _count_statuses_with_running(
-        backend_results,
-        backend_started,
-    )
-    bars[backend_name].set_postfix_str(
-        f"pass={pass_count}, fail={fail_count}, flaky={flaky_count}, running={running_count}"
-    )
-
-
-def _count_statuses_with_running(
-    backend_results: list[list[tuple[int, str] | None] | None],
-    backend_started: list[list[bool] | None],
-) -> tuple[int, int, int, int]:
-    """Per-case 完成度统计：跑完的 case 算 pass/fail/flaky；已 launch 但尚未
-    回收全部 reps 的 case 算 running，让中途状态在进度条 postfix 里直观可见。"""
-    pass_count = fail_count = flaky_count = running_count = 0
-    for runs, started in zip(backend_results, backend_started):
-        if _has_running_rep(runs, started):
-            running_count += 1
-        if runs is None:
-            continue
-        if any(r is None for r in runs):
-            continue
-        _, _, tag = summarize_runs(runs)
-        if tag == TAG_OK:
-            pass_count += 1
-        elif tag == "flaky":
-            flaky_count += 1
-        else:
-            fail_count += 1
-    return pass_count, fail_count, flaky_count, running_count
-
-
-def _has_running_rep(runs: list[tuple[int, str] | None] | None, started: list[bool] | None) -> bool:
-    if started is None:
-        return False
-    if runs is None:
-        return any(started)
-    return any(has_started and result is None for has_started, result in zip(started, runs))
 
 
 def _emit_job_started(job: TestJob) -> None:
@@ -564,7 +499,7 @@ def _drain_job_events(
     started_by_backend: dict[str, list[list[bool] | None]],
     results_by_backend: dict[str, list[list[tuple[int, str] | None] | None]],
     repeat_by_backend: dict[str, int],
-    bars: dict[str, tqdm],
+    progress: ProgressOutput,
 ) -> None:
     if _job_events is None:
         return
@@ -582,12 +517,12 @@ def _drain_job_events(
             current = [False] * repeat_by_backend[backend_name]
             backend_started[testcase_index] = current
         current[run_idx - 1] = True
-        _update_progress_bars(
-            bars,
+        progress.job_started(
             backend_name,
+            testcase_index,
+            run_idx,
             results_by_backend[backend_name],
             backend_started,
-            completed=False,
         )
 
 

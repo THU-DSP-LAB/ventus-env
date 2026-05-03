@@ -63,15 +63,8 @@ jobs:
       run: |
         VENTUS_SPIKE_LOG=0 python3 testcases/_get_case/run_ventus_tests.py --cases cases_fast.csv --ref=results_nv --backends spike --rtol 1e-2 --atol 1e-2 --jobs 4 --timeout 7200
 
-    - name: Run Regression Tests (CycleSim)
-      id: test_cycle
-      if: always() && steps.build.outcome == 'success'
-      continue-on-error: true
-      run: |
-        . ./env.sh
-        VENTUS_BACKEND=cyclesim python3 regression-test.py --repeat=5 --checklist=cycle -t 4
-
     - name: Configure RTL/GVM regression parallelism
+      id: configure_regression_parallelism
       if: always() && steps.build.outcome == 'success'
       run: |
         cpu_count="$(nproc)"
@@ -86,52 +79,21 @@ jobs:
         echo "REGRESSION_TEST_RTL_JOBS=$rtl_jobs" >> "$GITHUB_ENV"
         echo "RTL/GVM regression worker budget: $rtl_jobs (cpu_count=$cpu_count, reserved_cpus=$reserved_cpus, worker_threads_per_job=$rtl_gvm_worker_threads)"
 
-    - name: Run Regression Tests (RTL-without-cache)
-      id: test_rtl_no_cache
-      if: always() && steps.build.outcome == 'success'
+    - name: Run Regression Tests (Backend matrix)
+      id: test_backend_matrix
+      if: always() && steps.build.outcome == 'success' && steps.configure_regression_parallelism.outcome == 'success'
       continue-on-error: true
       run: |
         . ./env.sh
-        # RTL simulation is slower, so we might need to increase timeout
-        VENTUS_BACKEND=rtl-nocache python3 regression-test.py -j "$REGRESSION_TEST_RTL_JOBS" -t 10 --repeat=5 --checklist=rtl-no-cache
-
-    - name: Run Regression Tests (RTL-with-cache)
-      id: test_rtl_cache
-      if: always() && steps.build.outcome == 'success'
-      continue-on-error: true
-      run: |
-        . ./env.sh
-        # RTL simulation is slower, so we might need to increase timeout
-        VENTUS_BACKEND=rtl-cache python3 regression-test.py -j "$REGRESSION_TEST_RTL_JOBS" -t 10 --repeat=5 --checklist=rtl-with-cache
-
-    - name: Run Regression Tests (RTL-without-cache-gvm)
-      id: test_gvm_no_cache
-      if: always() && steps.build.outcome == 'success'
-      continue-on-error: true
-      run: |
-        . ./env.sh
-        # RTL simulation is slower, so we might need to increase timeout
-        VENTUS_BACKEND=gvm-nocache python3 regression-test.py -j "$REGRESSION_TEST_RTL_JOBS" -t 10 --repeat=5 --checklist=rtl-no-cache
-
-    - name: Run Regression Tests (RTL-with-cache-gvm)
-      id: test_gvm_cache
-      if: always() && steps.build.outcome == 'success'
-      continue-on-error: true
-      run: |
-        . ./env.sh
-        # RTL simulation is slower, so we might need to increase timeout
-        VENTUS_BACKEND=gvm-cache python3 regression-test.py -j "$REGRESSION_TEST_RTL_JOBS" -t 10 --repeat=5 --checklist=rtl-with-cache
+        VENTUS_SPIKE_LOG=0 python3 regression-test.py --matrix=ci --progress=ci -j "$REGRESSION_TEST_RTL_JOBS" -t 10 --repeat=5
 
     - name: Check Regression Test Results
       if: always() && steps.build.outcome == 'success'
       env:
         TEST_SPIKE_EXTRA_OUTCOME: ${{ steps.test_spike_extra.outcome }}
         TEST_ISA_OUTCOME: ${{ steps.test_isa.outcome }}
-        TEST_CYCLE_OUTCOME: ${{ steps.test_cycle.outcome }}
-        TEST_RTL_NO_CACHE_OUTCOME: ${{ steps.test_rtl_no_cache.outcome }}
-        TEST_RTL_CACHE_OUTCOME: ${{ steps.test_rtl_cache.outcome }}
-        TEST_GVM_NO_CACHE_OUTCOME: ${{ steps.test_gvm_no_cache.outcome }}
-        TEST_GVM_CACHE_OUTCOME: ${{ steps.test_gvm_cache.outcome }}
+        CONFIGURE_REGRESSION_PARALLELISM_OUTCOME: ${{ steps.configure_regression_parallelism.outcome }}
+        TEST_BACKEND_MATRIX_OUTCOME: ${{ steps.test_backend_matrix.outcome }}
       run: |
         failed_steps=()
 
@@ -141,20 +103,11 @@ jobs:
         if [ "$TEST_ISA_OUTCOME" != "success" ]; then
           failed_steps+=("Run Regression Tests (ISA)")
         fi
-        if [ "$TEST_CYCLE_OUTCOME" != "success" ]; then
-          failed_steps+=("Run Regression Tests (Cycle)")
+        if [ "$CONFIGURE_REGRESSION_PARALLELISM_OUTCOME" != "success" ]; then
+          failed_steps+=("Configure RTL/GVM regression parallelism")
         fi
-        if [ "$TEST_RTL_NO_CACHE_OUTCOME" != "success" ]; then
-          failed_steps+=("Run Regression Tests (RTL-without-cache)")
-        fi
-        if [ "$TEST_RTL_CACHE_OUTCOME" != "success" ]; then
-          failed_steps+=("Run Regression Tests (RTL-with-cache)")
-        fi
-        if [ "$TEST_GVM_NO_CACHE_OUTCOME" != "success" ]; then
-          failed_steps+=("Run Regression Tests (RTL-without-cache-gvm)")
-        fi
-        if [ "$TEST_GVM_CACHE_OUTCOME" != "success" ]; then
-          failed_steps+=("Run Regression Tests (RTL-with-cache-gvm)")
+        if [ "$CONFIGURE_REGRESSION_PARALLELISM_OUTCOME" == "success" ] && [ "$TEST_BACKEND_MATRIX_OUTCOME" != "success" ]; then
+          failed_steps+=("Run Regression Tests (Backend matrix)")
         fi
 
         if [ "${#failed_steps[@]}" -gt 0 ]; then

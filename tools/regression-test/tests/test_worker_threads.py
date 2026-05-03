@@ -1,6 +1,9 @@
+import io
 import importlib.util
 import sys
 import unittest
+from argparse import Namespace
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -89,6 +92,60 @@ class WorkerThreadTests(unittest.TestCase):
             [job.backend.env_backend for job in pool.submitted],
             ["rtlsim-with-cache", "gvm-no-cache"],
         )
+
+    def test_ci_matrix_excludes_gpu_dependent_sbt_backend(self):
+        options = load_module("options")
+
+        backends = [backend for backend, _ in options.parse_matrix("ci")]
+
+        self.assertEqual(
+            backends,
+            ["cycle", "rtl-no-cache", "rtl-with-cache", "gvm-no-cache", "gvm-with-cache"],
+        )
+        self.assertNotIn("sbt", backends)
+
+    def test_cli_passes_progress_mode_to_runner(self):
+        cli = load_module("cli")
+        cases = load_module("cases")
+        args = Namespace(repeat=1, numactl="off", progress="ci")
+        matrix = [("cycle", {0})]
+        captured = {}
+
+        def fake_run_plan(*args, **kwargs):
+            captured["progress_mode"] = kwargs["progress_mode"]
+            config = args[0][0]
+            return [
+                (config.name, 0, [0], [None] * len(cases.TEST_CASES), config.checklist, [], config.repeat)
+            ], 0
+
+        with mock.patch.object(cli, "run_plan", side_effect=fake_run_plan):
+            cli.run_all_modes(args, matrix, True, jobs=1, timeout_scale=1, shared_state={})
+
+        self.assertEqual(captured["progress_mode"], "ci")
+
+    def test_ci_progress_tick_prints_heartbeat_after_five_minutes(self):
+        progress = load_module("progress")
+        interval = progress.CI_PROGRESS_HEARTBEAT_INTERVAL_SECONDS
+        results_by_backend = {"rtlsim-no-cache": [None]}
+        started_by_backend = {"rtlsim-no-cache": [[True]]}
+        output = io.StringIO()
+
+        with mock.patch.object(progress.time, "monotonic", return_value=0):
+            progress_output = progress.CiProgressOutput(total_reps=1)
+
+        with redirect_stdout(output), \
+             mock.patch.object(progress.time, "monotonic", return_value=interval - 1):
+            progress_output.tick(results_by_backend, started_by_backend)
+
+        self.assertEqual(output.getvalue(), "")
+
+        with redirect_stdout(output), \
+             mock.patch.object(progress.time, "monotonic", return_value=interval):
+            progress_output.tick(results_by_backend, started_by_backend)
+
+        heartbeat = output.getvalue()
+        self.assertIn("[heartbeat] completed=0/1", heartbeat)
+        self.assertIn("rtlsim-no-cache:pass=0,fail=0,flaky=0,running=1", heartbeat)
 
     @staticmethod
     def _fake_run_test_job(job):

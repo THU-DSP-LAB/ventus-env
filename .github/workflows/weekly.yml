@@ -23,6 +23,21 @@ jobs:
         - /ci/ventus-env/logs:/logs
     
     steps:
+    - name: Clean workspace before checkout
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        workspace="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is not set}"
+        echo "Cleaning workspace before checkout: ${workspace}"
+
+        if [ -d "$workspace" ]; then
+          find "$workspace" -mindepth 1 -maxdepth 1 -printf 'Removing %p\n'
+          find "$workspace" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+        else
+          mkdir -p "$workspace"
+        fi
+
     - name: Checkout repository
       uses: actions/checkout@v4
       with:

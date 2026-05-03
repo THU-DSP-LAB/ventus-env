@@ -52,11 +52,19 @@ runs:
         set +e
         (
           set -e
-          if [ -d "/artifacts/${{ github.sha }}" ]; then
+          artifact_dir="/artifacts/${{ github.sha }}"
+          artifact_marker="${artifact_dir}/.ventus-ci-artifact-complete"
+
+          if [ -f "$artifact_marker" ]; then
             echo "Found existing artifacts for ${{ github.sha }}"
-            cp -r /artifacts/${{ github.sha }}/* .
+            cp -a "${artifact_dir}/install" .
             env CCACHE_DIR=/ccache bash build-ventus.sh --build pocl
             echo "cache-hit=true" >> "$GITHUB_OUTPUT"
+          elif [ -d "$artifact_dir" ]; then
+            echo "Found incomplete artifact directory without marker: ${artifact_dir}"
+            echo "Expected marker: ${artifact_marker}"
+            echo "Refusing to restore incomplete build artifacts."
+            exit 1
           else
             echo "No artifacts found"
             echo "cache-hit=false" >> "$GITHUB_OUTPUT"
@@ -93,9 +101,36 @@ runs:
         set +e
         (
           set -e
-          mkdir -p /artifacts/${{ github.sha }}
-          if [ -d "install" ]; then cp -r install /artifacts/${{ github.sha }}/; fi
-          touch /artifacts/${{ github.sha }}
+          artifact_dir="/artifacts/${{ github.sha }}"
+          artifact_marker="${artifact_dir}/.ventus-ci-artifact-complete"
+          temp_artifact_dir="$(mktemp -d "/artifacts/.tmp-${{ github.sha }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.XXXXXX")"
+          trap 'rm -rf "$temp_artifact_dir"' EXIT
+
+          if [ ! -d "install" ]; then
+            echo "Build completed but install directory is missing."
+            exit 1
+          fi
+
+          cp -a install "$temp_artifact_dir/"
+          {
+            echo "sha=${{ github.sha }}"
+            echo "workflow=${GITHUB_WORKFLOW}"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > "${temp_artifact_dir}/.ventus-ci-artifact-complete"
+
+          if [ -e "$artifact_dir" ]; then
+            if [ -f "$artifact_marker" ]; then
+              echo "Artifact was already published by another run: ${artifact_dir}"
+              exit 0
+            fi
+            echo "Refusing to overwrite incomplete artifact directory without marker: ${artifact_dir}"
+            exit 1
+          fi
+
+          mv -T "$temp_artifact_dir" "$artifact_dir"
+          trap - EXIT
         ) 2>&1 | tee regression-test-logs/setup-and-build/save-build-artifacts.log
         pipe_status=("${PIPESTATUS[@]}")
         status=${pipe_status[0]}

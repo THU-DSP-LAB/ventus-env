@@ -103,6 +103,15 @@ def build_parser() -> argparse.ArgumentParser:
             "require exits if binding cannot be prepared; off disables binding."
         ),
     )
+    parser.add_argument(
+        "--progress",
+        choices=("tqdm", "ci", "none"),
+        default="tqdm",
+        help=(
+            "Progress output mode. tqdm keeps the interactive progress bars; "
+            "ci prints plain one-line events for GitHub Actions; none only prints reports."
+        ),
+    )
     return parser
 
 
@@ -149,6 +158,7 @@ def run_all_modes(
         timeout_scale,
         shared_state,
         numactl_policy=args.numactl,
+        progress_mode=args.progress,
     )
 
 

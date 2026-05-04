@@ -87,8 +87,13 @@ jobs:
           log_sources+=("$dest/no-logs.txt")
         fi
 
-        archive="$dest/ci-logs.tar.xz"
-        tar -cf - "${log_sources[@]}" | xz -T0 -6e > "$archive"
+        if command -v zstd >/dev/null 2>&1; then
+          archive="$dest/ci-logs.tar.zst"
+          tar -cf - "${log_sources[@]}" | zstd -T0 -10 --long=27 > "$archive"
+        else
+          archive="$dest/ci-logs.tar.xz"
+          tar -cf - "${log_sources[@]}" | xz -T0 -6e > "$archive"
+        fi
 
         {
           echo "workflow=${GITHUB_WORKFLOW}"

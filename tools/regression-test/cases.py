@@ -64,6 +64,13 @@ MATRIX_PRESETS = {
         ("gvm-no-cache", "rtl-no-cache"),
         ("gvm-with-cache", "rtl-with-cache"),
     ],
+    "ci": [
+        ("cycle", "cycle"),
+        ("rtl-no-cache", "rtl-no-cache"),
+        ("rtl-with-cache", "rtl-with-cache"),
+        ("gvm-no-cache", "rtl-no-cache"),
+        ("gvm-with-cache", "rtl-with-cache"),
+    ],
     "rtl-both": [
         ("rtl-withcache", "rtl-with-cache"),
         ("rtl-nocache", "rtl-no-cache"),

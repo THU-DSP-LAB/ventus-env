@@ -54,6 +54,17 @@ class FakeBar:
         pass
 
 
+class FakeProgress:
+    def job_started(self, *args):
+        pass
+
+    def job_completed(self, *args):
+        pass
+
+    def tick(self, *args):
+        pass
+
+
 def make_job(backend):
     runner = load_module("runner")
     cases = load_module("cases")
@@ -259,7 +270,8 @@ class NumaTests(unittest.TestCase):
                 super().__init__(*args, **kwargs)
 
         with mock.patch.object(runner, "_pool", FakePool()), \
-             mock.patch.object(runner, "_create_progress_bars", return_value={"spike": FakeBar()}), \
+             mock.patch.object(runner, "create_progress_output", return_value=FakeProgress()), \
+             mock.patch.object(runner, "close_progress_output"), \
              mock.patch.object(runner, "_drain_job_events"), \
              mock.patch.object(runner, "run_test_job", self._fake_run_test_job), \
              mock.patch.object(runner, "WeightedJobScheduler", CapturingScheduler):
@@ -271,6 +283,7 @@ class NumaTests(unittest.TestCase):
                 worker_thread_budget=1,
                 numa_allocator=numa.NumaAllocator([]),
                 numactl_policy=numa.NUMACTL_REQUIRE,
+                progress_mode=runner.PROGRESS_TQDM,
             )
 
         self.assertEqual(captured_policies, [numa.NUMACTL_REQUIRE])
@@ -286,8 +299,7 @@ class NumaTests(unittest.TestCase):
         results_by_backend = {name: [None] for name in backend_names}
         repeat_by_backend = {name: 1 for name in backend_names}
         started_by_backend = {name: [[True]] for name in backend_names}
-        bars = {name: FakeBar() for name in backend_names}
-        scheduler.collect_ready_results(results_by_backend, repeat_by_backend, started_by_backend, bars)
+        scheduler.collect_ready_results(results_by_backend, repeat_by_backend, started_by_backend, FakeProgress())
 
 
 if __name__ == "__main__":

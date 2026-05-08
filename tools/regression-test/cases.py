@@ -31,10 +31,14 @@ TEST_CASES = [
     TestCase(name="nn_1024", path=RODINIA_DIR / "opencl/nn", cmd=["./nn.out", "../../data/nn/list1k.txt", "-r", "20", "-lat", "13", "-lng", "27", "-f", "../../data/nn", "-t", "-p", "0", "-d", "0", "--ref", "nvidia-result-1k-lat13-lng27"]),
     TestCase(name="nn_64k", path=RODINIA_DIR / "opencl/nn", cmd=["./nn.out", "../../data/nn/list64k.txt", "-r", "20", "-lat", "30", "-lng", "90", "-f", "../../data/nn", "-t", "-p", "0", "-d", "0", "--ref", "nvidia-result-64k-lat30-lng90"], timeout=900),
     TestCase(name="kmeans_512", path=RODINIA_DIR / "opencl/kmeans", cmd=["./kmeans.out", "-o", "-r", "-i", "../../data/kmeans/512_34f.txt", "-g", "nvidia_result_512_34f_k5", "-p", "0", "-d", "0"]),
-    TestCase(name="pathfinder_4x32_h1", path=RODINIA_DIR / "opencl/pathfinder", cmd=["./pathfinder.out", "-c", "32", "-r", "4", "-h", "1", "-p", "0", "-d", "0"]),
-    TestCase(name="hotspot_64_1_1", path=RODINIA_DIR / "opencl/hotspot", cmd=["./hotspot.out", "64", "1", "1", "../../data/hotspot/temp_64", "../../data/hotspot/power_64", "output.txt", "-p", "0", "-d", "0", "--ref", "nvidia-ref-64-1-1.txt"]),
+    TestCase(name="pathfinder_32x64_h4", path=RODINIA_DIR / "opencl/pathfinder", cmd=["./pathfinder.out", "-c", "64", "-r", "32", "-h", "4", "-p", "0", "-d", "0"]),
+    TestCase(name="hotspot_64_4_4", path=RODINIA_DIR / "opencl/hotspot", cmd=["./hotspot.out", "64", "4", "4", "../../data/hotspot/temp_64", "../../data/hotspot/power_64", "output.txt", "-p", "0", "-d", "0", "--ref", "nvidia-ref-64-4-4.txt"]),
     TestCase(name="hotspot3D_64x8_i1", path=RODINIA_DIR / "opencl/hotspot3D", cmd=["./hotspot3D.out", "-n", "64", "-l", "8", "-i", "1", "-f", "../../data/hotspot3D/power_64x8", "../../data/hotspot3D/temp_64x8", "output.txt", "-p", "0", "-d", "0"]),
-    TestCase(name="nw_16", path=RODINIA_DIR / "opencl/nw", cmd=["./nw.out", "16", "10", "./nw.cl", "-p", "0", "-d", "0"]),
+    TestCase(name="hotspot3D_512x2_i1", path=RODINIA_DIR / "opencl/hotspot3D", cmd=["./hotspot3D.out", "-n", "512", "-l", "2", "-i", "1", "-f", "../../data/hotspot3D/power_512x2", "../../data/hotspot3D/temp_512x2", "output.txt", "-p", "0", "-d", "0"]),
+    TestCase(name="nw_80", path=RODINIA_DIR / "opencl/nw", cmd=["./nw.out", "80", "10", "./nw.cl", "-p", "0", "-d", "0"]),
+    # Pressure variants kept out of default regression:
+    # TestCase(name="hotspot3D_512x4_i1", path=RODINIA_DIR / "opencl/hotspot3D", cmd=["./hotspot3D.out", "-n", "512", "-l", "4", "-i", "1", "-f", "../../data/hotspot3D/power_512x4", "../../data/hotspot3D/temp_512x4", "output.txt", "-p", "0", "-d", "0"], timeout=900),
+    # TestCase(name="nw_256", path=RODINIA_DIR / "opencl/nw", cmd=["./nw.out", "256", "10", "./nw.cl", "-p", "0", "-d", "0"], timeout=900),
     TestCase(name="heartwall_1", path=RODINIA_DIR / "opencl/heartwall", cmd=["./run"], timeout=900),
     TestCase(name="srad_1_1_64", path=RODINIA_DIR / "opencl/srad", cmd=["./run"], timeout=600),
     TestCase(name="lud_64", path=RODINIA_DIR / "opencl/lud", cmd=["./lud.out", "-v", "-i", "../../data/lud/64.dat", "-p", "0", "-d", "0"], timeout=600),
@@ -44,13 +48,42 @@ TEST_CASES = [
 ]
 
 
+def _build_case_index(test_cases: list[TestCase]) -> dict[str, int]:
+    case_index: dict[str, int] = {}
+    for index, test_case in enumerate(test_cases):
+        if test_case.name in case_index:
+            raise ValueError(f"Duplicate testcase name: {test_case.name}")
+        case_index[test_case.name] = index
+    return case_index
+
+
+def _case_indices(case_names: tuple[str, ...]) -> list[int]:
+    return [TEST_CASE_INDEX_BY_NAME[name] for name in case_names]
+
+
+TEST_CASE_INDEX_BY_NAME = _build_case_index(TEST_CASES)
+ALL_REQUIRED_CASE_NAMES = tuple(test_case.name for test_case in TEST_CASES)
+
+# Keep cache preset exclusions named so TEST_CASES insertions do not shift numeric checklists.
+RTL_WITH_CACHE_EXCLUDED_CASE_NAMES = frozenset({
+    "b+tree_128",
+    "bfs_4096",
+    "srad_1_1_64",
+    "lud_64",
+    "nw_80",
+})
+RTL_WITH_CACHE_CASE_NAMES = tuple(
+    name for name in ALL_REQUIRED_CASE_NAMES if name not in RTL_WITH_CACHE_EXCLUDED_CASE_NAMES
+)
+
+
 REQUIRED_PRESETS = {
-    "all": list(range(len(TEST_CASES))),
-    "isa": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
-    "sbt": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
-    "cycle": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
-    "rtl-with-cache": [0, 1, 2, 4, 6, 7, 8, 9, 10, 11, 12, 13, 16, 17, 18],
-    "rtl-no-cache": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+    "all": _case_indices(ALL_REQUIRED_CASE_NAMES),
+    "isa": _case_indices(ALL_REQUIRED_CASE_NAMES),
+    "sbt": _case_indices(ALL_REQUIRED_CASE_NAMES),
+    "cycle": _case_indices(ALL_REQUIRED_CASE_NAMES),
+    "rtl-with-cache": _case_indices(RTL_WITH_CACHE_CASE_NAMES),
+    "rtl-no-cache": _case_indices(ALL_REQUIRED_CASE_NAMES),
 }
 
 

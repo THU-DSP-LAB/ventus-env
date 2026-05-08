@@ -147,6 +147,39 @@ class WorkerThreadTests(unittest.TestCase):
         self.assertIn("[heartbeat] completed=0/1", heartbeat)
         self.assertIn("rtlsim-no-cache:pass=0,fail=0,flaky=0,running=1", heartbeat)
 
+    def test_tqdm_backend_names_are_short_display_labels(self):
+        progress = load_module("progress")
+
+        self.assertEqual(progress._format_tqdm_backend_name("rtlsim-with-cache"), "rtl-cache")
+        self.assertEqual(progress._format_tqdm_backend_name("rtlsim-no-cache"), "rtl-nocache")
+        self.assertEqual(progress._format_tqdm_backend_name("rtlsim-with-cache-gvm"), "rtl-cache-gvm")
+        self.assertEqual(progress._format_tqdm_backend_name("rtlsim-no-cache-gvm"), "rtl-nocache-gvm")
+        self.assertEqual(progress._format_tqdm_backend_name("spike"), "spike")
+
+    def test_tqdm_bars_use_compact_format(self):
+        progress = load_module("progress")
+        config = Namespace(name="rtlsim-with-cache", repeat=10)
+
+        with mock.patch.object(progress, "tqdm", return_value=object()) as fake_tqdm:
+            progress._create_progress_bars([config], total_reps=10, selected_count=1)
+
+        kwargs = fake_tqdm.call_args.kwargs
+        self.assertEqual(kwargs["desc"], "rtl-cache")
+        self.assertEqual(kwargs["bar_format"], progress.TQDM_BAR_FORMAT)
+        self.assertTrue(kwargs["dynamic_ncols"])
+
+    def test_tqdm_postfix_rolls_flaky_into_fail(self):
+        progress = load_module("progress")
+
+        postfix = progress._format_tqdm_status_postfix(
+            pass_count=5,
+            fail_count=1,
+            flaky_count=2,
+            running_count=3,
+        )
+
+        self.assertEqual(postfix, "ok=5 fail=3 run=3")
+
     @staticmethod
     def _fake_run_test_job(job):
         runner = load_module("runner")

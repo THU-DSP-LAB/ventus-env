@@ -13,6 +13,17 @@ PROGRESS_CI = "ci"
 PROGRESS_NONE = "none"
 CI_PROGRESS_SUMMARY_INTERVAL_SECONDS = 30
 CI_PROGRESS_HEARTBEAT_INTERVAL_SECONDS = 5 * 60
+TQDM_BAR_FORMAT = "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} {postfix}"
+TQDM_BACKEND_DISPLAY_NAMES = {
+    "rtl-with-cache": "rtl-cache",
+    "rtl-no-cache": "rtl-nocache",
+    "rtlsim-with-cache": "rtl-cache",
+    "rtlsim-no-cache": "rtl-nocache",
+    "gvm-with-cache": "rtl-cache-gvm",
+    "gvm-no-cache": "rtl-nocache-gvm",
+    "rtlsim-with-cache-gvm": "rtl-cache-gvm",
+    "rtlsim-no-cache-gvm": "rtl-nocache-gvm",
+}
 
 
 def _print_ci_event(message: str) -> None:
@@ -99,7 +110,7 @@ class TqdmProgressOutput(ProgressOutput):
             backend_started,
         )
         self._bars[backend_name].set_postfix_str(
-            f"pass={pass_count}, fail={fail_count}, flaky={flaky_count}, running={running_count}"
+            _format_tqdm_status_postfix(pass_count, fail_count, flaky_count, running_count)
         )
 
 
@@ -216,18 +227,41 @@ def _create_progress_bars(
     bars: dict[str, tqdm] = {}
     start_position = 0
     if show_overall:
-        bars[OVERALL_PROGRESS_KEY] = tqdm(total=total_reps, desc="Overall", unit="rep", position=0)
+        bars[OVERALL_PROGRESS_KEY] = tqdm(
+            total=total_reps,
+            desc="Overall",
+            unit="rep",
+            position=0,
+            bar_format=TQDM_BAR_FORMAT,
+            dynamic_ncols=True,
+        )
         start_position = 1
 
     for position, config in enumerate(backend_configs, start=start_position):
         bars[config.name] = tqdm(
             total=selected_count * config.repeat,
-            desc=f"Running [{config.name}]",
+            desc=_format_tqdm_backend_name(config.name),
             unit="rep" if config.repeat > 1 else "test",
             position=position,
             leave=True,
+            bar_format=TQDM_BAR_FORMAT,
+            dynamic_ncols=True,
         )
     return bars
+
+
+def _format_tqdm_backend_name(backend_name: str) -> str:
+    return TQDM_BACKEND_DISPLAY_NAMES.get(backend_name, backend_name)
+
+
+def _format_tqdm_status_postfix(
+    pass_count: int,
+    fail_count: int,
+    flaky_count: int,
+    running_count: int,
+) -> str:
+    visible_fail_count = fail_count + flaky_count
+    return f"ok={pass_count} fail={visible_fail_count} run={running_count}"
 
 
 def _count_statuses_with_running(

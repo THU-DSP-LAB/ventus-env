@@ -50,7 +50,6 @@ DEFAULT_TEST_CASES = [
     TestCase(name="lud_64", path=RODINIA_DIR / "opencl/lud", cmd=["./lud.out", "-v", "-i", "../../data/lud/64.dat", "-p", "0", "-d", "0"], timeout=600),
     TestCase(name="streamcluster_256", path=RODINIA_DIR / "opencl/streamcluster", cmd=["./run"], timeout=600),
     # Not supported yet
-    # TestCase(name="dwt2d_4", path=RODINIA_DIR / "opencl/dwt2d", cmd=["./run"], timeout=600),
     # TestCase(name="hybridsort_4096", path=RODINIA_DIR / "opencl/hybridsort", cmd=["./run"], timeout=600),
     # TestCase(name="lavaMD_box1", path=RODINIA_DIR / "opencl/lavaMD", cmd=["./run"], timeout=600),
     # TestCase(name="leukocyte_1", path=RODINIA_DIR / "opencl/leukocyte", cmd=["./run"], timeout=600),
@@ -67,6 +66,7 @@ BACKEND_CASE_SETS = (
         backends=frozenset({"spike", "sbt"}),
         cases=(
             TestCase(name="cfd_i1", path=RODINIA_DIR / "opencl/cfd", cmd=["./run"], timeout=600),
+            TestCase(name="dwt2d_192", path=RODINIA_DIR / "opencl/dwt2d", cmd=["./run"], timeout=600),
         ),
     ),
 )

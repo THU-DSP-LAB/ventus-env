@@ -21,7 +21,13 @@ class TestCase:
     need_make: bool = True
 
 
-TEST_CASES = [
+@dataclass(frozen=True)
+class BackendCaseSet:
+    backends: frozenset[str]
+    cases: tuple[TestCase, ...]
+
+
+DEFAULT_TEST_CASES = [
     TestCase(name="matadd", path=POCL_DIR / "build/examples/matadd", cmd=["./matadd"], need_make=False),
     TestCase(name="vecadd_4096", path=POCL_DIR / "build/examples/vecadd", cmd=["./vecadd", "4096", "128"], need_make=False),
     TestCase(name="gaussian_16", path=RODINIA_DIR / "opencl/gaussian", cmd=["./gaussian.out", "-p", "0", "-d", "0", "-f", "../../data/gaussian/matrix16.txt", "-v"], timeout=300),
@@ -42,9 +48,34 @@ TEST_CASES = [
     TestCase(name="heartwall_1", path=RODINIA_DIR / "opencl/heartwall", cmd=["./run"], timeout=900),
     TestCase(name="srad_1_1_64", path=RODINIA_DIR / "opencl/srad", cmd=["./run"], timeout=600),
     TestCase(name="lud_64", path=RODINIA_DIR / "opencl/lud", cmd=["./lud.out", "-v", "-i", "../../data/lud/64.dat", "-p", "0", "-d", "0"], timeout=600),
+    TestCase(name="streamcluster_256", path=RODINIA_DIR / "opencl/streamcluster", cmd=["./run"], timeout=600),
+    # Not supported yet
+    # TestCase(name="dwt2d_4", path=RODINIA_DIR / "opencl/dwt2d", cmd=["./run"], timeout=600),
+    # TestCase(name="hybridsort_4096", path=RODINIA_DIR / "opencl/hybridsort", cmd=["./run"], timeout=600),
+    # TestCase(name="lavaMD_box1", path=RODINIA_DIR / "opencl/lavaMD", cmd=["./run"], timeout=600),
+    # TestCase(name="leukocyte_1", path=RODINIA_DIR / "opencl/leukocyte", cmd=["./run"], timeout=600),
+    # TestCase(name="myocyte_1", path=RODINIA_DIR / "opencl/myocyte", cmd=["./run"], timeout=600),
+    # TestCase(name="particlefilter_16x16x3_np100", path=RODINIA_DIR / "opencl/particlefilter", cmd=["./run"], timeout=600),
     TestCase(name="mnist_conv_small", path=VENTUS_TESTCASE_DIR / "_get_case/MNIST_conv_small", cmd=["./conv.out"]),
     TestCase(name="mnist", path=VENTUS_TESTCASE_DIR / "_get_case/MNIST", cmd=["./nn_forward.out"]),
     TestCase(name="lds_corruption", path=VENTUS_TESTCASE_DIR / "others/lds_corruption", cmd=["./run"], timeout=180),
+]
+
+
+BACKEND_CASE_SETS = (
+    BackendCaseSet(
+        backends=frozenset({"spike", "sbt"}),
+        cases=(
+            TestCase(name="cfd_i1", path=RODINIA_DIR / "opencl/cfd", cmd=["./run"], timeout=600),
+        ),
+    ),
+)
+
+
+TEST_CASES = DEFAULT_TEST_CASES + [
+    test_case
+    for case_set in BACKEND_CASE_SETS
+    for test_case in case_set.cases
 ]
 
 
@@ -61,8 +92,52 @@ def _case_indices(case_names: tuple[str, ...]) -> list[int]:
     return [TEST_CASE_INDEX_BY_NAME[name] for name in case_names]
 
 
+def _build_backend_case_names(case_sets: tuple[BackendCaseSet, ...]) -> dict[str, tuple[str, ...]]:
+    case_names_by_backend: dict[str, list[str]] = {}
+    for case_set in case_sets:
+        for backend in case_set.backends:
+            case_names_by_backend.setdefault(backend, []).extend(test_case.name for test_case in case_set.cases)
+    return {
+        backend: tuple(case_names)
+        for backend, case_names in case_names_by_backend.items()
+    }
+
+
+def _build_case_backends(case_sets: tuple[BackendCaseSet, ...]) -> dict[str, frozenset[str]]:
+    case_backends: dict[str, frozenset[str]] = {}
+    for case_set in case_sets:
+        for test_case in case_set.cases:
+            if test_case.name in case_backends:
+                raise ValueError(f"Duplicate backend-specific testcase name: {test_case.name}")
+            case_backends[test_case.name] = case_set.backends
+    return case_backends
+
+
+def required_case_names_for_backend(backend: str) -> tuple[str, ...]:
+    return ALL_REQUIRED_CASE_NAMES + BACKEND_CASE_NAMES_BY_BACKEND.get(backend, ())
+
+
+def required_case_indices_for_backend(backend: str) -> list[int]:
+    return _case_indices(required_case_names_for_backend(backend))
+
+
+def case_enabled_for_backend(testcase_index: int, backend: str) -> bool:
+    allowed_backends = CASE_BACKENDS.get(TEST_CASES[testcase_index].name)
+    return allowed_backends is None or backend in allowed_backends
+
+
+def selected_case_indices_for_backend(backend: str, selected_indices: list[int] | tuple[int, ...]) -> tuple[int, ...]:
+    return tuple(
+        index
+        for index in selected_indices
+        if case_enabled_for_backend(index, backend)
+    )
+
+
 TEST_CASE_INDEX_BY_NAME = _build_case_index(TEST_CASES)
-ALL_REQUIRED_CASE_NAMES = tuple(test_case.name for test_case in TEST_CASES)
+ALL_REQUIRED_CASE_NAMES = tuple(test_case.name for test_case in DEFAULT_TEST_CASES)
+BACKEND_CASE_NAMES_BY_BACKEND = _build_backend_case_names(BACKEND_CASE_SETS)
+CASE_BACKENDS = _build_case_backends(BACKEND_CASE_SETS)
 
 # Keep cache preset exclusions named so TEST_CASES insertions do not shift numeric checklists.
 RTL_WITH_CACHE_EXCLUDED_CASE_NAMES = frozenset({
@@ -79,8 +154,8 @@ RTL_WITH_CACHE_CASE_NAMES = tuple(
 
 REQUIRED_PRESETS = {
     "all": _case_indices(ALL_REQUIRED_CASE_NAMES),
-    "isa": _case_indices(ALL_REQUIRED_CASE_NAMES),
-    "sbt": _case_indices(ALL_REQUIRED_CASE_NAMES),
+    "isa": required_case_indices_for_backend("spike"),
+    "sbt": required_case_indices_for_backend("sbt"),
     "cycle": _case_indices(ALL_REQUIRED_CASE_NAMES),
     "rtl-with-cache": _case_indices(RTL_WITH_CACHE_CASE_NAMES),
     "rtl-no-cache": _case_indices(ALL_REQUIRED_CASE_NAMES),

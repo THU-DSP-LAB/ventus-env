@@ -119,9 +119,10 @@ def build_matrix(args: argparse.Namespace, parser: argparse.ArgumentParser) -> t
     try:
         if args.matrix is not None:
             return [(backend, checklist) for backend, checklist in parse_matrix(args.matrix, args.checklist)], True
+        default_backend = normalize_backend(None).env_backend
         if args.checklist is not None:
-            return [(None, parse_checklist(args.checklist))], False
-        return [(None, parse_checklist("all"))], False
+            return [(None, parse_checklist(args.checklist, default_backend))], False
+        return [(None, parse_checklist("all", default_backend))], False
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
 

@@ -4,7 +4,13 @@ import os
 from collections import Counter
 from dataclasses import dataclass
 
-from .cases import MATRIX_PRESETS, REQUIRED_PRESETS, TEST_CASES
+from .cases import (
+    MATRIX_PRESETS,
+    REQUIRED_PRESETS,
+    TEST_CASES,
+    required_case_indices_for_backend,
+    selected_case_indices_for_backend,
+)
 
 
 WITHCACHE_DEFAULT_REPEAT = 10
@@ -92,8 +98,10 @@ def detect_default_repeat(backend: str | None) -> int:
     return 1
 
 
-def parse_checklist(value: str) -> set[int]:
+def parse_checklist(value: str, backend: str | None = None) -> set[int]:
     checklist = (value or "all").strip().lower()
+    if checklist == "all" and backend is not None:
+        return set(required_case_indices_for_backend(normalize_backend(backend).env_backend))
     if checklist in REQUIRED_PRESETS:
         return set(REQUIRED_PRESETS[checklist])
     parts = [p.strip() for p in checklist.split(",") if p.strip()]
@@ -117,7 +125,7 @@ def parse_matrix(value: str, checklist_override: str | None = None) -> list[tupl
         pairs = _parse_matrix_pairs(matrix_value)
     if checklist_override is not None:
         pairs = [(backend, checklist_override) for backend, _ in pairs]
-    return [(backend, parse_checklist(checklist_name)) for backend, checklist_name in pairs]
+    return [(backend, parse_checklist(checklist_name, backend)) for backend, checklist_name in pairs]
 
 
 def _parse_matrix_pairs(value: str) -> list[tuple[str, str]]:
@@ -166,6 +174,19 @@ def validate_checklist_indices(matrix: list[tuple[str | None, set[int]]], parser
                 f"checklist for backend '{backend or '<default>'}' contains invalid indices: "
                 f"{invalid} (valid range: 0..{len(TEST_CASES) - 1})"
             )
+        disabled = _disabled_checklist_indices(backend, checklist)
+        if disabled:
+            disabled_names = ", ".join(TEST_CASES[index].name for index in disabled)
+            parser.error(
+                f"checklist for backend '{backend or '<default>'}' contains cases not enabled for that backend: "
+                f"{disabled} ({disabled_names})"
+            )
+
+
+def _disabled_checklist_indices(backend: str | None, checklist: set[int]) -> list[int]:
+    backend_name = normalize_backend(backend).env_backend
+    enabled = set(selected_case_indices_for_backend(backend_name, list(range(len(TEST_CASES)))))
+    return sorted(index for index in checklist if index not in enabled)
 
 
 def validate_unique_backend_names(matrix: list[tuple[str | None, set[int]]], parser: argparse.ArgumentParser) -> None:

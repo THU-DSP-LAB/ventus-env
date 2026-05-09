@@ -11,7 +11,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from .cases import LOG_DIR, TEST_CASES, TestCase
+from .cases import LOG_DIR, TEST_CASES, TestCase, selected_case_indices_for_backend
 from .numa import (
     NUMACTL_AUTO,
     NUMACTL_REQUIRE,
@@ -74,6 +74,7 @@ class BackendRunConfig:
     name: str
     checklist: set[int]
     repeat: int
+    selected_indices: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -139,6 +140,8 @@ def run_plan(
     _active_pids = shared_state["active_pids"]
     _active_rep_cwds = shared_state["active_rep_cwds"]
     _job_events = shared_state["job_events"]
+    backend_configs = _attach_backend_selected_indices(backend_configs, selected_indices)
+    _validate_backend_checklists(backend_configs)
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     for config in backend_configs:
@@ -154,7 +157,6 @@ def run_plan(
         jobs,
         timeout_scale,
         test_jobs,
-        selected_indices,
         numactl_policy,
     )
     _validate_worker_thread_budget(jobs, test_jobs)
@@ -171,7 +173,7 @@ def run_plan(
             backend_configs,
             test_jobs,
             results_by_backend,
-            len(selected_indices),
+            0,
             jobs,
             numa_allocator,
             numactl_policy,
@@ -221,19 +223,74 @@ def _build_test_jobs(
     """把 (backend × case × rep) 完全摊平进 pool。每个 rep 在同级 .rep_* cwd
     中从干净 Git tree 或 reflink copy 独立编译、运行，避免同源目录运行产物互相覆盖。"""
     ordered_configs = _schedule_backend_configs(backend_configs)
-    if not ordered_configs or not selected_indices:
+    if not ordered_configs:
         return []
 
     jobs: list[TestJob] = []
-    case_count = len(selected_indices)
-    case_stride = (case_count + len(ordered_configs) - 1) // len(ordered_configs)
-    for case_round in range(case_count):
-        for backend_position, config in enumerate(ordered_configs):
-            case_position = (case_round + backend_position * case_stride) % case_count
-            index = selected_indices[case_position]
+    backend_case_orders = _build_backend_case_orders(ordered_configs, selected_indices)
+    max_case_count = max((len(case_order) for _, case_order in backend_case_orders), default=0)
+    for case_round in range(max_case_count):
+        for config, case_order in backend_case_orders:
+            if case_round >= len(case_order):
+                continue
+            index = case_order[case_round]
             for run_idx in range(1, config.repeat + 1):
                 jobs.append(TestJob(config, index, TEST_CASES[index], run_idx, config.repeat, timeout_scale))
     return jobs
+
+
+def _attach_backend_selected_indices(
+    backend_configs: list[BackendRunConfig],
+    selected_indices: list[int],
+) -> list[BackendRunConfig]:
+    return [
+        config if config.selected_indices else replace(
+            config,
+            selected_indices=selected_case_indices_for_backend(config.env_backend, selected_indices),
+        )
+        for config in backend_configs
+    ]
+
+
+def _validate_backend_checklists(backend_configs: list[BackendRunConfig]) -> None:
+    for config in backend_configs:
+        invalid = sorted(index for index in config.checklist if index not in config.selected_indices)
+        if invalid:
+            invalid_names = ", ".join(TEST_CASES[index].name for index in invalid)
+            raise ValueError(
+                f"checklist for backend '{config.name}' contains cases not enabled for that backend: "
+                f"{invalid} ({invalid_names})"
+            )
+
+
+def _build_backend_case_orders(
+    ordered_configs: list[BackendRunConfig],
+    selected_indices: list[int],
+) -> list[tuple[BackendRunConfig, tuple[int, ...]]]:
+    return [
+        (config, _scheduled_case_order(_backend_selected_indices(config, selected_indices), position, len(ordered_configs)))
+        for position, config in enumerate(ordered_configs)
+    ]
+
+
+def _backend_selected_indices(config: BackendRunConfig, selected_indices: list[int]) -> tuple[int, ...]:
+    if config.selected_indices:
+        return config.selected_indices
+    return selected_case_indices_for_backend(config.env_backend, selected_indices)
+
+
+def _scheduled_case_order(
+    selected_indices: tuple[int, ...],
+    backend_position: int,
+    backend_count: int,
+) -> tuple[int, ...]:
+    if not selected_indices:
+        return ()
+    case_stride = (len(selected_indices) + backend_count - 1) // backend_count
+    return tuple(
+        selected_indices[(case_round + backend_position * case_stride) % len(selected_indices)]
+        for case_round in range(len(selected_indices))
+    )
 
 
 def _schedule_backend_configs(backend_configs: list[BackendRunConfig]) -> list[BackendRunConfig]:
@@ -299,16 +356,22 @@ def _print_plan_header(
     jobs: int,
     timeout_scale: float,
     test_jobs: list[TestJob],
-    selected_indices: list[int],
     numactl_policy: str,
 ) -> None:
     names = ", ".join(config.name for config in backend_configs)
+    case_counts = _format_plan_case_counts(backend_configs)
     print(
         f"\n>>> Running regression plan [{names}] "
         f"(worker threads={jobs}, timeout scale={timeout_scale}, "
-        f"cases={len(selected_indices)}, total_reps={len(test_jobs)}, "
+        f"cases={case_counts}, total_reps={len(test_jobs)}, "
         f"numactl={numactl_policy})"
     )
+
+
+def _format_plan_case_counts(backend_configs: list[BackendRunConfig]) -> str:
+    if len(backend_configs) == 1:
+        return str(len(backend_configs[0].selected_indices))
+    return ", ".join(f"{config.name}:{len(config.selected_indices)}" for config in backend_configs)
 
 
 def _prepare_log_dir(log_dir: Path) -> None:
@@ -555,7 +618,16 @@ def _build_mode_outputs(
         results = _finalize_backend_results(results_by_backend[config.name])
         checklist_failed = sorted(index for index in config.checklist if not _all_passed(results, index))
         exit_code = 0 if not checklist_failed else 1
-        mode_outputs.append((config.name, exit_code, selected_indices, results, config.checklist, checklist_failed, config.repeat))
+        config_selected_indices = list(config.selected_indices) if config.selected_indices else selected_indices
+        mode_outputs.append((
+            config.name,
+            exit_code,
+            config_selected_indices,
+            results,
+            config.checklist,
+            checklist_failed,
+            config.repeat,
+        ))
         overall_exit = overall_exit or exit_code
     return mode_outputs, overall_exit
 

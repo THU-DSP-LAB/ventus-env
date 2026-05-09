@@ -104,6 +104,41 @@ class WorkerThreadTests(unittest.TestCase):
         )
         self.assertNotIn("sbt", backends)
 
+    def test_backend_specific_cfd_case_only_runs_on_spike_and_sbt(self):
+        cases = load_module("cases")
+        runner = load_module("runner")
+        cfd_index = cases.TEST_CASE_INDEX_BY_NAME["cfd_i1"]
+        selected_indices = list(range(len(cases.TEST_CASES)))
+        configs = [
+            runner.BackendRunConfig("spike", "spike", set(), 1),
+            runner.BackendRunConfig("sbt", "sbt", set(), 1),
+            runner.BackendRunConfig("cyclesim", "cyclesim", set(), 1),
+        ]
+
+        jobs = runner._build_test_jobs(
+            runner._attach_backend_selected_indices(configs, selected_indices),
+            selected_indices,
+            timeout_scale=1,
+        )
+
+        cfd_backends = [
+            job.backend.env_backend
+            for job in jobs
+            if job.testcase_index == cfd_index
+        ]
+        self.assertCountEqual(cfd_backends, ["spike", "sbt"])
+
+    def test_backend_specific_all_checklist_includes_cfd_for_spike_and_sbt_only(self):
+        cases = load_module("cases")
+        options = load_module("options")
+        cfd_index = cases.TEST_CASE_INDEX_BY_NAME["cfd_i1"]
+
+        matrix = dict(options.parse_matrix("spike:all,sbt:all,cycle:all"))
+
+        self.assertIn(cfd_index, matrix["spike"])
+        self.assertIn(cfd_index, matrix["sbt"])
+        self.assertNotIn(cfd_index, matrix["cycle"])
+
     def test_cli_passes_progress_mode_to_runner(self):
         cli = load_module("cli")
         cases = load_module("cases")

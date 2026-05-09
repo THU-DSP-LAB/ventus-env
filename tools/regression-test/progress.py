@@ -239,7 +239,7 @@ def _create_progress_bars(
 
     for position, config in enumerate(backend_configs, start=start_position):
         bars[config.name] = tqdm(
-            total=selected_count * config.repeat,
+            total=_selected_count_for_config(config, selected_count) * config.repeat,
             desc=_format_tqdm_backend_name(config.name),
             unit="rep" if config.repeat > 1 else "test",
             position=position,
@@ -248,6 +248,13 @@ def _create_progress_bars(
             dynamic_ncols=True,
         )
     return bars
+
+
+def _selected_count_for_config(config: Any, default_selected_count: int) -> int:
+    selected_indices = getattr(config, "selected_indices", None)
+    if selected_indices is None:
+        return default_selected_count
+    return len(selected_indices)
 
 
 def _format_tqdm_backend_name(backend_name: str) -> str:

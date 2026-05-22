@@ -9,6 +9,7 @@ from ventus_perf.model import load_events_for_pass, load_input_manifests
 
 TOP_LEVEL_BUCKETS = (
     "host_overhead",
+    "compiler",
     "memcpy_h2d",
     "kernel_launch",
     "kernel_wait",
@@ -17,6 +18,7 @@ TOP_LEVEL_BUCKETS = (
     "uncategorized",
 )
 
+COMPILER_EVENTS = {"compiler"}
 MEMCPY_H2D_EVENTS = {
     "buffer_write",
     "buffer_copy",
@@ -50,10 +52,11 @@ KERNEL_LAUNCH_EVENTS = {
     "cuLaunchKernel",
 }
 KERNEL_WAIT_EVENTS = {"kernel_wait", "vt_ready_wait", "cuCtxSynchronize", "ready_wait_loop"}
-DERIVED_BUCKETS = ("memcpy_h2d", "kernel_launch", "kernel_wait", "memcpy_d2h")
+DERIVED_BUCKETS = ("compiler", "memcpy_h2d", "kernel_launch", "kernel_wait", "memcpy_d2h")
 SUB_BUCKET_NAMES = ("kernel_launch", "kernel_wait")
 PROFILER_PASS_TYPES = {"nsys", "ncu"}
 AUXILIARY_FACT_EVENT_TYPES = {"sim_time_ns", "sim_time", "step_count", "flush_tail_steps"}
+DIRECT_INTERVAL_BUCKETS = ("compiler", "memcpy_h2d", "memcpy_d2h")
 NS_PER_US = 1_000
 NS_PER_MS = 1_000_000
 NS_PER_S = 1_000_000_000
@@ -156,6 +159,8 @@ def _extract_interval(event: dict) -> tuple[int, int]:
 
 
 def _bucket_for_event(event_type: str) -> str | None:
+    if event_type in COMPILER_EVENTS:
+        return "compiler"
     if event_type in MEMCPY_H2D_EVENTS:
         return "memcpy_h2d"
     if event_type in MEMCPY_D2H_EVENTS:
@@ -295,7 +300,7 @@ def _build_pass_summary(pass_manifest: dict, pass_events: list[dict]) -> dict:
     kernel_groups = _group_kernel_windows(pass_events)
     for event in pass_events:
         bucket = _bucket_for_event(str(event["event_type"]))
-        if bucket not in {"memcpy_h2d", "memcpy_d2h"}:
+        if bucket not in DIRECT_INTERVAL_BUCKETS:
             continue
         intervals[bucket].append(_extract_interval(event))
     for group in kernel_groups.values():

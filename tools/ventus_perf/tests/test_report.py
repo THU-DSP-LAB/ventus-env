@@ -82,12 +82,32 @@ class SummaryViewTests(unittest.TestCase):
         self.assertEqual(summary["buckets"]["uncategorized"], 20)
         self.assertEqual(summary["sub_buckets"]["kernel_launch"]["kernel_submit"], 70)
 
+    def test_compiler_bucket_is_accounted_separately_from_uncategorized(self) -> None:
+        summary = ventus_perf_report._build_pass_summary(
+            {
+                "pass_id": "measure-0002",
+                "start_mono_ns": 0,
+                "end_mono_ns": 100,
+            },
+            [
+                {"event_type": "compiler", "ts_start_ns": 0, "ts_end_ns": 20, "launch_seq": 0},
+                {"event_type": "kernel_submit", "ts_start_ns": 20, "ts_end_ns": 40, "launch_seq": 1},
+                {"event_type": "kernel_wait", "ts_start_ns": 40, "ts_end_ns": 90, "launch_seq": 1},
+            ],
+        )
+
+        self.assertEqual(summary["buckets"]["compiler"], 20)
+        self.assertEqual(summary["buckets"]["kernel_launch"], 20)
+        self.assertEqual(summary["buckets"]["kernel_wait"], 50)
+        self.assertEqual(summary["buckets"]["uncategorized"], 10)
+
     def test_summary_text_renders_human_readable_durations(self) -> None:
         report = ventus_perf_report.load_input_report(MINIMAL_FIXTURE)
 
         summary_text = ventus_perf_report.render_summary_text(report)
 
         self.assertIn("wall_time: 100.000 ms", summary_text)
+        self.assertIn("compiler: 0 ns", summary_text)
         self.assertIn("memcpy_h2d: 10.000 ms", summary_text)
         self.assertIn("kernel_launch: 32.000 ms", summary_text)
         self.assertIn("kernel_wait: 33.000 ms", summary_text)

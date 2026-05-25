@@ -140,11 +140,14 @@ BACKEND_CASE_NAMES_BY_BACKEND = _build_backend_case_names(BACKEND_CASE_SETS)
 CASE_BACKENDS = _build_case_backends(BACKEND_CASE_SETS)
 
 # Keep cache preset exclusions named so TEST_CASES insertions do not shift numeric checklists.
+# bfs_4096 + lud_64 纳入 rtl-with-cache checklist (must-pass):
+#   bfs_4096 — bfs4096-008 fillWayMask 对齐修复后 6/10 → 10/10;
+#   lud_64   — 稳定 10/10。
+# CI 的 rtl-with-cache / gvm-with-cache 引用同一 preset, 自动跟随纳入。
+# 剩余排除 (跑但不卡验收): b+tree_128(数据文件 error) / srad_1_1_64(flaky 8/10) / nw_80(known fail)。
 RTL_WITH_CACHE_EXCLUDED_CASE_NAMES = frozenset({
     "b+tree_128",
-    "bfs_4096",
     "srad_1_1_64",
-    "lud_64",
     "nw_80",
 })
 RTL_WITH_CACHE_CASE_NAMES = tuple(

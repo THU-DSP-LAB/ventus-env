@@ -64,7 +64,7 @@ jobs:
     - name: Save CI logs
       if: always()
       run: |
-        set -o pipefail
+        set -euo pipefail
 
         workflow_slug="$(printf '%s' "$GITHUB_WORKFLOW" | tr -cs 'A-Za-z0-9._-' '_' | sed 's/^_//;s/_$//')"
         if [ -z "$workflow_slug" ]; then

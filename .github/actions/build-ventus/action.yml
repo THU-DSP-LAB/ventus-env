@@ -1,5 +1,10 @@
 name: 'Build Ventus'
 description: 'Setup and build Ventus environment'
+inputs:
+  mode:
+    description: "build publishes the install artifact; restore restores it and rebuilds local POCL examples"
+    required: false
+    default: "build"
 runs:
   using: "composite"
   steps:
@@ -7,6 +12,21 @@ runs:
       shell: bash
       run: |
         mkdir -p regression-test-logs/setup-and-build
+
+    - name: Validate mode
+      shell: bash
+      env:
+        ACTION_MODE: ${{ inputs.mode }}
+      run: |
+        case "$ACTION_MODE" in
+          build|restore)
+            ;;
+          *)
+            echo "Invalid build-ventus action mode: $ACTION_MODE"
+            echo "Expected one of: build, restore"
+            exit 1
+            ;;
+        esac
 
     - name: Add tools to PATH
       shell: bash
@@ -47,17 +67,35 @@ runs:
 
     - name: Restore Build Artifacts
       id: restore-build
+      if: inputs.mode == 'build'
       shell: bash
       run: |
         set +e
         (
-          set -e
+          set -e -o pipefail
           artifact_dir="/artifacts/${{ github.sha }}"
           artifact_marker="${artifact_dir}/.ventus-ci-artifact-complete"
+          artifact_archive="${artifact_dir}/install.tar.zst"
 
           if [ -f "$artifact_marker" ]; then
             echo "Found existing artifacts for ${{ github.sha }}"
-            cp -a "${artifact_dir}/install" .
+            if [ ! -f "$artifact_archive" ]; then
+              echo "Artifact marker exists but archive is missing: $artifact_archive"
+              exit 1
+            fi
+            if [ -e install ]; then
+              echo "Refusing to restore over existing install path."
+              exit 1
+            fi
+
+            zstd -dc "$artifact_archive" | tar -xf -
+
+            if [ ! -d install ]; then
+              echo "Restored artifact did not contain install/."
+              exit 1
+            fi
+
+            # POCL examples are build-tree artifacts and are not part of install/.
             env CCACHE_DIR=/ccache bash build-ventus.sh --build pocl
             echo "cache-hit=true" >> "$GITHUB_OUTPUT"
           elif [ -d "$artifact_dir" ]; then
@@ -80,7 +118,7 @@ runs:
         exit "$status"
 
     - name: Build Ventus
-      if: steps.restore-build.outputs.cache-hit != 'true'
+      if: inputs.mode == 'build' && steps.restore-build.outputs.cache-hit != 'true'
       shell: bash
       run: |
         set +e
@@ -95,14 +133,15 @@ runs:
         exit "$status"
 
     - name: Save Build Artifacts
-      if: steps.restore-build.outputs.cache-hit != 'true' && success()
+      if: inputs.mode == 'build' && steps.restore-build.outputs.cache-hit != 'true' && success()
       shell: bash
       run: |
         set +e
         (
-          set -e
+          set -e -o pipefail
           artifact_dir="/artifacts/${{ github.sha }}"
           artifact_marker="${artifact_dir}/.ventus-ci-artifact-complete"
+          artifact_archive="${artifact_dir}/install.tar.zst"
           temp_artifact_dir="$(mktemp -d "/artifacts/.tmp-${{ github.sha }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.XXXXXX")"
           trap 'rm -rf "$temp_artifact_dir"' EXIT
 
@@ -111,12 +150,18 @@ runs:
             exit 1
           fi
 
-          cp -a install "$temp_artifact_dir/"
+          if command -v zstd >/dev/null 2>&1; then
+            tar -cf - install | zstd -T0 -10 --long=27 > "$temp_artifact_dir/install.tar.zst"
+          else
+            echo "zstd is required to publish the install artifact."
+            exit 1
+          fi
           {
             echo "sha=${{ github.sha }}"
             echo "workflow=${GITHUB_WORKFLOW}"
             echo "run_id=${GITHUB_RUN_ID}"
             echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "archive=install.tar.zst"
             echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } > "${temp_artifact_dir}/.ventus-ci-artifact-complete"
 
@@ -130,6 +175,7 @@ runs:
           fi
 
           mv -T "$temp_artifact_dir" "$artifact_dir"
+          du -h "$artifact_archive"
           trap - EXIT
         ) 2>&1 | tee regression-test-logs/setup-and-build/save-build-artifacts.log
         pipe_status=("${PIPESTATUS[@]}")
@@ -141,12 +187,56 @@ runs:
         set -e
         exit "$status"
 
+    - name: Restore Published Install
+      if: inputs.mode == 'restore'
+      shell: bash
+      run: |
+        set +e
+        (
+          set -e -o pipefail
+          artifact_dir="/artifacts/${{ github.sha }}"
+          artifact_marker="${artifact_dir}/.ventus-ci-artifact-complete"
+          artifact_archive="${artifact_dir}/install.tar.zst"
+
+          if [ ! -f "$artifact_marker" ]; then
+            echo "Build artifact marker is missing: $artifact_marker"
+            exit 1
+          fi
+          if [ ! -f "$artifact_archive" ]; then
+            echo "Build artifact archive is missing: $artifact_archive"
+            exit 1
+          fi
+          if [ -e install ]; then
+            echo "Refusing to restore over existing install path."
+            exit 1
+          fi
+
+          zstd -dc "$artifact_archive" | tar -xf -
+
+          if [ ! -d install ]; then
+            echo "Restored artifact did not contain install/."
+            exit 1
+          fi
+
+          # POCL examples are build-tree artifacts and are not part of install/.
+          env CCACHE_DIR=/ccache bash build-ventus.sh --build pocl
+        ) 2>&1 | tee regression-test-logs/setup-and-build/restore-published-install.log
+        pipe_status=("${PIPESTATUS[@]}")
+        status=${pipe_status[0]}
+        tee_status=${pipe_status[1]}
+        if [ "$tee_status" -ne 0 ]; then
+          echo "Warning: failed to write build log regression-test-logs/setup-and-build/restore-published-install.log (tee exit $tee_status)"
+        fi
+        set -e
+        exit "$status"
+
     - name: Cleanup Old Artifacts
       if: always()
       shell: bash
       run: |
         set +e
-        find /artifacts -maxdepth 1 -mindepth 1 -type d -mtime +7 -exec rm -rf {} + 2>&1 | tee regression-test-logs/setup-and-build/cleanup-old-artifacts.log
+        current_artifact_dir="/artifacts/${{ github.sha }}"
+        find /artifacts -maxdepth 1 -mindepth 1 -type d -mtime +7 ! -path "$current_artifact_dir" -exec rm -rf {} + 2>&1 | tee regression-test-logs/setup-and-build/cleanup-old-artifacts.log
         pipe_status=("${PIPESTATUS[@]}")
         status=${pipe_status[0]}
         tee_status=${pipe_status[1]}

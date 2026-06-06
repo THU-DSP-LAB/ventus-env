@@ -169,6 +169,19 @@ class WorkerThreadTests(unittest.TestCase):
 
         self.assertEqual(captured["progress_mode"], "ci")
 
+    def test_allow_checklist_failure_only_changes_completed_run_exit_code(self):
+        cli = load_module("cli")
+
+        self.assertEqual(cli.effective_exit_code(1, allow_checklist_failure=True), 0)
+        self.assertEqual(cli.effective_exit_code(0, allow_checklist_failure=True), 0)
+        self.assertEqual(cli.effective_exit_code(1, allow_checklist_failure=False), 1)
+
+    def test_allow_checklist_failure_parser_default_is_strict(self):
+        cli = load_module("cli")
+        args = cli.build_parser().parse_args([])
+
+        self.assertFalse(args.allow_checklist_failure)
+
     def test_ci_progress_tick_prints_heartbeat_after_five_minutes(self):
         progress = load_module("progress")
         interval = progress.CI_PROGRESS_HEARTBEAT_INTERVAL_SECONDS

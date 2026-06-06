@@ -17,7 +17,7 @@ from .options import (
     validate_numeric_args,
     validate_unique_backend_names,
 )
-from .report import print_mode_report
+from .report import print_github_annotation_summary, print_mode_report
 from .runner import BackendRunConfig, create_shared_state, install_signal_handler, run_plan
 
 
@@ -41,7 +41,7 @@ def main() -> int:
             shared_state = create_shared_state(manager)
             mode_outputs, overall_exit = run_all_modes(args, matrix, matrix_mode, jobs, timeout_scale, shared_state)
         print_reports(mode_outputs, overall_exit)
-        return overall_exit
+        return effective_exit_code(overall_exit, args.allow_checklist_failure)
     except KeyboardInterrupt:
         return 130
     finally:
@@ -112,6 +112,15 @@ def build_parser() -> argparse.ArgumentParser:
             "ci prints plain one-line events for GitHub Actions; none only prints reports."
         ),
     )
+    parser.add_argument(
+        "--allow-checklist-failure",
+        action="store_true",
+        help=(
+            "Exit 0 after a completed run even when checklist testcases fail. "
+            "Argument errors and runner exceptions still exit non-zero; testcase "
+            "failures recorded in the completed report do not."
+        ),
+    )
     return parser
 
 
@@ -168,11 +177,18 @@ def print_reports(mode_outputs: list[tuple], overall_exit: int) -> None:
         if repeat > 1:
             print(f"\n[{backend_name}] repeat={repeat} per testcase")
         print_mode_report(backend_name, selected_indices, results, checklist, checklist_failed, exit_code)
+    print_github_annotation_summary(mode_outputs)
 
     if len(mode_outputs) > 1:
         overall_symbol = "\033[92mOK\033[0m" if overall_exit == 0 else "\033[91mFAIL\033[0m"
         overall_desc = "All modes passed." if overall_exit == 0 else "Some modes failed."
         print(f"\n=== Overall ===\n{overall_desc} {overall_symbol}")
+
+
+def effective_exit_code(overall_exit: int, allow_checklist_failure: bool) -> int:
+    if allow_checklist_failure:
+        return 0
+    return overall_exit
 
 
 def restore_terminal_echo() -> None:

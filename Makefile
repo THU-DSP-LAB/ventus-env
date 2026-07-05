@@ -8,7 +8,7 @@ rodinia_data: rodinia_data.tar.xz
 	tar -xf rodinia_data.tar.xz
 
 submodules: 
-	git submodule update --init --recursive --filter=blob:none --progress
+	git submodule update --init --recursive --filter=blob:none --progress -j 8
 
 init: submodules rodinia_data
 

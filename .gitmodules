@@ -40,3 +40,7 @@
 	path = sbtsim
 	url = https://github.com/THU-DSP-LAB/ventus-gpgpu-sbt-simulator.git
 	branch = develop
+[submodule "mesa"]
+	path = mesa
+	url = https://github.com/shiliuww/mesa3d-ventus.git
+	branch = feature/ray-tracing

@@ -143,13 +143,12 @@ CASE_BACKENDS = _build_case_backends(BACKEND_CASE_SETS)
 # bfs_4096 纳入 rtl-with-cache checklist (must-pass):
 #   bfs_4096 — bfs4096-008 fillWayMask 对齐修复后 6/10 → 10/10。
 # CI 的 rtl-with-cache / gvm-with-cache 引用同一 preset, 自动跟随纳入。
-# 剩余排除 (跑但不卡验收): b+tree_128(数据文件 error) / srad_1_1_64(flaky 8/10) / nw_80(known fail) / lud_64(暂移出 must-pass)。
-RTL_WITH_CACHE_EXCLUDED_CASE_NAMES = frozenset({
-    "b+tree_128",
-    "srad_1_1_64",
-    "nw_80",
-    "lud_64",
-})
+# 2026-07-09: 排除集清空 — b+tree_128 / srad_1_1_64 / nw_80 / lud_64 全部纳入 must-pass。
+#   依据: DCachev2 修复 (srad-004~007 / lud-001,002 / btree-002,003,004) 已合入 develop;
+#   b+tree 的 output.txt race 亦因 runner.py per-rep 隔离 (.rep_ 同级 cwd) 消除;
+#   4 者在最近全量 rtl-with-cache 回归均 10/10 (各 run result: ok)。
+#   保留具名机制 (空集) 以便日后按需再排除, 且不影响数字 checklist。
+RTL_WITH_CACHE_EXCLUDED_CASE_NAMES = frozenset()
 RTL_WITH_CACHE_CASE_NAMES = tuple(
     name for name in ALL_REQUIRED_CASE_NAMES if name not in RTL_WITH_CACHE_EXCLUDED_CASE_NAMES
 )

@@ -67,6 +67,23 @@ VENTUS_BACKEND=ptx      ./run # PTX 后端（SBT ELF->PTX + CUDA Driver API）
 * `NUM_THREAD=32`告知POCL设备端单个线程束（warp）支持多少线程。对于rtlsim和cyclesim应当与硬件规格对齐，对于spike可以任意调整数值
 * `NUM_WARP=8`告知POCL设备端单个线程块最多有多少线程束（warp）。对于rtlsim和cyclesim应当与硬件规格对齐，对于spike可以任意调整数值
 
+### Vulkan 光线追踪基线
+
+当前固定的光追子仓库版本已经能够在 Ventus Spike 上执行一条真实 Vulkan RT
+vertical slice：SaschaWillems `raytracingshadows` 通过 Mesa Ventus ICD 创建 RT
+pipeline，SPIR-V 经 NIR/LLVM 编译为 Ventus RISC-V ELF，driver 上传 triangle BLAS、
+instance TLAS、SBT、descriptor 和输出图像，Spike 执行后把 storage image 回读为
+PPM。
+
+2026-07-19 的验证版本为 Mesa `d413bd2`、LLVM `29da3a1`、driver `c5ce8a7`
+和 Spike `b1ef3ef`。160x96 输出包含 136 种颜色，SHA-256 为
+`f43328945bdeb0dda69b3cc5612212170e5596456450184acfa627db8d5d1212`。
+
+实现边界和环境变量见
+[`mesa/src/ventus/README.md`](mesa/src/ventus/README.md)。这仍是有界功能路径，
+不等于 Vulkan RT conformance 或 RTL 出图证据。当前 checkout 还没有纳入 canonical
+full-app workload 和一键 runner，因此新 clone 暂时不能只按 README 一条命令复现。
+
 ### 测试
 
 #### 测试用例与回归测试

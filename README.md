@@ -81,6 +81,27 @@ The following environment variables adjust simulation behavior:
 * `NUM_THREAD=32` — Number of threads per warp reported by the POCL device. For `rtlsim`/`cyclesim`, this should match hardware specs; for `spike`, any value is acceptable.
 * `NUM_WARP=8` — Max warps per thread block reported by the POCL device. For `rtlsim`/`cyclesim`, match hardware specs; for `spike`, any value is acceptable.
 
+### Vulkan Ray Tracing Baseline
+
+The pinned ray-tracing submodules can execute a real Vulkan RT vertical slice
+on the Ventus Spike backend. The verified path runs the SaschaWillems
+`raytracingshadows` application through the Mesa Ventus ICD, compiles its
+SPIR-V shaders through NIR/LLVM into a Ventus RISC-V ELF, builds and uploads
+triangle BLAS plus instance TLAS data, executes the generated raygen kernel on
+Spike, and reads the storage image back as PPM.
+
+The 2026-07-19 verification used this superproject revision with Mesa
+`d413bd2`, LLVM `29da3a1`, driver `c5ce8a7`, and Spike `b1ef3ef`. The 160x96
+output contained 136 colors and matched the design baseline SHA-256
+`f43328945bdeb0dda69b3cc5612212170e5596456450184acfa627db8d5d1212`.
+
+Implementation details and environment variables are documented in
+[`mesa/src/ventus/README.md`](mesa/src/ventus/README.md). This is currently a
+bounded functional path, not Vulkan RT conformance or RTL-rendering evidence.
+The canonical full-app workload and maintained one-command runner are not yet
+tracked by this checkout, so a new clone cannot reproduce this result from the
+README alone.
+
 ### Performance Attribution for PTX Backend
 
 Use `tools/ventus-perf.py` to run a wrapper-managed PTX performance pass and generate offline reports:

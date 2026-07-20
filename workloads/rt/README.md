@@ -23,8 +23,9 @@ workloads/rt/prepare.sh
 
 `prepare.sh` 会自行初始化固定版本的 GLM，并从公开的
 `SaschaWillems/Vulkan-Assets` 仓库稀疏获取
-`models/vulkanscene_shadow.gltf`，不会递归下载完整资产仓库。它会校验源码提交、
-GLM 提交、资产提交及场景 SHA-256，然后在 `build/rt-workload/source/` 中复制上游
+`models/vulkanscene_shadow.gltf`、`models/reflection_scene.gltf` 和
+`textures/gratefloor_rgba.ktx`，不会递归下载完整资产仓库。它会校验源码提交、
+GLM 提交、资产提交及资产 SHA-256，然后在 `build/rt-workload/source/` 中复制上游
 源码并应用 overlay；官方子模块始终保持干净。
 
 从仓库根目录构建 workload：
@@ -35,3 +36,9 @@ bash build-ventus.sh --build rt-workload
 
 完整 Spike RT 构建和逐字节出图验证命令见仓库根目录的
 [`README_zh_cn.md`](../../README_zh_cn.md)。
+
+纹理与 any-hit 路径可单独验证：
+
+```sh
+tools/rtcore/verify_textured_any_hit_image.sh
+```

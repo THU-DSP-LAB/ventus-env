@@ -114,6 +114,15 @@ bash build-ventus.sh --build "rt-toolchain;spike;driver-spike;mesa;rt-workload"
 tools/rtcore/verify_compat_p1_image.sh
 ```
 
+The extended full-application gate also runs the pinned
+`raytracingtextures` workload. It validates RT push constants carrying buffer
+device addresses, RGBA8 linear-repeat sampling, any-hit transparency, and an
+exact 160x96 Spike image:
+
+```bash
+tools/rtcore/verify_textured_any_hit_image.sh
+```
+
 To generate software-Vulkan reference images from the same pinned source,
 overlay, and assets used by the Spike run:
 

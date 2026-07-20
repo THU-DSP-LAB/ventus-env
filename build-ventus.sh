@@ -299,7 +299,8 @@ build_rt_workload() {
     raytracingshadows \
     raytracingintersection \
     raytracingsbtdata \
-    raytracingreflections
+    raytracingreflections \
+    raytracingtextures
 }
 
 # Build sbtsim (SBT translator) and install via CMake rules to ${VENTUS_INSTALL_PREFIX}

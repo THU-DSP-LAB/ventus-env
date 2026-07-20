@@ -16,8 +16,19 @@ apt-get install \
     mold ccache ninja-build cmake clang clangd clang-format gdb \
     help2man perl perl-doc flex bison libfl2 libfl-dev zlib1g zlib1g-dev libgoogle-perftools-dev numactl \
     libfmt-dev libspdlog-dev libelf-dev libyaml-cpp-dev nlohmann-json3-dev \
-    device-tree-compiler bsdmainutils ruby default-jdk python3-tqdm
+    device-tree-compiler bsdmainutils ruby default-jdk python3-tqdm \
+    libvulkan-dev glslang-tools python3-venv python3-pip
 ```
+
+The Mesa submodule requires Meson 1.4 or newer. Ubuntu 24.04 ships an older
+version; a repository-local environment can be prepared with:
+
+```bash
+python3 -m venv build/meson-venv
+build/meson-venv/bin/pip install 'meson>=1.4,<2'
+```
+
+`build-ventus.sh` detects this environment automatically.
 
 A Dockerfile that bundles all dependencies is provided below.
 
@@ -90,17 +101,33 @@ SPIR-V shaders through NIR/LLVM into a Ventus RISC-V ELF, builds and uploads
 triangle BLAS plus instance TLAS data, executes the generated raygen kernel on
 Spike, and reads the storage image back as PPM.
 
-The 2026-07-19 verification used this superproject revision with Mesa
-`d413bd2`, LLVM `29da3a1`, driver `c5ce8a7`, and Spike `b1ef3ef`. The 160x96
-output contained 136 colors and matched the design baseline SHA-256
+The repository-local compatibility gate produces a 160x96 image containing
+136 colors and requires an exact match with the frozen baseline SHA-256
 `f43328945bdeb0dda69b3cc5612212170e5596456450184acfa627db8d5d1212`.
 
+From a clean checkout, initialize the top-level source submodules, build the
+Spike RT path, and run the fail-closed image gate with:
+
+```bash
+git submodule update --init
+bash build-ventus.sh --build "rt-toolchain;spike;driver-spike;mesa;rt-workload"
+tools/rtcore/verify_compat_p1_image.sh
+```
+
+The implementation changes, build-target responsibilities, known build
+pitfalls, and review entry points are collected in the Chinese
+[`docs/rtcore-spike-p1.md`](docs/rtcore-spike-p1.md).
+
+The workload preparation step initializes its pinned GLM dependency and
+sparse-fetches only the required scene from the public Vulkan-Assets
+repository. It does not read any external Ventus checkout. Generated sources,
+ELFs, logs, and images remain below `build/` and `artifacts/`.
+
 Implementation details and environment variables are documented in
-[`mesa/src/ventus/README.md`](mesa/src/ventus/README.md). This is currently a
-bounded functional path, not Vulkan RT conformance or RTL-rendering evidence.
-The canonical full-app workload and maintained one-command runner are not yet
-tracked by this checkout, so a new clone cannot reproduce this result from the
-README alone.
+[`mesa/src/ventus/README.md`](mesa/src/ventus/README.md), and workload
+provenance is documented in
+[`workloads/rt/README.md`](workloads/rt/README.md). This is a bounded functional
+path, not Vulkan RT conformance or RTL-rendering evidence.
 
 ### Performance Attribution for PTX Backend
 

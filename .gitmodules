@@ -44,3 +44,7 @@
 	path = mesa
 	url = https://github.com/shiliuww/mesa3d-ventus.git
 	branch = feature/ray-tracing
+[submodule "workloads/rt/SaschaWillems_Vulkan"]
+	path = workloads/rt/SaschaWillems_Vulkan
+	url = https://github.com/SaschaWillems/Vulkan.git
+	shallow = true

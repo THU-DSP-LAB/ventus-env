@@ -4,7 +4,8 @@
 .vscode/
 build/
 install/
+install-rt/
+artifacts/
 regression-test-logs/
 rodinia_data.tar.xz
 __pycache__
-

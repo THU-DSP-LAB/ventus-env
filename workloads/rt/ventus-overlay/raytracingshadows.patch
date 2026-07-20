@@ -1,0 +1,112 @@
+diff --git a/examples/raytracingshadows/raytracingshadows.cpp b/examples/raytracingshadows/raytracingshadows.cpp
+index 4ce7c58..4310793 100644
+--- a/examples/raytracingshadows/raytracingshadows.cpp
++++ b/examples/raytracingshadows/raytracingshadows.cpp
+@@ -13,0 +14,3 @@
++#include <cstdlib>
++#include <fstream>
++
+@@ -40,0 +44 @@ public:
++	bool storageScreenshotSaved{ false };
+@@ -45,0 +50 @@ public:
++		settings.overlay = false;
+@@ -79 +84,5 @@ public:
+-		scene.loadFromFile(getAssetPath() + "models/vulkanscene_shadow.gltf", vulkanDevice, queue, glTFLoadingFlags);
++		const char* overrideAsset = std::getenv("RT_SHADOW_ASSET");
++		const std::string sceneAsset = (overrideAsset && overrideAsset[0])
++			? std::string(overrideAsset)
++			: getAssetPath() + "models/vulkanscene_shadow.gltf";
++		scene.loadFromFile(sceneAsset, vulkanDevice, queue, glTFLoadingFlags);
+@@ -561 +570,3 @@ public:
+-		drawUI(cmdBuffer, frameBuffers[currentImageIndex]);
++		if (settings.overlay) {
++			drawUI(cmdBuffer, frameBuffers[currentImageIndex]);
++		}
+@@ -565,0 +577,85 @@ public:
++	void saveStorageImage(const char* filename)
++	{
++		const VkDeviceSize pixelSize = 4;
++		const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(width) * height * pixelSize;
++
++		vks::Buffer readbackBuffer;
++		VK_CHECK_RESULT(vulkanDevice->createBuffer(
++			VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
++			&readbackBuffer,
++			bufferSize));
++
++		VkCommandBuffer copyCmd = vulkanDevice->createCommandBuffer(VK_COMMAND_BUFFER_LEVEL_PRIMARY, true);
++		const VkImageSubresourceRange subresourceRange{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
++
++		vks::tools::insertImageMemoryBarrier(
++			copyCmd,
++			storageImage.image,
++			VK_ACCESS_SHADER_WRITE_BIT,
++			VK_ACCESS_TRANSFER_READ_BIT,
++			VK_IMAGE_LAYOUT_GENERAL,
++			VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++			VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
++			VK_PIPELINE_STAGE_TRANSFER_BIT,
++			subresourceRange);
++
++		VkBufferImageCopy copyRegion{};
++		copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++		copyRegion.imageSubresource.layerCount = 1;
++		copyRegion.imageExtent = { width, height, 1 };
++		vkCmdCopyImageToBuffer(copyCmd, storageImage.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readbackBuffer.buffer, 1, &copyRegion);
++
++		vks::tools::insertImageMemoryBarrier(
++			copyCmd,
++			storageImage.image,
++			VK_ACCESS_TRANSFER_READ_BIT,
++			VK_ACCESS_SHADER_WRITE_BIT,
++			VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++			VK_IMAGE_LAYOUT_GENERAL,
++			VK_PIPELINE_STAGE_TRANSFER_BIT,
++			VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
++			subresourceRange);
++
++		vulkanDevice->flushCommandBuffer(copyCmd, queue);
++
++		VK_CHECK_RESULT(readbackBuffer.map());
++		auto* pixels = static_cast<const uint8_t*>(readbackBuffer.mapped);
++		const bool bgr = (storageImage.format == VK_FORMAT_B8G8R8A8_SRGB) ||
++			(storageImage.format == VK_FORMAT_B8G8R8A8_UNORM) ||
++			(storageImage.format == VK_FORMAT_B8G8R8A8_SNORM);
++
++		std::ofstream file(filename, std::ios::out | std::ios::binary);
++		file << "P6\n" << width << " " << height << "\n255\n";
++		for (uint32_t i = 0; i < width * height; i++) {
++			const uint8_t* p = pixels + i * pixelSize;
++			if (bgr) {
++				file.put(static_cast<char>(p[2]));
++				file.put(static_cast<char>(p[1]));
++				file.put(static_cast<char>(p[0]));
++			} else {
++				file.put(static_cast<char>(p[0]));
++				file.put(static_cast<char>(p[1]));
++				file.put(static_cast<char>(p[2]));
++			}
++		}
++		file.close();
++
++		readbackBuffer.destroy();
++		std::cout << "Ray tracing storage image saved to " << filename << std::endl;
++	}
++
++	void saveStorageImageIfRequested()
++	{
++		if (storageScreenshotSaved) {
++			return;
++		}
++		const char* filename = std::getenv("RT_SHADOW_SCREENSHOT");
++		if ((filename == nullptr) || (filename[0] == '\0')) {
++			return;
++		}
++		VK_CHECK_RESULT(vkDeviceWaitIdle(device));
++		saveStorageImage(filename);
++		storageScreenshotSaved = true;
++	}
++
+@@ -573,0 +670 @@ public:
++		saveStorageImageIfRequested();

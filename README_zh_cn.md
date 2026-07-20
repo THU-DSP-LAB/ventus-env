@@ -15,8 +15,19 @@ apt-get install \
     mold ccache ninja-build cmake clang clangd clang-format gdb \
     help2man perl perl-doc flex bison libfl2 libfl-dev zlib1g zlib1g-dev libgoogle-perftools-dev numactl \
     libfmt-dev libspdlog-dev libelf-dev libyaml-cpp-dev nlohmann-json3-dev \
-    device-tree-compiler bsdmainutils ruby default-jdk python3-tqdm
+    device-tree-compiler bsdmainutils ruby default-jdk python3-tqdm \
+    libvulkan-dev glslang-tools python3-venv python3-pip
 ```
+
+Mesa 子模块要求 Meson 1.4 或更新版本。Ubuntu 24.04 自带版本偏旧，可以在仓库内
+创建独立环境：
+
+```bash
+python3 -m venv build/meson-venv
+build/meson-venv/bin/pip install 'meson>=1.4,<2'
+```
+
+`build-ventus.sh` 会自动发现这个环境。
 
 我们也提供了包含所有依赖的Dockerfile，见下
 
@@ -75,14 +86,30 @@ pipeline，SPIR-V 经 NIR/LLVM 编译为 Ventus RISC-V ELF，driver 上传 trian
 instance TLAS、SBT、descriptor 和输出图像，Spike 执行后把 storage image 回读为
 PPM。
 
-2026-07-19 的验证版本为 Mesa `d413bd2`、LLVM `29da3a1`、driver `c5ce8a7`
-和 Spike `b1ef3ef`。160x96 输出包含 136 种颜色，SHA-256 为
+仓库内的兼容门禁会生成 160x96、包含 136 种颜色的图像，并要求它与冻结基准
+逐字节一致；基准 SHA-256 为
 `f43328945bdeb0dda69b3cc5612212170e5596456450184acfa627db8d5d1212`。
 
+从干净 checkout 开始，初始化顶层源码子模块、构建 Spike RT 路径并运行封闭式
+出图门禁：
+
+```bash
+git submodule update --init
+bash build-ventus.sh --build "rt-toolchain;spike;driver-spike;mesa;rt-workload"
+tools/rtcore/verify_compat_p1_image.sh
+```
+
+本阶段的实现改动、各构建目标职责、已知构建问题和审阅入口统一记录在
+[`docs/rtcore-spike-p1.md`](docs/rtcore-spike-p1.md)。
+
+workload 准备脚本会初始化固定版本的 GLM，并从公开的 Vulkan-Assets 仓库稀疏
+获取唯一需要的场景；运行过程中不读取其他 Ventus checkout。生成的源码、ELF、
+日志和图像只会写到本仓库的 `build/` 与 `artifacts/`。
+
 实现边界和环境变量见
-[`mesa/src/ventus/README.md`](mesa/src/ventus/README.md)。这仍是有界功能路径，
-不等于 Vulkan RT conformance 或 RTL 出图证据。当前 checkout 还没有纳入 canonical
-full-app workload 和一键 runner，因此新 clone 暂时不能只按 README 一条命令复现。
+[`mesa/src/ventus/README.md`](mesa/src/ventus/README.md)，workload 来源见
+[`workloads/rt/README.md`](workloads/rt/README.md)。这仍是有界功能路径，不等于
+Vulkan RT conformance 或 RTL 出图证据。
 
 ### 测试
 

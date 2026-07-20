@@ -114,6 +114,13 @@ bash build-ventus.sh --build "rt-toolchain;spike;driver-spike;mesa;rt-workload"
 tools/rtcore/verify_compat_p1_image.sh
 ```
 
+To generate software-Vulkan reference images from the same pinned source,
+overlay, and assets used by the Spike run:
+
+```bash
+tools/rtcore/reference_suite.sh
+```
+
 The implementation changes, build-target responsibilities, known build
 pitfalls, and review entry points are collected in the Chinese
 [`docs/rtcore-spike-p1.md`](docs/rtcore-spike-p1.md).

@@ -99,6 +99,13 @@ bash build-ventus.sh --build "rt-toolchain;spike;driver-spike;mesa;rt-workload"
 tools/rtcore/verify_compat_p1_image.sh
 ```
 
+如需从与 Spike 门禁完全相同的固定源码、overlay 和资产生成 software Vulkan
+参考图，可运行：
+
+```bash
+tools/rtcore/reference_suite.sh
+```
+
 本阶段的实现改动、各构建目标职责、已知构建问题和审阅入口统一记录在
 [`docs/rtcore-spike-p1.md`](docs/rtcore-spike-p1.md)。
 

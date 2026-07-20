@@ -19,12 +19,13 @@ set -euo pipefail
 #   APP=/path/to/raytracingshadows tools/rtcore/reference_suite.sh
 #
 # Maintenance:
-#   Keep workload paths rooted at ventus-env/testcases. Do not point this tool
-#   at the deprecated /home/guanys/RTcore/workloads checkout.
+#   Use the same repository-local prepared source and application as the Spike
+#   runner so reference and simulated images cannot silently use different
+#   workload revisions or overlays.
 
 ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-WORKLOAD_DIR="${WORKLOAD_DIR:-${ROOT_DIR}/testcases/RTcoreSpikeCase/SaschaWillems_Vulkan}"
-APP="${APP:-${WORKLOAD_DIR}/build/bin/raytracingshadows}"
+WORKLOAD_DIR="${WORKLOAD_DIR:-${ROOT_DIR}/build/rt-workload/source}"
+APP="${APP:-${ROOT_DIR}/build/rt-workload/build/bin/raytracingshadows}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/artifacts/rtcore-spike/reference_suite/raytracingshadows}"
 SOFTWARE_ICD="${SOFTWARE_ICD:-/usr/share/vulkan/icd.d/lvp_icd.json}"
 WIDTH="${WIDTH:-160}"
@@ -37,8 +38,9 @@ UPSTREAM_ASSET="${UPSTREAM_ASSET:-${WORKLOAD_DIR}/assets/models/vulkanscene_shad
 MINIMAL_ASSET="${MINIMAL_ASSET:-${WORKLOAD_DIR}/assets/models/vulkanscene_shadow_minimal.gltf}"
 
 case "${WORKLOAD_DIR}" in
-  /home/guanys/RTcore/workloads/*|*/RTcore/workloads/*)
-    echo "error: WORKLOAD_DIR points at deprecated RTcore workloads: ${WORKLOAD_DIR}" >&2
+  "${ROOT_DIR}"/build/rt-workload/*) ;;
+  *)
+    echo "error: WORKLOAD_DIR must use the repository-local prepared workload: ${WORKLOAD_DIR}" >&2
     exit 2
     ;;
 esac

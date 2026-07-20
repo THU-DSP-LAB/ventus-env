@@ -297,7 +297,8 @@ build_rt_workload() {
     -DUSE_HEADLESS=ON
   ninja -C ${RT_WORKLOAD_BUILD_DIR} \
     raytracingshadows \
-    raytracingintersection
+    raytracingintersection \
+    raytracingsbtdata
 }
 
 # Build sbtsim (SBT translator) and install via CMake rules to ${VENTUS_INSTALL_PREFIX}

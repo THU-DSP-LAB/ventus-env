@@ -6,6 +6,12 @@
 兼容布局，但在当前 `raytracingshadows` 功能范围内保持了相同的 shader 可见结果，
 并通过 Spike 语义测试和 160x96 精确图片门禁。
 
+V2 现在还包含执行期标签 `0x56540002`。Mesa runtime 将它放在 dispatch args
+offset 148，compiler 在每次 `vt.rt.traverse` 前把它写入 active lane 的 PDS
+offset 92；Spike 在整个 warp 的任何 RT 状态发生变化前校验全部 active lane。
+因此，新版 runtime、compiler 或 Spike 与不匹配组件混用时会 fail closed，而不会
+按错误的 PDS offset 静默执行。
+
 V2 的核心变化不是删除光追语义，而是调整状态所有权：ray、control、candidate、
 committed hit、attribute 和 payload 仍由每 lane 的 PDS ABI 承载；暂停 BVH 遍历所需
 的 cursor、frontier 和 stack 改由 Spike RTCore 功能模型私有保存。
@@ -23,6 +29,7 @@ committed hit、attribute 和 payload 仍由每 lane 的 PDS ABI 承载；暂停
 | committed hit base | 208 | 224 |
 | hit attribute base | 288 | 304 |
 | payload base | 320 | 336 |
+| execution ABI tag | 无 | PDS offset 92，值 `0x56540002` |
 | traversal cursor/stack | PDS 内 640 B continuation 区 | RTCore 模型私有 context |
 | compiler CPS header | 无 | PDS offset 96，16 B |
 
@@ -42,6 +49,8 @@ driver 不分配有效 CPS arena，Spike 也不消费 header。
 - candidate 可以被 any-hit/intersection 路径接受、忽略或终止；接受并终止时结果
   保留为 hit，而不是被无条件覆盖成 terminated。
 - release 和 simulator reset 会回收 RTCore 私有 context。
+- runtime、compiler 和 Spike 通过 exact V2 tag 建立执行期握手；tag 缺失或不匹配
+  会在整 warp preflight 阶段被拒绝，且不增加计数、不创建 context、不写 lane 结果。
 - triangle list、TLAS/BLAS triangle、procedural AABB、closest candidate、hit/miss
   和多 lane mask 有独立语义测试。
 - 完整 Vulkan 应用经 Mesa Ventus ICD、生成 ELF、driver、Spike 和 readback 后，
@@ -66,15 +75,15 @@ tools/rtcore/verify_compat_p1_image.sh
 
 ## 尚未闭合的风险
 
-1. `VT_RT_ABI_VERSION` 仍是构建期常量，dispatch args 和 ELF metadata 没有运行时
-   版本字段，因此混用 V1/V2 component 时不会 fail-closed 拒绝。
-2. CPS arena 只是 carrier 骨架。compiler 尚未计算 frame layout/size，也没有生成
+1. CPS arena 只是 carrier 骨架。compiler 尚未计算 frame layout/size，也没有生成
    frame push/pop；这不能作为 nested-ray continuation 已实现的证据。
-3. Spike 当前只有一个逻辑 SM0 RTCore 实例，不模拟多 SM placement、容量、周期、
+2. Spike 当前只有一个逻辑 SM0 RTCore 实例，不模拟多 SM placement、容量、周期、
    backpressure 或访存争用。
-4. V2 只证明当前 Spike 功能链路；RTL 必须独立实现并验证相同的状态所有权、lane
+3. V2 只证明当前 Spike 功能链路；RTL 必须独立实现并验证相同的状态所有权、lane
    identity、release 和 reset 语义。
+4. ABI tag 尚未写入 ELF metadata；新版执行链会拒绝旧 shader/runtime，但旧 Spike
+   本身不能被追溯强化。
 
-这些问题不要求回退 ABI。后续应先增加明确的 ABI profile/version handoff 和
-fail-closed 检查，再启用非零 CPS frame；不能把当前零值骨架描述成完整 continuation
-实现。
+这些问题不要求回退 ABI。明确的 ABI profile/version handoff 和 fail-closed
+检查已经完成；启用非零 CPS frame 前仍须实现并验证 frame layout/save/restore，
+不能把当前零值骨架描述成完整 continuation 实现。

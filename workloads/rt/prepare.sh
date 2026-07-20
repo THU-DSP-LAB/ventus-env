@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Materialize the pinned upstream raytracingshadows source plus the small
-# Ventus-owned overlay into a generated build tree. The official submodule is
-# never modified. The large upstream asset repository is fetched sparsely so
-# only the one scene used by this workload is checked out.
+# Materialize the pinned upstream RT workloads plus the small Ventus-owned
+# overlay into a generated build tree. The official submodule is never
+# modified. The large upstream asset repository is fetched sparsely so only
+# scenes used by maintained RT workloads are checked out.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 UPSTREAM_DIR="${RT_WORKLOAD_UPSTREAM:-${ROOT_DIR}/workloads/rt/SaschaWillems_Vulkan}"
@@ -17,6 +17,7 @@ UPSTREAM_COMMIT="3b843fbf667a89a1cfcc64405e9fc6f9018e03b4"
 ASSET_COMMIT="a27c0e584434d59b7c7a714e9180eefca6f0ec4b"
 GLM_COMMIT="1ad55c5016339b83b7eec98c31007e0aee57d2bf"
 UPSTREAM_ASSET_SHA256="be6633150d09b951db637fda2254317a94c701c948a57c7819d09403113fde28"
+REFLECTION_ASSET_SHA256="d20d0fb6ba02333b37f77f4fef576c1748eaa138a588654643196fb859325585"
 MINIMAL_ASSET_SHA256="3ef66e73927e98910857ac290295d7735347fcf17f6aa599f228cb65d0902981"
 
 die() {
@@ -62,19 +63,24 @@ if [[ ! -d "${ASSET_CACHE}/.git" ]]; then
 fi
 
 git -C "${ASSET_CACHE}" sparse-checkout init --no-cone
-git -C "${ASSET_CACHE}" sparse-checkout set /models/vulkanscene_shadow.gltf
+git -C "${ASSET_CACHE}" sparse-checkout set \
+  /models/vulkanscene_shadow.gltf \
+  /models/reflection_scene.gltf
 if ! git -C "${ASSET_CACHE}" cat-file -e "${ASSET_COMMIT}^{commit}"; then
   git -C "${ASSET_CACHE}" fetch --depth 1 origin "${ASSET_COMMIT}"
 fi
 git -C "${ASSET_CACHE}" checkout --detach "${ASSET_COMMIT}"
 
 UPSTREAM_ASSET="${ASSET_CACHE}/models/vulkanscene_shadow.gltf"
+REFLECTION_ASSET="${ASSET_CACHE}/models/reflection_scene.gltf"
 MINIMAL_ASSET="${OVERLAY_DIR}/vulkanscene_shadow_minimal.gltf"
 PATCH_FILE="${OVERLAY_DIR}/raytracingshadows.patch"
 require_file "${UPSTREAM_ASSET}"
+require_file "${REFLECTION_ASSET}"
 require_file "${MINIMAL_ASSET}"
 require_file "${PATCH_FILE}"
 check_sha256 "${UPSTREAM_ASSET}" "${UPSTREAM_ASSET_SHA256}"
+check_sha256 "${REFLECTION_ASSET}" "${REFLECTION_ASSET_SHA256}"
 check_sha256 "${MINIMAL_ASSET}" "${MINIMAL_ASSET_SHA256}"
 git -C "${UPSTREAM_DIR}" apply --check --unidiff-zero "${PATCH_FILE}"
 
@@ -95,6 +101,8 @@ patch --directory="${TEMP_SOURCE}" --strip=1 --forward --batch <"${PATCH_FILE}"
 mkdir -p "${TEMP_SOURCE}/assets/models"
 cp -a --reflink=auto "${UPSTREAM_ASSET}" \
   "${TEMP_SOURCE}/assets/models/vulkanscene_shadow.gltf"
+cp -a --reflink=auto "${REFLECTION_ASSET}" \
+  "${TEMP_SOURCE}/assets/models/reflection_scene.gltf"
 cp -a --reflink=auto "${MINIMAL_ASSET}" \
   "${TEMP_SOURCE}/assets/models/vulkanscene_shadow_minimal.gltf"
 

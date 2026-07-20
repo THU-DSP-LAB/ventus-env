@@ -295,7 +295,9 @@ build_rt_workload() {
   cmake -G Ninja -B ${RT_WORKLOAD_BUILD_DIR} -S ${RT_WORKLOAD_SOURCE_DIR} \
     -DCMAKE_BUILD_TYPE="${rt_workload_build_type}" \
     -DUSE_HEADLESS=ON
-  ninja -C ${RT_WORKLOAD_BUILD_DIR} raytracingshadows
+  ninja -C ${RT_WORKLOAD_BUILD_DIR} \
+    raytracingshadows \
+    raytracingintersection
 }
 
 # Build sbtsim (SBT translator) and install via CMake rules to ${VENTUS_INSTALL_PREFIX}

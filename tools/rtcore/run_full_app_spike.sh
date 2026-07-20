@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run the repository-local SaschaWillems raytracingshadows workload through
-# the Mesa Ventus ICD and the selected Spike build. All tool and library paths
-# are explicit so Mesa cannot fall back to another checkout.
+# Run a repository-local Vulkan RT workload through the Mesa Ventus ICD and
+# the selected Spike build. All tool and library paths are explicit so Mesa
+# cannot fall back to another checkout.
 
 ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 MESA_BUILD="${MESA_BUILD:-${ROOT_DIR}/mesa/build-ventus}"
@@ -11,9 +11,15 @@ LLVM_BUILD="${LLVM_BUILD:-${ROOT_DIR}/llvm/build}"
 SPIKE_BUILD="${SPIKE_BUILD:-${ROOT_DIR}/spike/build}"
 WORKLOAD_DIR="${WORKLOAD_DIR:-${ROOT_DIR}/build/rt-workload/source}"
 APP="${APP:-${ROOT_DIR}/build/rt-workload/build/bin/raytracingshadows}"
-OUT_DIR="${OUT_DIR:-${ROOT_DIR}/artifacts/rtcore-spike/ventus_raytracingshadows_spike}"
+APP_NAME="${APP_NAME:-$(basename "${APP}")}"
+OUT_DIR="${OUT_DIR:-${ROOT_DIR}/artifacts/rtcore-spike/ventus_${APP_NAME}_spike}"
 ICD="${ICD:-${MESA_BUILD}/src/ventus/vulkan/ventus_devenv_icd.x86_64.json}"
 VENTUS_INSTALL_PREFIX="${VENTUS_INSTALL_PREFIX:-${ROOT_DIR}/install}"
+REQUIRED_ASSET="${REQUIRED_ASSET:-}"
+
+if [[ -z "${REQUIRED_ASSET}" && "${APP_NAME}" == "raytracingshadows" ]]; then
+  REQUIRED_ASSET="${WORKLOAD_DIR}/assets/models/vulkanscene_shadow.gltf"
+fi
 
 first_file() {
   local candidate
@@ -84,7 +90,9 @@ require_executable "${LLC}"
 require_executable "${LD_LLD}"
 require_executable "${LLVM_NM}"
 require_file "${CRT0}"
-require_file "${WORKLOAD_DIR}/assets/models/vulkanscene_shadow.gltf"
+if [[ -n "${REQUIRED_ASSET}" ]]; then
+  require_file "${REQUIRED_ASSET}"
+fi
 
 mkdir -p "${OUT_DIR}"
 MANIFEST="${OUT_DIR}/manifest.txt"
@@ -96,9 +104,9 @@ run_case() {
   local height="$3"
   local case_dir="${OUT_DIR}/${label}"
   local elf_dir="${case_dir}/elf"
-  local ppm="${case_dir}/raytracingshadows_spike.ppm"
-  local png="${case_dir}/raytracingshadows_spike.png"
-  local log="${case_dir}/raytracingshadows.log"
+  local ppm="${case_dir}/${APP_NAME}_spike.ppm"
+  local png="${case_dir}/${APP_NAME}_spike.png"
+  local log="${case_dir}/${APP_NAME}.log"
   local -a app_command=(
     "${APP}"
     --benchmark
@@ -176,6 +184,7 @@ PY
   echo "driver_library=$(readlink -f "${DRIVER_LIB}")"
   echo "workload=${WORKLOAD_DIR}"
   echo "app=${APP}"
+  echo "app_name=${APP_NAME}"
   echo "app_sha256=$(sha256sum "${APP}" | awk '{print $1}')"
   echo "icd=${ICD}"
   echo

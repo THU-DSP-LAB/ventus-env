@@ -1,5 +1,9 @@
 # Ventus Spike RTcore P1 实现与复现说明
 
+状态：`implementation evidence`
+
+更新日期：2026-07-21
+
 ## 文档范围
 
 本文记录 `ventus-env` 当前 Spike RTcore 功能模型的实现落点、仓库内依赖、构建
@@ -8,6 +12,21 @@
 
 本文是 Ventus 实现说明，不替代 RTcore 仓库中的公共语义架构文档，也不把 Spike
 功能模型描述成 RTL 时序模型。
+
+Spike 模型架构、scratch V2 compatibility 映射和后续迁移分别由
+`/home/liuql/projects/RTcore/docs/architecture/ventus/spike-rtcore-model.md`、
+`/home/liuql/projects/RTcore/docs/architecture/ventus/abi/scratch-v2-compatibility.md` 与
+`/home/liuql/projects/RTcore/docs/architecture/ventus/software-toolchain-migration.md` 拥有。
+
+本文审计的可追溯组合为：
+
+| Repository | Revision |
+| --- | --- |
+| `ventus-env` | `17c73e78602e9b1f3edde46af100c9f3fc1cafa9` |
+| Mesa | `b9cf2049700ac8ddfa142072290c52d245e86118` |
+| LLVM | `29da3a118b91c50a7e8477193e571b97503d781d` |
+| Driver | `c5ce8a7d7c82913b70749b08760405fd9d9381f5` |
+| Spike | `acfb0a1f018c8affd6f4d2aef904c3023139e318` |
 
 ## 本阶段改动
 
@@ -19,8 +38,9 @@
 - `vt.rt.traverse` 和 `vt.rt.release` 以 warp 指令发射，携带 SIMT active mask 和
   每个 active lane 的 handoff slot；RTcore 在模型内部逐 lane 执行并逐 lane 返回
   traversal status。
-- 暂停的 candidate traversal 使用 RTcore 私有 context 保存，key 同时包含执行
-  context identity 与 handoff slot，`release`、kernel reset 会回收对应状态。
+- 暂停的 candidate traversal 使用 RTcore 私有 context 保存；当前 production key 只是
+  由 PDS CSR、logical slot 和 lane 计算出的 physical PDS address，不包含显式
+  warp/invocation/owner/generation identity。`release`、kernel reset 会回收对应状态。
 - Spike 模型不设置硬件 backpressure、resident warp/lane 上限或访存带宽限制；
   这些属于 RTL 性能模型，不属于无周期的功能模型。
 - 语义测试覆盖 triangle、TLAS/BLAS、procedural AABB、closest candidate、
@@ -90,7 +110,7 @@ bash build-ventus.sh \
 
 ## 运行完整门禁
 
-构建完成后执行：
+构建完成后，基础 shadow 路线执行：
 
 ```bash
 ./tools/rtcore/verify_compat_p1_image.sh
@@ -123,6 +143,23 @@ artifacts/rtcore-spike/compat_p1_exact_image/160x96/
 ./tools/rtcore/run_full_app_spike.sh
 ```
 
+当前仓库还维护四条后续能力门禁：
+
+```bash
+./tools/rtcore/verify_procedural_aabb_image.sh
+./tools/rtcore/verify_sbt_record_data_image.sh
+./tools/rtcore/verify_iterative_reflections_image.sh
+./tools/rtcore/verify_textured_any_hit_image.sh
+```
+
+| 路线 | Frozen SHA-256 |
+| --- | --- |
+| primary + derived shadow | `f43328945bdeb0dda69b3cc5612212170e5596456450184acfa627db8d5d1212` |
+| procedural AABB/intersection | `bdb06f654a712e58968c20823c54c44fb51d9ed37e4259720e0c1272dd448a17` |
+| SBT record data | `7d585343b55a01b8fb48ad2ca776de8b43b5766ab6fa51fff9783d52cd139e26` |
+| iterative reflections | `65480e26a328cd5bb1205d33fc6114837f7cae71cea0754eec9c4b31e5334703` |
+| textured any-hit | `b38c155a8a65f0fdca801f382b5e2b57c63c9de4bac473a747989c8f3d9adaa1` |
+
 ## 聚焦测试
 
 Spike 静态与 RTcore 语义测试：
@@ -150,7 +187,16 @@ deprecation warning 和 Spike 的 circular shared-library dependency warning 当
 
 ## 当前能力边界
 
-- 该结果证明当前 Spike 功能模型保持完整阴影场景和衍生 shadow ray 的出图能力。
+- 当前 exact-image matrix 证明 triangle/TLAS/BLAS、衍生 shadow、procedural
+  AABB/intersection、SBT record data、raygen 顺序 reflection loop 及受限 textured
+  any-hit 路线保持可复现。
+- Iterative reflections 是 raygen 显式循环中的顺序 trace；当前 shadow 也仍由
+  monolithic/PDS compatibility 路径承载。二者都不证明通用 nested continuation、
+  fresh child identity 或 named return。
+- Scratch V2 只私有化 traversal cursor/frontier/stack；control、candidate 和 committed
+  state 仍是 shader-visible compatibility ABI。
+- 当前 private context 只按 physical PDS address索引，没有 target owner/generation、
+  active-mask shrink 或 validated release。
 - 它不证明 RTL 调度、周期、backpressure、resident 容量或访存带宽。
 - 它不是 Vulkan RT conformance 结论，也不表示 callable、indirect、AS
   serialization 等未实现能力已经可用。
@@ -163,6 +209,7 @@ deprecation warning 和 Spike 的 circular shared-library dependency warning 当
 | --- | --- |
 | `build-ventus.sh` | RT 构建目标、独立 libclc 目录和最小 Spike driver 配置 |
 | `spike/riscv/ventus_rtcore_model.h` | warp 发射边界、lane 执行和 RTcore 私有状态 |
+| `spike/riscv/ventus_rt.h` | traversal/AS decode 与 physical-slot-keyed private context |
 | `spike/riscv/ventus_custom.cc` | `traverse/release` 与 SIMT active mask 接入 |
 | `mesa/src/ventus/compiler/vt_rt_abi.h` | Ventus ABI v2 的实现侧 bit layout |
 | `mesa/src/ventus/vulkan/vtvk_driver_bridge.cpp` | CPS carrier 骨架、PDS 初始化和资源上传 |

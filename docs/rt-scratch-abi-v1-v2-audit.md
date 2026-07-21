@@ -1,5 +1,12 @@
 # Ventus RT scratch ABI V1/V2 审计
 
+状态：`implementation evidence`；不是 Ventus V0.2 target freeze
+
+更新日期：2026-07-21
+
+公共逻辑 ABI、Ventus target mapping 与 scratch V2 compatibility 的规范化关系由
+`/home/liuql/projects/RTcore/docs/architecture/ventus/abi/` 拥有。本文只审计当前源码。
+
 ## 结论
 
 当前可复现出图链路使用 ABI V2，不建议回退到 V1。V2 与 V1 不是 bit-level
@@ -54,8 +61,8 @@ driver 不分配有效 CPS arena，Spike 也不消费 header。
 - triangle list、TLAS/BLAS triangle、procedural AABB、closest candidate、hit/miss
   和多 lane mask 有独立语义测试。
 - 完整 Vulkan 应用经 Mesa Ventus ICD、生成 ELF、driver、Spike 和 readback 后，
-  160x96 PPM 的 SHA-256 为
-  `f43328945bdeb0dda69b3cc5612212170e5596456450184acfa627db8d5d1212`。
+  已有五条 160x96 exact-image gate：triangle + derived shadow、procedural
+  AABB/intersection、SBT record data、raygen 顺序 reflections 与 textured any-hit。
 
 验证入口：
 
@@ -71,6 +78,10 @@ mesa/build-ventus/src/ventus/tests/vt_rt_minimal_loop_test \
   mesa/build-ventus/src/ventus/tests/vt_rt_minimal_raygen.spv
 
 tools/rtcore/verify_compat_p1_image.sh
+tools/rtcore/verify_procedural_aabb_image.sh
+tools/rtcore/verify_sbt_record_data_image.sh
+tools/rtcore/verify_iterative_reflections_image.sh
+tools/rtcore/verify_textured_any_hit_image.sh
 ```
 
 ## 尚未闭合的风险
@@ -83,6 +94,14 @@ tools/rtcore/verify_compat_p1_image.sh
    identity、release 和 reset 语义。
 4. ABI tag 尚未写入 ELF metadata；新版执行链会拒绝旧 shader/runtime，但旧 Spike
    本身不能被追溯强化。
+5. 当前 private context 只按 physical PDS address索引，没有统一
+   SM/warp/lane/invocation/owner/generation/transaction identity。
+6. Resume 仍读取 compatibility control words，没有 target active-mask subset 与
+   mask-shrink；release 也没有 terminal lifecycle validation。
+7. Control、candidate 与 committed state 仍是 shader-visible compatibility ABI，
+   尚未完成公共 handoff 与 software-invisible private authority 的目标分界。
+8. Derived shadow 与 iterative reflections 是必须保留的功能证据，但没有实现 fresh
+   child state、named return 或通用 continuation。
 
 这些问题不要求回退 ABI。明确的 ABI profile/version handoff 和 fail-closed
 检查已经完成；启用非零 CPS frame 前仍须实现并验证 frame layout/save/restore，

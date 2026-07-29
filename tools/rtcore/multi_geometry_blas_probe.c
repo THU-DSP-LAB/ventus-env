@@ -466,6 +466,23 @@ main(void)
    require_result(as_functions.create(device, &clone_create_info, NULL,
                                       &clone_acceleration_structure),
                   "vkCreateAccelerationStructureKHR(clone)");
+   const VkAccelerationStructureDeviceAddressInfoKHR address_info = {
+      .sType =
+         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+      .accelerationStructure = acceleration_structure,
+   };
+   const VkDeviceAddress prebuild_as_address =
+      as_functions.get_address(device, &address_info);
+   VkAccelerationStructureDeviceAddressInfoKHR clone_address_info =
+      address_info;
+   clone_address_info.accelerationStructure = clone_acceleration_structure;
+   const VkDeviceAddress prebuild_clone_address =
+      as_functions.get_address(device, &clone_address_info);
+   if (!prebuild_as_address || !prebuild_clone_address ||
+       prebuild_as_address == prebuild_clone_address)
+      fail("created acceleration structures lack independent addresses");
+   if ((prebuild_as_address & 255) || (prebuild_clone_address & 255))
+      fail("created acceleration structure address is not 256-byte aligned");
 
    const VkCommandPoolCreateInfo pool_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -537,22 +554,13 @@ main(void)
                   "vkQueueSubmit");
    require_result(vkQueueWaitIdle(queue), "vkQueueWaitIdle");
 
-   const VkAccelerationStructureDeviceAddressInfoKHR address_info = {
-      .sType =
-         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-      .accelerationStructure = acceleration_structure,
-   };
    const VkDeviceAddress as_address =
       as_functions.get_address(device, &address_info);
-   if (!as_address)
-      fail("built acceleration structure has no address");
-   VkAccelerationStructureDeviceAddressInfoKHR clone_address_info =
-      address_info;
-   clone_address_info.accelerationStructure = clone_acceleration_structure;
    const VkDeviceAddress clone_address =
       as_functions.get_address(device, &clone_address_info);
-   if (!clone_address || clone_address == as_address)
-      fail("cloned acceleration structure has no independent address");
+   if (as_address != prebuild_as_address ||
+       clone_address != prebuild_clone_address)
+      fail("build or clone changed an acceleration structure address");
    if (memcmp((const void *)(uintptr_t)as_address,
               (const void *)(uintptr_t)clone_address,
               multi_sizes.accelerationStructureSize) != 0)
@@ -614,7 +622,7 @@ main(void)
       .mask = 0x5a,
       .instanceShaderBindingTableRecordOffset = 9,
       .flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR,
-      .accelerationStructureReference = clone_address,
+      .accelerationStructureReference = prebuild_clone_address,
    };
    struct probe_buffer instance_buffer = { 0 };
    struct probe_buffer instance_pointer_buffer = { 0 };
@@ -678,6 +686,15 @@ main(void)
    VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
    require_result(as_functions.create(device, &tlas_create_info, NULL, &tlas),
                   "vkCreateAccelerationStructureKHR(TLAS)");
+   const VkAccelerationStructureDeviceAddressInfoKHR tlas_address_info = {
+      .sType =
+         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+      .accelerationStructure = tlas,
+   };
+   const VkDeviceAddress prebuild_tlas_address =
+      as_functions.get_address(device, &tlas_address_info);
+   if (!prebuild_tlas_address || (prebuild_tlas_address & 255))
+      fail("created TLAS address is not 256-byte aligned");
 
    VkCommandBuffer tlas_command_buffer = VK_NULL_HANDLE;
    require_result(vkAllocateCommandBuffers(device, &command_buffer_info,
@@ -709,15 +726,10 @@ main(void)
                   "vkQueueSubmit(TLAS)");
    require_result(vkQueueWaitIdle(queue), "vkQueueWaitIdle(TLAS)");
 
-   const VkAccelerationStructureDeviceAddressInfoKHR tlas_address_info = {
-      .sType =
-         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-      .accelerationStructure = tlas,
-   };
    const VkDeviceAddress tlas_address =
       as_functions.get_address(device, &tlas_address_info);
-   if (!tlas_address)
-      fail("pointer-array TLAS has no address");
+   if (tlas_address != prebuild_tlas_address)
+      fail("TLAS build changed its acceleration structure address");
    const uint8_t *tlas_data = (const uint8_t *)(uintptr_t)tlas_address;
    if (load_u32(tlas_data, VENTUS_AS_HEADER_TYPE) != VENTUS_AS_TYPE_TLAS ||
        load_u32(tlas_data, VENTUS_AS_HEADER_INSTANCE_COUNT) != 1)
@@ -742,7 +754,8 @@ main(void)
 
    printf("PASS multi-geometry-blas geometries=3 primitives=3 nodes=4 "
           "index_modes=UINT32,UINT16,NONE clone=1 "
-          "tlas_pointer_offset=16 transform_offset=%zu\n",
+          "tlas_pointer_offset=16 stable_address=1 alignment=256 "
+          "transform_offset=%zu\n",
           sizeof(VkTransformMatrixKHR));
 
    vkDeviceWaitIdle(device);

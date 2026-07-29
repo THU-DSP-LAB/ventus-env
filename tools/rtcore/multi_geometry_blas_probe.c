@@ -22,6 +22,7 @@ struct as_functions {
    PFN_vkGetAccelerationStructureBuildSizesKHR get_sizes;
    PFN_vkCmdBuildAccelerationStructuresKHR cmd_build;
    PFN_vkCmdCopyAccelerationStructureKHR cmd_copy;
+   PFN_vkCmdWriteAccelerationStructuresPropertiesKHR cmd_write_properties;
    PFN_vkGetAccelerationStructureDeviceAddressKHR get_address;
 };
 
@@ -202,6 +203,8 @@ load_as_functions(VkDevice device, struct as_functions *functions)
    LOAD_FUNCTION(get_sizes, vkGetAccelerationStructureBuildSizesKHR);
    LOAD_FUNCTION(cmd_build, vkCmdBuildAccelerationStructuresKHR);
    LOAD_FUNCTION(cmd_copy, vkCmdCopyAccelerationStructureKHR);
+   LOAD_FUNCTION(cmd_write_properties,
+                 vkCmdWriteAccelerationStructuresPropertiesKHR);
    LOAD_FUNCTION(get_address, vkGetAccelerationStructureDeviceAddressKHR);
 #undef LOAD_FUNCTION
 }
@@ -456,7 +459,8 @@ main(void)
          VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
       .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
       .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
-               VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
+               VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR |
+               VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR,
       .geometryCount = 3,
       .pGeometries = geometries,
    };
@@ -482,19 +486,24 @@ main(void)
    struct probe_buffer as_buffer = { 0 };
    struct probe_buffer clone_buffer = { 0 };
    struct probe_buffer scratch_buffer = { 0 };
-   create_buffer(physical_device, device, multi_sizes.accelerationStructureSize,
+   struct probe_buffer query_result_buffer = { 0 };
+   const VkDeviceSize source_as_size =
+      multi_sizes.accelerationStructureSize + 256;
+   create_buffer(physical_device, device, source_as_size,
                  VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
                  &as_buffer);
-   create_buffer(physical_device, device, multi_sizes.accelerationStructureSize,
+   create_buffer(physical_device, device, source_as_size,
                  VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
                  &clone_buffer);
    create_buffer(physical_device, device, multi_sizes.buildScratchSize,
                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &scratch_buffer);
+   create_buffer(physical_device, device, sizeof(uint64_t) * 2,
+                 VK_BUFFER_USAGE_TRANSFER_DST_BIT, &query_result_buffer);
 
    const VkAccelerationStructureCreateInfoKHR create_info = {
       .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
       .buffer = as_buffer.buffer,
-      .size = multi_sizes.accelerationStructureSize,
+      .size = source_as_size,
       .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
    };
    VkAccelerationStructureKHR acceleration_structure = VK_NULL_HANDLE;
@@ -532,6 +541,15 @@ main(void)
    VkCommandPool command_pool = VK_NULL_HANDLE;
    require_result(vkCreateCommandPool(device, &pool_info, NULL, &command_pool),
                   "vkCreateCommandPool");
+   const VkQueryPoolCreateInfo query_pool_info = {
+      .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+      .queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,
+      .queryCount = 1,
+   };
+   VkQueryPool compact_query_pool = VK_NULL_HANDLE;
+   require_result(vkCreateQueryPool(device, &query_pool_info, NULL,
+                                    &compact_query_pool),
+                  "vkCreateQueryPool(AS compacted size)");
    VkCommandBuffer command_buffer =
       begin_one_time_command_buffer(device, command_pool);
 
@@ -568,6 +586,17 @@ main(void)
       .mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_CLONE_KHR,
    };
    as_functions.cmd_copy(command_buffer, &copy_info);
+   vkCmdResetQueryPool(command_buffer, compact_query_pool, 0, 1);
+   as_functions.cmd_write_properties(
+      command_buffer, 1, &clone_acceleration_structure,
+      VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,
+      compact_query_pool, 0);
+   vkCmdCopyQueryPoolResults(
+      command_buffer, compact_query_pool, 0, 1, query_result_buffer.buffer, 0,
+      sizeof(uint64_t) * 2,
+      VK_QUERY_RESULT_64_BIT |
+      VK_QUERY_RESULT_WITH_AVAILABILITY_BIT |
+      VK_QUERY_RESULT_WAIT_BIT);
    submit_and_wait(device, queue, command_buffer);
 
    const VkDeviceAddress as_address =
@@ -579,7 +608,7 @@ main(void)
       fail("build or clone changed an acceleration structure address");
    if (memcmp((const void *)(uintptr_t)as_address,
               (const void *)(uintptr_t)clone_address,
-              multi_sizes.accelerationStructureSize) != 0)
+              source_as_size) != 0)
       fail("cloned acceleration structure byte image differs from source");
 
    const uint8_t *as_data = (const uint8_t *)(uintptr_t)clone_address;
@@ -628,6 +657,92 @@ main(void)
    require_f32(load_f32(as_data, VENTUS_AS_HEADER_ROOT_AABB_MAX_X), 2.5f,
                "root_aabb.max.x");
 
+   uint64_t compact_query_result[2] = { 0 };
+   require_result(
+      vkGetQueryPoolResults(
+         device, compact_query_pool, 0, 1, sizeof(compact_query_result),
+         compact_query_result, sizeof(compact_query_result),
+         VK_QUERY_RESULT_64_BIT |
+         VK_QUERY_RESULT_WITH_AVAILABILITY_BIT |
+         VK_QUERY_RESULT_WAIT_BIT),
+      "vkGetQueryPoolResults(AS compacted size)");
+   const VkDeviceSize expected_compacted_size =
+      VENTUS_AS_HEADER_SIZE +
+      load_u32(as_data, VENTUS_AS_HEADER_NODE_REGION_SIZE);
+   if (compact_query_result[1] != 1 ||
+       compact_query_result[0] != expected_compacted_size ||
+       compact_query_result[0] >= source_as_size)
+      fail("compacted-size query does not match the VTAS used region");
+
+   uint32_t compact_query_result32[2] = { 0 };
+   require_result(
+      vkGetQueryPoolResults(
+         device, compact_query_pool, 0, 1, sizeof(compact_query_result32),
+         compact_query_result32, sizeof(compact_query_result32),
+         VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
+      "vkGetQueryPoolResults(32-bit AS compacted size)");
+   if (compact_query_result32[0] != compact_query_result[0] ||
+       compact_query_result32[1] != 1)
+      fail("32-bit compacted-size result differs from 64-bit result");
+
+   void *query_result_mapping = NULL;
+   require_result(
+      vkMapMemory(device, query_result_buffer.memory, 0,
+                  query_result_buffer.size, 0, &query_result_mapping),
+      "vkMapMemory(query result)");
+   uint64_t copied_query_result[2];
+   memcpy(copied_query_result, query_result_mapping,
+          sizeof(copied_query_result));
+   vkUnmapMemory(device, query_result_buffer.memory);
+   if (memcmp(copied_query_result, compact_query_result,
+              sizeof(compact_query_result)) != 0)
+      fail("buffer-copied compacted-size result differs from host result");
+
+   struct probe_buffer compact_buffer = { 0 };
+   create_buffer(
+      physical_device, device, compact_query_result[0],
+      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+      &compact_buffer);
+   const VkAccelerationStructureCreateInfoKHR compact_create_info = {
+      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+      .buffer = compact_buffer.buffer,
+      .size = compact_query_result[0],
+      .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+   };
+   VkAccelerationStructureKHR compact_acceleration_structure =
+      VK_NULL_HANDLE;
+   require_result(
+      as_functions.create(device, &compact_create_info, NULL,
+                          &compact_acceleration_structure),
+      "vkCreateAccelerationStructureKHR(compact)");
+   VkAccelerationStructureDeviceAddressInfoKHR compact_address_info =
+      address_info;
+   compact_address_info.accelerationStructure =
+      compact_acceleration_structure;
+   const VkDeviceAddress prebuild_compact_address =
+      as_functions.get_address(device, &compact_address_info);
+   if (!prebuild_compact_address || (prebuild_compact_address & 255) ||
+       prebuild_compact_address == clone_address)
+      fail("compact AS lacks an independent aligned address");
+
+   VkCommandBuffer compact_command_buffer =
+      begin_one_time_command_buffer(device, command_pool);
+   const VkCopyAccelerationStructureInfoKHR compact_copy_info = {
+      .sType = VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR,
+      .src = clone_acceleration_structure,
+      .dst = compact_acceleration_structure,
+      .mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR,
+   };
+   as_functions.cmd_copy(compact_command_buffer, &compact_copy_info);
+   submit_and_wait(device, queue, compact_command_buffer);
+   const VkDeviceAddress compact_address =
+      as_functions.get_address(device, &compact_address_info);
+   if (compact_address != prebuild_compact_address ||
+       memcmp((const void *)(uintptr_t)compact_address,
+              (const void *)(uintptr_t)clone_address,
+              compact_query_result[0]) != 0)
+      fail("compact copy changed its address or VTAS used bytes");
+
    const VkAccelerationStructureInstanceKHR tlas_instance = {
       .transform = { .matrix = {
          { 1.0f, 0.0f, 0.0f, 4.0f },
@@ -638,7 +753,7 @@ main(void)
       .mask = 0x5a,
       .instanceShaderBindingTableRecordOffset = 9,
       .flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR,
-      .accelerationStructureReference = prebuild_clone_address,
+      .accelerationStructureReference = prebuild_compact_address,
    };
    struct probe_buffer instance_buffer = { 0 };
    struct probe_buffer instance_pointer_buffer = { 0 };
@@ -746,8 +861,8 @@ main(void)
       instance_ref & VENTUS_NODE_REF_OFFSET_MASK;
    const uint8_t *instance_leaf = tlas_data + instance_offset;
    if (load_u64(instance_leaf, VENTUS_INSTANCE_BLAS_ADDR_LO) !=
-       clone_address)
-      fail("TLAS does not reference the cloned BLAS");
+       compact_address)
+      fail("TLAS does not reference the compacted BLAS");
    if (load_u32(instance_leaf, VENTUS_INSTANCE_CUSTOM_INDEX) != 7 ||
        load_u32(instance_leaf, VENTUS_INSTANCE_MASK) != 0x5a ||
        load_u32(instance_leaf, VENTUS_INSTANCE_SBT_RECORD_OFFSET) != 9 ||
@@ -854,10 +969,13 @@ main(void)
    printf("PASS multi-geometry-blas geometries=3 primitives=3 nodes=4 "
           "index_modes=UINT32,UINT16,NONE clone=1 "
           "tlas_pointer_offset=16 stable_address=1 alignment=256 "
-          "update=1 empty_blas=1 empty_tlas=1 transform_offset=%zu\n",
+          "update=1 compaction=1 query_widths=32,64 "
+          "query_transport=host,buffer "
+          "empty_blas=1 empty_tlas=1 transform_offset=%zu\n",
           sizeof(VkTransformMatrixKHR));
 
    vkDeviceWaitIdle(device);
+   vkDestroyQueryPool(device, compact_query_pool, NULL);
    vkDestroyCommandPool(device, command_pool, NULL);
    as_functions.destroy(device, empty_as, NULL);
    destroy_buffer(device, &empty_scratch_buffer);
@@ -867,8 +985,11 @@ main(void)
    destroy_buffer(device, &tlas_buffer);
    destroy_buffer(device, &instance_pointer_buffer);
    destroy_buffer(device, &instance_buffer);
+   as_functions.destroy(device, compact_acceleration_structure, NULL);
+   destroy_buffer(device, &compact_buffer);
    as_functions.destroy(device, clone_acceleration_structure, NULL);
    as_functions.destroy(device, acceleration_structure, NULL);
+   destroy_buffer(device, &query_result_buffer);
    destroy_buffer(device, &scratch_buffer);
    destroy_buffer(device, &clone_buffer);
    destroy_buffer(device, &as_buffer);

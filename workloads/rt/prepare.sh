@@ -80,6 +80,7 @@ MINIMAL_ASSET="${OVERLAY_DIR}/vulkanscene_shadow_minimal.gltf"
 PATCH_FILES=(
   "${OVERLAY_DIR}/raytracingshadows.patch"
   "${OVERLAY_DIR}/raytracingbasic-multiset.patch"
+  "${OVERLAY_DIR}/raytracingbasic-indirect.patch"
 )
 require_file "${UPSTREAM_ASSET}"
 require_file "${REFLECTION_ASSET}"

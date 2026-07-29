@@ -58,6 +58,8 @@ rg -q 'descriptor set=1 binding=0 type=3' "${LOG}" ||
   die "set 1 output image descriptor did not reach the driver table"
 rg -q 'descriptor set=1 binding=1 type=6' "${LOG}" ||
   die "set 1 camera descriptor did not reach the driver table"
+rg -q 'vkCmdTraceRaysIndirectKHR resolved 160x96x1' "${LOG}" ||
+  die "dispatch dimensions did not come through the indirect RT command"
 
-printf 'PASS multiset-rt-image dimensions=160x96 sha256=%s slots=0,32,33\n' \
+printf 'PASS multiset-indirect-rt-image dimensions=160x96 sha256=%s slots=0,32,33\n' \
   "${actual_sha}"

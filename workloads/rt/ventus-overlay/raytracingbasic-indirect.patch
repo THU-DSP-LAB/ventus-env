@@ -1,0 +1,51 @@
+diff --git a/examples/raytracingbasic/raytracingbasic.cpp b/examples/raytracingbasic/raytracingbasic.cpp
+index f61e90a..98e5532 100644
+--- a/examples/raytracingbasic/raytracingbasic.cpp
++++ b/examples/raytracingbasic/raytracingbasic.cpp
+@@ -37,2 +37,3 @@ class VulkanExample : public VulkanExampleBase
+ 	PFN_vkCmdTraceRaysKHR vkCmdTraceRaysKHR{ nullptr };
++	PFN_vkCmdTraceRaysIndirectKHR vkCmdTraceRaysIndirectKHR{ nullptr };
+ 	PFN_vkGetRayTracingShaderGroupHandlesKHR vkGetRayTracingShaderGroupHandlesKHR{ nullptr };
+@@ -58,0 +60 @@ class VulkanExample : public VulkanExampleBase
++	vks::Buffer traceRaysIndirectBuffer;
+@@ -125,0 +128 @@ class VulkanExample : public VulkanExampleBase
++		traceRaysIndirectBuffer.destroy();
+@@ -706,0 +709,11 @@ class VulkanExample : public VulkanExampleBase
++
++	void createIndirectTraceBuffer()
++	{
++		VkTraceRaysIndirectCommandKHR command{ width, height, 1 };
++		VkBufferUsageFlags usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
++			VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
++		VK_CHECK_RESULT(vulkanDevice->createBuffer(
++			usage, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
++			VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &traceRaysIndirectBuffer,
++			sizeof(command), &command));
++	}
+@@ -714,0 +728,2 @@ class VulkanExample : public VulkanExampleBase
++		traceRaysIndirectBuffer.destroy();
++		createIndirectTraceBuffer();
+@@ -738,2 +754,3 @@ class VulkanExample : public VulkanExampleBase
+ 		enabledRayTracingPipelineFeatures.rayTracingPipeline = VK_TRUE;
++		enabledRayTracingPipelineFeatures.rayTracingPipelineTraceRaysIndirect = VK_TRUE;
+ 		enabledRayTracingPipelineFeatures.pNext = &enabledBufferDeviceAddresFeatures;
+@@ -777,2 +794,3 @@ class VulkanExample : public VulkanExampleBase
+ 		vkCmdTraceRaysKHR = reinterpret_cast<PFN_vkCmdTraceRaysKHR>(vkGetDeviceProcAddr(device, "vkCmdTraceRaysKHR"));
++		vkCmdTraceRaysIndirectKHR = reinterpret_cast<PFN_vkCmdTraceRaysIndirectKHR>(vkGetDeviceProcAddr(device, "vkCmdTraceRaysIndirectKHR"));
+ 		vkGetRayTracingShaderGroupHandlesKHR = reinterpret_cast<PFN_vkGetRayTracingShaderGroupHandlesKHR>(vkGetDeviceProcAddr(device, "vkGetRayTracingShaderGroupHandlesKHR"));
+@@ -786,2 +804,3 @@ class VulkanExample : public VulkanExampleBase
+ 		createUniformBuffer();
++		createIndirectTraceBuffer();
+ 		createRayTracingPipeline();
+@@ -837,9 +856,7 @@ class VulkanExample : public VulkanExampleBase
+-		vkCmdTraceRaysKHR(
++		vkCmdTraceRaysIndirectKHR(
+ 			cmdBuffer,
+ 			&raygenShaderSbtEntry,
+ 			&missShaderSbtEntry,
+ 			&hitShaderSbtEntry,
+ 			&callableShaderSbtEntry,
+-			width,
+-			height,
+-			1);
++			getBufferDeviceAddress(traceRaysIndirectBuffer.buffer));

@@ -15,7 +15,15 @@ ICD="${ICD:-${MESA_BUILD}/src/ventus/vulkan/ventus_devenv_icd.x86_64.json}"
 DRIVER_LIB="${DRIVER_LIB:-${ENV_ROOT}/driver/build/driver/spike_device/libspike_driver.so}"
 OUT_DIR="${OUT_DIR:-${ENV_ROOT}/artifacts/rtcore-spike/textured_any_hit_exact_image}"
 
-EXPECTED_PPM_SHA256="${EXPECTED_PPM_SHA256:-b38c155a8a65f0fdca801f382b5e2b57c63c9de4bac473a747989c8f3d9adaa1}"
+RT_PROFILE=compat
+DEFAULT_PPM_SHA256=b38c155a8a65f0fdca801f382b5e2b57c63c9de4bac473a747989c8f3d9adaa1
+if [[ "${VENTUS_VK_RT_WAVEFRONT_GLOBAL:-0}" == "1" ]]; then
+  # The global continuation path invokes miss after ignoreIntersectionEXT;
+  # compat preserves the historical black payload for the same rejected rays.
+  RT_PROFILE=global
+  DEFAULT_PPM_SHA256=0a11a83f1beca8bd433dd2f2652938596744a42841fd0ce304ac1c5c64fadae1
+fi
+EXPECTED_PPM_SHA256="${EXPECTED_PPM_SHA256:-${DEFAULT_PPM_SHA256}}"
 EXPECTED_UPSTREAM_COMMIT="3b843fbf667a89a1cfcc64405e9fc6f9018e03b4"
 EXPECTED_ASSET_SHA256="f27af40f84e22a1f9a423204af5cff1f822fe4c1cbf6a66247f191c842e9078b"
 
@@ -92,12 +100,12 @@ if rg -q 'load access fault|bad syscall|failed|unsupported texture operation' "$
   die "runtime/compiler log reports a rejected or faulting texture path"
 fi
 
-python3 - "${PPM}" "${EXPECTED_PPM_SHA256}" <<'PY'
+python3 - "${PPM}" "${EXPECTED_PPM_SHA256}" "${RT_PROFILE}" <<'PY'
 from collections import Counter
 import hashlib
 import sys
 
-ppm_path, expected_sha = sys.argv[1:]
+ppm_path, expected_sha, profile = sys.argv[1:]
 data = open(ppm_path, "rb").read()
 header, pixels = data.split(b"\n", 3)[:3], data.split(b"\n", 3)[3]
 magic, dimensions, max_value = header
@@ -117,10 +125,16 @@ gray = sum(
 )
 actual_sha = hashlib.sha256(data).hexdigest()
 
-if len(colors) < 2500 or background < 8500 or black < 900 or gray < 3000:
+coverage_incomplete = len(colors) < 2500 or gray < 3000
+if profile == "global":
+    coverage_incomplete |= background < 10000 or black != 0
+else:
+    coverage_incomplete |= background < 8500 or black < 900
+if coverage_incomplete:
     raise SystemExit(
         "textured transparency coverage is incomplete: "
-        f"colors={len(colors)} background={background} black={black} gray={gray}"
+        f"profile={profile} colors={len(colors)} background={background} "
+        f"black={black} gray={gray}"
     )
 if actual_sha != expected_sha:
     raise SystemExit(
@@ -129,14 +143,14 @@ if actual_sha != expected_sha:
 
 print(
     "PASS textured-any-hit-image "
-    f"dimensions={width}x{height} colors={len(colors)} "
+    f"profile={profile} dimensions={width}x{height} colors={len(colors)} "
     f"background={background} black={black} gray={gray} sha256={actual_sha}"
 )
 PY
 
 VALIDATION_MANIFEST="${OUT_DIR}/textured-any-hit-validation.txt"
 {
-  echo "profile=textured-any-hit-exact-image"
+  echo "profile=textured-any-hit-${RT_PROFILE}-exact-image"
   echo "spike_library=$(readlink -f "${SPIKE_BUILD}/libspike_main.so")"
   echo "driver_library=${DRIVER_LIB}"
   echo "app=${APP}"
@@ -147,7 +161,7 @@ VALIDATION_MANIFEST="${OUT_DIR}/textured-any-hit-validation.txt"
   echo "output_ppm=${PPM}"
   echo "expected_sha256=${EXPECTED_PPM_SHA256}"
   echo "actual_sha256=$(sha256sum "${PPM}" | awk '{print $1}')"
-  echo "comparison=byte-identical-plus-texture-and-any-hit-semantic-thresholds"
+  echo "comparison=byte-identical-plus-${RT_PROFILE}-texture-and-any-hit-semantic-thresholds"
 } >"${VALIDATION_MANIFEST}"
 
 echo "manifest=${VALIDATION_MANIFEST}"

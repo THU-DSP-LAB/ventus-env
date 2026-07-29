@@ -16,7 +16,13 @@ ICD="${ICD:-${MESA_BUILD}/src/ventus/vulkan/ventus_devenv_icd.x86_64.json}"
 DRIVER_LIB="${DRIVER_LIB:-${ENV_ROOT}/driver/build/driver/spike_device/libspike_driver.so}"
 OUT_DIR="${OUT_DIR:-${ENV_ROOT}/artifacts/rtcore-spike/iterative_reflections_exact_image}"
 
-EXPECTED_PPM_SHA256="${EXPECTED_PPM_SHA256:-65480e26a328cd5bb1205d33fc6114837f7cae71cea0754eec9c4b31e5334703}"
+RT_PROFILE=compat
+DEFAULT_PPM_SHA256=65480e26a328cd5bb1205d33fc6114837f7cae71cea0754eec9c4b31e5334703
+if [[ "${VENTUS_VK_RT_WAVEFRONT_GLOBAL:-0}" == "1" ]]; then
+  RT_PROFILE=global
+  DEFAULT_PPM_SHA256=ebe1a1a08e3474d1d3e5a6fe942e841363df828248d09833fad0abb57f9fa452
+fi
+EXPECTED_PPM_SHA256="${EXPECTED_PPM_SHA256:-${DEFAULT_PPM_SHA256}}"
 EXPECTED_UPSTREAM_COMMIT="3b843fbf667a89a1cfcc64405e9fc6f9018e03b4"
 EXPECTED_GLM_COMMIT="1ad55c5016339b83b7eec98c31007e0aee57d2bf"
 EXPECTED_ASSET_SHA256="d20d0fb6ba02333b37f77f4fef576c1748eaa138a588654643196fb859325585"
@@ -99,12 +105,12 @@ if rg -q 'PHINode should have one entry|input module cannot be verified|llc: err
   die "compiler rejected the iterative reflection control flow"
 fi
 
-python3 - "${PPM}" "${EXPECTED_PPM_SHA256}" <<'PY'
+python3 - "${PPM}" "${EXPECTED_PPM_SHA256}" "${RT_PROFILE}" <<'PY'
 from collections import Counter
 import hashlib
 import sys
 
-ppm_path, expected_sha = sys.argv[1:]
+ppm_path, expected_sha, profile = sys.argv[1:]
 data = open(ppm_path, "rb").read()
 pos = 0
 
@@ -167,7 +173,8 @@ if actual_sha != expected_sha:
 
 print(
     "PASS iterative-reflections-image "
-    f"dimensions={width}x{height} colors={len(colors)} black={black} "
+    f"profile={profile} dimensions={width}x{height} "
+    f"colors={len(colors)} black={black} "
     f"red={red} green={green} blue={blue} gold={gold} sky={sky} "
     f"sha256={actual_sha}"
 )
@@ -175,7 +182,7 @@ PY
 
 VALIDATION_MANIFEST="${OUT_DIR}/iterative-reflections-validation.txt"
 {
-  echo "profile=iterative-reflections-exact-image"
+  echo "profile=iterative-reflections-${RT_PROFILE}-exact-image"
   echo "spike_library=$(readlink -f "${SPIKE_BUILD}/libspike_main.so")"
   echo "driver_library=${DRIVER_LIB}"
   echo "app=${APP}"
@@ -187,7 +194,7 @@ VALIDATION_MANIFEST="${OUT_DIR}/iterative-reflections-validation.txt"
   echo "output_ppm=${PPM}"
   echo "expected_sha256=${EXPECTED_PPM_SHA256}"
   echo "actual_sha256=$(sha256sum "${PPM}" | awk '{print $1}')"
-  echo "comparison=byte-identical-plus-structured-payload-and-reflection-semantic-thresholds"
+  echo "comparison=byte-identical-plus-${RT_PROFILE}-structured-payload-and-reflection-semantic-thresholds"
 } >"${VALIDATION_MANIFEST}"
 
 echo "manifest=${VALIDATION_MANIFEST}"

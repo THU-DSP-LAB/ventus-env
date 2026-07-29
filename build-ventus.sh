@@ -292,10 +292,16 @@ build_rt_workload() {
   RT_WORKLOAD_SOURCE_DIR=${RT_WORKLOAD_SOURCE_DIR} \
     ${RT_WORKLOAD_DIR}/prepare.sh
 
+  (
+    cd "${RT_WORKLOAD_SOURCE_DIR}/shaders/glsl"
+    python3 compileshaders.py --sample raytracingbasic
+  )
+
   cmake -G Ninja -B ${RT_WORKLOAD_BUILD_DIR} -S ${RT_WORKLOAD_SOURCE_DIR} \
     -DCMAKE_BUILD_TYPE="${rt_workload_build_type}" \
     -DUSE_HEADLESS=ON
   ninja -C ${RT_WORKLOAD_BUILD_DIR} \
+    raytracingbasic \
     raytracingshadows \
     raytracingintersection \
     raytracingsbtdata \

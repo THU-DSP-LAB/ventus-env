@@ -1,0 +1,133 @@
+diff --git a/examples/raytracingbasic/raytracingbasic.cpp b/examples/raytracingbasic/raytracingbasic.cpp
+index f61e90a..a2b931e 100644
+--- a/examples/raytracingbasic/raytracingbasic.cpp
++++ b/examples/raytracingbasic/raytracingbasic.cpp
+@@ -72,8 +72,8 @@ class VulkanExample : public VulkanExampleBase
+ 
+ 	VkPipeline pipeline{ VK_NULL_HANDLE };
+ 	VkPipelineLayout pipelineLayout{ VK_NULL_HANDLE };
+-	VkDescriptorSetLayout descriptorSetLayout{ VK_NULL_HANDLE };
+-	std::array<VkDescriptorSet, maxConcurrentFrames> descriptorSets{};
++	std::array<VkDescriptorSetLayout, 2> descriptorSetLayouts{};
++	std::array<std::array<VkDescriptorSet, 2>, maxConcurrentFrames> descriptorSets{};
+ 
+ 	VulkanExample() : VulkanExampleBase()
+ 	{
+@@ -107,7 +107,9 @@ class VulkanExample : public VulkanExampleBase
+ 	{
+ 		vkDestroyPipeline(device, pipeline, nullptr);
+ 		vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+-		vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
++		for (auto layout : descriptorSetLayouts) {
++			vkDestroyDescriptorSetLayout(device, layout, nullptr);
++		}
+ 		vkDestroyImageView(device, storageImage.view, nullptr);
+ 		vkDestroyImage(device, storageImage.image, nullptr);
+ 		vkFreeMemory(device, storageImage.memory, nullptr);
+@@ -550,14 +552,14 @@ class VulkanExample : public VulkanExampleBase
+ 			{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, maxConcurrentFrames },
+ 			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, maxConcurrentFrames }
+ 		};
+-		VkDescriptorPoolCreateInfo descriptorPoolCreateInfo = vks::initializers::descriptorPoolCreateInfo(poolSizes, maxConcurrentFrames);
++		VkDescriptorPoolCreateInfo descriptorPoolCreateInfo = vks::initializers::descriptorPoolCreateInfo(poolSizes, maxConcurrentFrames * 2);
+ 		VK_CHECK_RESULT(vkCreateDescriptorPool(device, &descriptorPoolCreateInfo, nullptr, &descriptorPool));
+ 
+ 		// Sets per frame, just like the buffers themselves
+ 		// Acceleration structure and storage image does not need to be duplicated per frame, we use the same for each descriptor to keep things simple
+-		VkDescriptorSetAllocateInfo allocInfo = vks::initializers::descriptorSetAllocateInfo(descriptorPool, &descriptorSetLayout, 1);
++		VkDescriptorSetAllocateInfo allocInfo = vks::initializers::descriptorSetAllocateInfo(descriptorPool, descriptorSetLayouts.data(), static_cast<uint32_t>(descriptorSetLayouts.size()));
+ 		for (auto i = 0; i < maxConcurrentFrames; i++) {
+-			VK_CHECK_RESULT(vkAllocateDescriptorSets(device, &allocInfo, &descriptorSets[i]));
++			VK_CHECK_RESULT(vkAllocateDescriptorSets(device, &allocInfo, descriptorSets[i].data()));
+ 
+ 			// The fragment shader needs access to the ray tracing acceleration structure, so we pass it as a descriptor
+ 
+@@ -570,7 +572,7 @@ class VulkanExample : public VulkanExampleBase
+ 			accelerationStructureWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+ 			// The specialized acceleration structure descriptor has to be chained
+ 			accelerationStructureWrite.pNext = &descriptorAccelerationStructureInfo;
+-			accelerationStructureWrite.dstSet = descriptorSets[i];
++			accelerationStructureWrite.dstSet = descriptorSets[i][0];
+ 			accelerationStructureWrite.dstBinding = 0;
+ 			accelerationStructureWrite.descriptorCount = 1;
+ 			accelerationStructureWrite.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+@@ -579,8 +581,8 @@ class VulkanExample : public VulkanExampleBase
+ 			storageImageDescriptor.imageView = storageImage.view;
+ 			storageImageDescriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+ 
+-			VkWriteDescriptorSet resultImageWrite = vks::initializers::writeDescriptorSet(descriptorSets[i], VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, &storageImageDescriptor);
+-			VkWriteDescriptorSet uniformBufferWrite = vks::initializers::writeDescriptorSet(descriptorSets[i], VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2, &uniformBuffers[i].descriptor);
++			VkWriteDescriptorSet resultImageWrite = vks::initializers::writeDescriptorSet(descriptorSets[i][1], VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 0, &storageImageDescriptor);
++			VkWriteDescriptorSet uniformBufferWrite = vks::initializers::writeDescriptorSet(descriptorSets[i][1], VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, &uniformBuffers[i].descriptor);
+ 
+ 			std::vector<VkWriteDescriptorSet> writeDescriptorSets = {
+ 				accelerationStructureWrite,
+@@ -606 +608 @@ class VulkanExample : public VulkanExampleBase
+-		resultImageLayoutBinding.binding = 1;
++		resultImageLayoutBinding.binding = 0;
+@@ -612 +614 @@ class VulkanExample : public VulkanExampleBase
+-		uniformBufferBinding.binding = 2;
++		uniformBufferBinding.binding = 1;
+@@ -617,16 +619,18 @@ class VulkanExample : public VulkanExampleBase
+-		std::vector<VkDescriptorSetLayoutBinding> bindings({
+-			accelerationStructureLayoutBinding,
+-			resultImageLayoutBinding,
+-			uniformBufferBinding
+-			});
+-
+ 		VkDescriptorSetLayoutCreateInfo descriptorSetlayoutCI{};
+ 		descriptorSetlayoutCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+-		descriptorSetlayoutCI.bindingCount = static_cast<uint32_t>(bindings.size());
+-		descriptorSetlayoutCI.pBindings = bindings.data();
+-		VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &descriptorSetlayoutCI, nullptr, &descriptorSetLayout));
++		descriptorSetlayoutCI.bindingCount = 1;
++		descriptorSetlayoutCI.pBindings = &accelerationStructureLayoutBinding;
++		VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &descriptorSetlayoutCI, nullptr, &descriptorSetLayouts[0]));
++
++		std::array<VkDescriptorSetLayoutBinding, 2> resourceBindings{
++			resultImageLayoutBinding,
++			uniformBufferBinding
++		};
++		descriptorSetlayoutCI.bindingCount = static_cast<uint32_t>(resourceBindings.size());
++		descriptorSetlayoutCI.pBindings = resourceBindings.data();
++		VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &descriptorSetlayoutCI, nullptr, &descriptorSetLayouts[1]));
+ 
+ 		VkPipelineLayoutCreateInfo pipelineLayoutCI{};
+ 		pipelineLayoutCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+-		pipelineLayoutCI.setLayoutCount = 1;
+-		pipelineLayoutCI.pSetLayouts = &descriptorSetLayout;
++		pipelineLayoutCI.setLayoutCount = static_cast<uint32_t>(descriptorSetLayouts.size());
++		pipelineLayoutCI.pSetLayouts = descriptorSetLayouts.data();
+@@ -715,7 +722,7 @@ class VulkanExample : public VulkanExampleBase
+ 		// Update descriptors
+ 		VkDescriptorImageInfo storageImageDescriptor{ VK_NULL_HANDLE, storageImage.view, VK_IMAGE_LAYOUT_GENERAL };
+ 		for (auto i = 0; i < maxConcurrentFrames; i++) {
+-			VkWriteDescriptorSet resultImageWrite = vks::initializers::writeDescriptorSet(descriptorSets[i], VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, &storageImageDescriptor);
++			VkWriteDescriptorSet resultImageWrite = vks::initializers::writeDescriptorSet(descriptorSets[i][1], VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 0, &storageImageDescriptor);
+ 			vkUpdateDescriptorSets(device, 1, &resultImageWrite, 0, VK_NULL_HANDLE);
+ 		}
+ 		resized = false;
+@@ -832,7 +839,7 @@ class VulkanExample : public VulkanExampleBase
+ 			Dispatch the ray tracing commands
+ 		*/
+ 		vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline);
+-		vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipelineLayout, 0, 1, &descriptorSets[currentBuffer], 0, 0);
++		vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipelineLayout, 0, static_cast<uint32_t>(descriptorSets[currentBuffer].size()), descriptorSets[currentBuffer].data(), 0, 0);
+ 
+ 		vkCmdTraceRaysKHR(
+ 			cmdBuffer,
+diff --git a/shaders/glsl/raytracingbasic/raygen.rgen b/shaders/glsl/raytracingbasic/raygen.rgen
+index af17cec..d7f8c12 100644
+--- a/shaders/glsl/raytracingbasic/raygen.rgen
++++ b/shaders/glsl/raytracingbasic/raygen.rgen
+@@ -3,8 +3,8 @@
+ #extension GL_EXT_shader_image_load_formatted : enable
+ 
+ layout(binding = 0, set = 0) uniform accelerationStructureEXT topLevelAS;
+-layout(binding = 1, set = 0) uniform image2D image;
+-layout(binding = 2, set = 0) uniform CameraProperties 
++layout(binding = 0, set = 1) uniform image2D image;
++layout(binding = 1, set = 1) uniform CameraProperties
+ {
+ 	mat4 viewInverse;
+ 	mat4 projInverse;

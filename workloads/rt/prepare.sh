@@ -77,17 +77,24 @@ UPSTREAM_ASSET="${ASSET_CACHE}/models/vulkanscene_shadow.gltf"
 REFLECTION_ASSET="${ASSET_CACHE}/models/reflection_scene.gltf"
 TEXTURE_ASSET="${ASSET_CACHE}/textures/gratefloor_rgba.ktx"
 MINIMAL_ASSET="${OVERLAY_DIR}/vulkanscene_shadow_minimal.gltf"
-PATCH_FILE="${OVERLAY_DIR}/raytracingshadows.patch"
+PATCH_FILES=(
+  "${OVERLAY_DIR}/raytracingshadows.patch"
+  "${OVERLAY_DIR}/raytracingbasic-multiset.patch"
+)
 require_file "${UPSTREAM_ASSET}"
 require_file "${REFLECTION_ASSET}"
 require_file "${TEXTURE_ASSET}"
 require_file "${MINIMAL_ASSET}"
-require_file "${PATCH_FILE}"
+for patch_file in "${PATCH_FILES[@]}"; do
+  require_file "${patch_file}"
+done
 check_sha256 "${UPSTREAM_ASSET}" "${UPSTREAM_ASSET_SHA256}"
 check_sha256 "${REFLECTION_ASSET}" "${REFLECTION_ASSET_SHA256}"
 check_sha256 "${TEXTURE_ASSET}" "${TEXTURE_ASSET_SHA256}"
 check_sha256 "${MINIMAL_ASSET}" "${MINIMAL_ASSET_SHA256}"
-git -C "${UPSTREAM_DIR}" apply --check --unidiff-zero "${PATCH_FILE}"
+for patch_file in "${PATCH_FILES[@]}"; do
+  git -C "${UPSTREAM_DIR}" apply --check --unidiff-zero "${patch_file}"
+done
 
 TEMP_SOURCE="${SOURCE_DIR}.tmp.$$"
 case "${TEMP_SOURCE}" in
@@ -102,7 +109,10 @@ rm -rf -- "${TEMP_SOURCE}/.git" \
   "${TEMP_SOURCE}/assets/.git" \
   "${TEMP_SOURCE}/external/glm/.git"
 
-patch --directory="${TEMP_SOURCE}" --strip=1 --forward --batch <"${PATCH_FILE}"
+for patch_file in "${PATCH_FILES[@]}"; do
+  patch --directory="${TEMP_SOURCE}" --strip=1 --forward --batch \
+    <"${patch_file}"
+done
 mkdir -p "${TEMP_SOURCE}/assets/models"
 mkdir -p "${TEMP_SOURCE}/assets/textures"
 cp -a --reflink=auto "${UPSTREAM_ASSET}" \

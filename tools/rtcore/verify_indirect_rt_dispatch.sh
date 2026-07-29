@@ -42,7 +42,7 @@ probe_output="$(
 )"
 printf '%s\n' "${probe_output}"
 
-rg -q '^PASS indirect-rt-dispatch-negative feature=1 rejected=3$' \
+rg -q '^PASS indirect-rt-dispatch-negative indirect1=1 indirect2=1 maintenance1=0 rejected=6$' \
   <<<"${probe_output}" ||
   die "indirect dispatch probe did not report PASS"
 [[ "$(rg -c 'indirect RT dispatch address is not 4-byte aligned' \
@@ -51,3 +51,9 @@ rg -q '^PASS indirect-rt-dispatch-negative feature=1 rejected=3$' \
 [[ "$(rg -c 'indirect RT dispatch address is not a complete INDIRECT_BUFFER range' \
        <<<"${probe_output}")" == 2 ]] ||
   die "usage and range errors were not both rejected"
+[[ "$(rg -c 'indirect2 RT dispatch address is not 4-byte aligned' \
+       <<<"${probe_output}")" == 1 ]] ||
+  die "unaligned indirect2 address was not rejected exactly once"
+[[ "$(rg -c 'indirect2 RT dispatch address is not a complete INDIRECT_BUFFER range' \
+       <<<"${probe_output}")" == 2 ]] ||
+  die "indirect2 usage and range errors were not both rejected"

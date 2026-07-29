@@ -12,6 +12,7 @@ OVERLAY_DIR="${RT_WORKLOAD_OVERLAY:-${ROOT_DIR}/workloads/rt/ventus-overlay}"
 BUILD_ROOT="${RT_WORKLOAD_BUILD_ROOT:-${ROOT_DIR}/build/rt-workload}"
 SOURCE_DIR="${RT_WORKLOAD_SOURCE_DIR:-${BUILD_ROOT}/source}"
 ASSET_CACHE="${RT_WORKLOAD_ASSET_CACHE:-${BUILD_ROOT}/cache/Vulkan-Assets}"
+GLSLANG_VALIDATOR="${GLSLANG_VALIDATOR:-glslangValidator}"
 
 UPSTREAM_COMMIT="3b843fbf667a89a1cfcc64405e9fc6f9018e03b4"
 ASSET_COMMIT="a27c0e584434d59b7c7a714e9180eefca6f0ec4b"
@@ -39,7 +40,7 @@ check_sha256() {
     die "artifact drift for ${path}: expected ${expected}, got ${actual}"
 }
 
-for tool in awk cp git patch sha256sum; do
+for tool in awk cp git patch sha256sum "${GLSLANG_VALIDATOR}"; do
   command -v "${tool}" >/dev/null 2>&1 || die "required tool not found: ${tool}"
 done
 
@@ -114,6 +115,10 @@ for patch_file in "${PATCH_FILES[@]}"; do
   patch --directory="${TEMP_SOURCE}" --strip=1 --forward --batch \
     <"${patch_file}"
 done
+"${GLSLANG_VALIDATOR}" -V \
+  "${TEMP_SOURCE}/shaders/glsl/raytracingbasic/raygen.rgen" \
+  -o "${TEMP_SOURCE}/shaders/glsl/raytracingbasic/raygen.rgen.spv" \
+  --target-env vulkan1.2
 mkdir -p "${TEMP_SOURCE}/assets/models"
 mkdir -p "${TEMP_SOURCE}/assets/textures"
 cp -a --reflink=auto "${UPSTREAM_ASSET}" \

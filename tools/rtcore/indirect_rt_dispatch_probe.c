@@ -151,14 +151,22 @@ int main(void) {
           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
       .pNext = &queried_as,
   };
+  VkPhysicalDeviceRayTracingMaintenance1FeaturesKHR queried_maintenance = {
+      .sType =
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_MAINTENANCE_1_FEATURES_KHR,
+      .pNext = &queried_rt,
+  };
   VkPhysicalDeviceFeatures2 queried_features = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-      .pNext = &queried_rt,
+      .pNext = &queried_maintenance,
   };
   vkGetPhysicalDeviceFeatures2(physical_device, &queried_features);
   if (queried_rt.rayTracingPipeline != VK_TRUE ||
       queried_rt.rayTracingPipelineTraceRaysIndirect != VK_TRUE)
     fail("indirect ray tracing dispatch feature is not advertised");
+  if (queried_maintenance.rayTracingMaintenance1 != VK_FALSE ||
+      queried_maintenance.rayTracingPipelineTraceRaysIndirect2 != VK_TRUE)
+    fail("indirect2 feature profile is not narrowly advertised");
   if (queried_as.accelerationStructure != VK_TRUE ||
       queried_bda.bufferDeviceAddress != VK_TRUE)
     fail("required AS or buffer-device-address feature is not advertised");
@@ -174,6 +182,7 @@ int main(void) {
   const char *extensions[] = {
       VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
       VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+      VK_KHR_RAY_TRACING_MAINTENANCE_1_EXTENSION_NAME,
       VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
       VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
       VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
@@ -197,9 +206,15 @@ int main(void) {
       .rayTracingPipeline = VK_TRUE,
       .rayTracingPipelineTraceRaysIndirect = VK_TRUE,
   };
+  VkPhysicalDeviceRayTracingMaintenance1FeaturesKHR enabled_maintenance = {
+      .sType =
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_MAINTENANCE_1_FEATURES_KHR,
+      .pNext = &enabled_rt,
+      .rayTracingPipelineTraceRaysIndirect2 = VK_TRUE,
+  };
   const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-      .pNext = &enabled_rt,
+      .pNext = &enabled_maintenance,
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queue_info,
       .enabledExtensionCount =
@@ -216,6 +231,11 @@ int main(void) {
           device, "vkCmdTraceRaysIndirectKHR");
   if (!trace_indirect)
     fail("vkCmdTraceRaysIndirectKHR device entrypoint is unavailable");
+  PFN_vkCmdTraceRaysIndirect2KHR trace_indirect2 =
+      (PFN_vkCmdTraceRaysIndirect2KHR)vkGetDeviceProcAddr(
+          device, "vkCmdTraceRaysIndirect2KHR");
+  if (!trace_indirect2)
+    fail("vkCmdTraceRaysIndirect2KHR device entrypoint is unavailable");
 
   const VkCommandPoolCreateInfo pool_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -241,7 +261,7 @@ int main(void) {
                  "vkBeginCommandBuffer");
 
   const struct address_buffer wrong_usage =
-      create_address_buffer(device, sizeof(VkTraceRaysIndirectCommandKHR),
+      create_address_buffer(device, sizeof(VkTraceRaysIndirectCommand2KHR),
                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   const struct address_buffer short_range =
       create_address_buffer(device, 8, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
@@ -253,6 +273,9 @@ int main(void) {
                  &empty_region, wrong_usage.address);
   trace_indirect(command_buffer, &empty_region, &empty_region, &empty_region,
                  &empty_region, short_range.address);
+  trace_indirect2(command_buffer, wrong_usage.address + 2);
+  trace_indirect2(command_buffer, wrong_usage.address);
+  trace_indirect2(command_buffer, short_range.address);
 
   require_result(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
   destroy_address_buffer(device, short_range);
@@ -261,6 +284,7 @@ int main(void) {
   vkDestroyDevice(device, NULL);
   vkDestroyInstance(instance, NULL);
 
-  puts("PASS indirect-rt-dispatch-negative feature=1 rejected=3");
+  puts("PASS indirect-rt-dispatch-negative indirect1=1 indirect2=1 "
+       "maintenance1=0 rejected=6");
   return EXIT_SUCCESS;
 }

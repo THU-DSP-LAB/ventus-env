@@ -1,51 +1,72 @@
 diff --git a/examples/raytracingbasic/raytracingbasic.cpp b/examples/raytracingbasic/raytracingbasic.cpp
-index f61e90a..98e5532 100644
+index f61e90a..deae432 100644
 --- a/examples/raytracingbasic/raytracingbasic.cpp
 +++ b/examples/raytracingbasic/raytracingbasic.cpp
 @@ -37,2 +37,3 @@ class VulkanExample : public VulkanExampleBase
  	PFN_vkCmdTraceRaysKHR vkCmdTraceRaysKHR{ nullptr };
-+	PFN_vkCmdTraceRaysIndirectKHR vkCmdTraceRaysIndirectKHR{ nullptr };
++	PFN_vkCmdTraceRaysIndirect2KHR vkCmdTraceRaysIndirect2KHR{ nullptr };
  	PFN_vkGetRayTracingShaderGroupHandlesKHR vkGetRayTracingShaderGroupHandlesKHR{ nullptr };
-@@ -58,0 +60 @@ class VulkanExample : public VulkanExampleBase
+@@ -45,0 +47 @@ class VulkanExample : public VulkanExampleBase
++	VkPhysicalDeviceRayTracingMaintenance1FeaturesKHR enabledRayTracingMaintenance1Features{};
+@@ -58,0 +61 @@ class VulkanExample : public VulkanExampleBase
 +	vks::Buffer traceRaysIndirectBuffer;
-@@ -125,0 +128 @@ class VulkanExample : public VulkanExampleBase
+@@ -92,0 +96 @@ class VulkanExample : public VulkanExampleBase
++		enabledDeviceExtensions.push_back(VK_KHR_RAY_TRACING_MAINTENANCE_1_EXTENSION_NAME);
+@@ -125,0 +130 @@ class VulkanExample : public VulkanExampleBase
 +		traceRaysIndirectBuffer.destroy();
-@@ -706,0 +709,11 @@ class VulkanExample : public VulkanExampleBase
+@@ -706,0 +712,11 @@ class VulkanExample : public VulkanExampleBase
 +
 +	void createIndirectTraceBuffer()
 +	{
-+		VkTraceRaysIndirectCommandKHR command{ width, height, 1 };
 +		VkBufferUsageFlags usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
 +			VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 +		VK_CHECK_RESULT(vulkanDevice->createBuffer(
 +			usage, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
 +			VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &traceRaysIndirectBuffer,
-+			sizeof(command), &command));
++			sizeof(VkTraceRaysIndirectCommand2KHR)));
++		VK_CHECK_RESULT(traceRaysIndirectBuffer.map());
 +	}
-@@ -714,0 +728,2 @@ class VulkanExample : public VulkanExampleBase
-+		traceRaysIndirectBuffer.destroy();
-+		createIndirectTraceBuffer();
-@@ -738,2 +754,3 @@ class VulkanExample : public VulkanExampleBase
+@@ -738,2 +755,6 @@ class VulkanExample : public VulkanExampleBase
  		enabledRayTracingPipelineFeatures.rayTracingPipeline = VK_TRUE;
+-		enabledRayTracingPipelineFeatures.pNext = &enabledBufferDeviceAddresFeatures;
 +		enabledRayTracingPipelineFeatures.rayTracingPipelineTraceRaysIndirect = VK_TRUE;
- 		enabledRayTracingPipelineFeatures.pNext = &enabledBufferDeviceAddresFeatures;
-@@ -777,2 +794,3 @@ class VulkanExample : public VulkanExampleBase
++		enabledRayTracingMaintenance1Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_MAINTENANCE_1_FEATURES_KHR;
++		enabledRayTracingMaintenance1Features.rayTracingPipelineTraceRaysIndirect2 = VK_TRUE;
++		enabledRayTracingMaintenance1Features.pNext = &enabledBufferDeviceAddresFeatures;
++		enabledRayTracingPipelineFeatures.pNext = &enabledRayTracingMaintenance1Features;
+@@ -777,2 +799,3 @@ class VulkanExample : public VulkanExampleBase
  		vkCmdTraceRaysKHR = reinterpret_cast<PFN_vkCmdTraceRaysKHR>(vkGetDeviceProcAddr(device, "vkCmdTraceRaysKHR"));
-+		vkCmdTraceRaysIndirectKHR = reinterpret_cast<PFN_vkCmdTraceRaysIndirectKHR>(vkGetDeviceProcAddr(device, "vkCmdTraceRaysIndirectKHR"));
++		vkCmdTraceRaysIndirect2KHR = reinterpret_cast<PFN_vkCmdTraceRaysIndirect2KHR>(vkGetDeviceProcAddr(device, "vkCmdTraceRaysIndirect2KHR"));
  		vkGetRayTracingShaderGroupHandlesKHR = reinterpret_cast<PFN_vkGetRayTracingShaderGroupHandlesKHR>(vkGetDeviceProcAddr(device, "vkGetRayTracingShaderGroupHandlesKHR"));
-@@ -786,2 +804,3 @@ class VulkanExample : public VulkanExampleBase
+@@ -786,2 +809,3 @@ class VulkanExample : public VulkanExampleBase
  		createUniformBuffer();
 +		createIndirectTraceBuffer();
  		createRayTracingPipeline();
-@@ -837,9 +856,7 @@ class VulkanExample : public VulkanExampleBase
+@@ -837,9 +861,18 @@ class VulkanExample : public VulkanExampleBase
 -		vkCmdTraceRaysKHR(
-+		vkCmdTraceRaysIndirectKHR(
- 			cmdBuffer,
- 			&raygenShaderSbtEntry,
- 			&missShaderSbtEntry,
- 			&hitShaderSbtEntry,
- 			&callableShaderSbtEntry,
+-			cmdBuffer,
+-			&raygenShaderSbtEntry,
+-			&missShaderSbtEntry,
+-			&hitShaderSbtEntry,
+-			&callableShaderSbtEntry,
 -			width,
 -			height,
 -			1);
-+			getBufferDeviceAddress(traceRaysIndirectBuffer.buffer));
++		VkTraceRaysIndirectCommand2KHR indirectCommand{};
++		indirectCommand.raygenShaderRecordAddress = raygenShaderSbtEntry.deviceAddress;
++		indirectCommand.raygenShaderRecordSize = raygenShaderSbtEntry.size;
++		indirectCommand.missShaderBindingTableAddress = missShaderSbtEntry.deviceAddress;
++		indirectCommand.missShaderBindingTableSize = missShaderSbtEntry.size;
++		indirectCommand.missShaderBindingTableStride = missShaderSbtEntry.stride;
++		indirectCommand.hitShaderBindingTableAddress = hitShaderSbtEntry.deviceAddress;
++		indirectCommand.hitShaderBindingTableSize = hitShaderSbtEntry.size;
++		indirectCommand.hitShaderBindingTableStride = hitShaderSbtEntry.stride;
++		indirectCommand.callableShaderBindingTableAddress = callableShaderSbtEntry.deviceAddress;
++		indirectCommand.callableShaderBindingTableSize = callableShaderSbtEntry.size;
++		indirectCommand.callableShaderBindingTableStride = callableShaderSbtEntry.stride;
++		indirectCommand.width = width;
++		indirectCommand.height = height;
++		indirectCommand.depth = 1;
++		memcpy(traceRaysIndirectBuffer.mapped, &indirectCommand, sizeof(indirectCommand));
++		vkCmdTraceRaysIndirect2KHR(
++			cmdBuffer, getBufferDeviceAddress(traceRaysIndirectBuffer.buffer));

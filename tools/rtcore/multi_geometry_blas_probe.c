@@ -328,16 +328,20 @@ main(void)
    struct as_functions as_functions;
    load_as_functions(device, &as_functions);
 
-   const float vertices[6][3] = {
+   const float vertices[9][3] = {
       { -1.0f, -1.0f, 5.0f },
       { 1.0f, -1.0f, 5.0f },
       { 0.0f, 1.0f, 5.0f },
       { -0.5f, -0.5f, 8.0f },
       { 0.5f, -0.5f, 8.0f },
       { 0.0f, 0.5f, 8.0f },
+      { -0.25f, -0.25f, 11.0f },
+      { 0.25f, -0.25f, 11.0f },
+      { 0.0f, 0.25f, 11.0f },
    };
-   const uint32_t indices[6] = { 0, 1, 2, 3, 4, 5 };
-   const VkTransformMatrixKHR transforms[2] = {
+   const uint32_t indices32[3] = { 0, 1, 2 };
+   const uint16_t indices16[3] = { 0, 1, 2 };
+   const VkTransformMatrixKHR transforms[3] = {
       { .matrix = {
            { 1.0f, 0.0f, 0.0f, 0.0f },
            { 0.0f, 1.0f, 0.0f, 0.0f },
@@ -348,31 +352,42 @@ main(void)
            { 0.0f, 1.0f, 0.0f, 0.0f },
            { 0.0f, 0.0f, 1.0f, 0.0f },
         } },
+      { .matrix = {
+           { 1.0f, 0.0f, 0.0f, -2.0f },
+           { 0.0f, 1.0f, 0.0f, 0.0f },
+           { 0.0f, 0.0f, 1.0f, 0.0f },
+        } },
    };
 
    struct probe_buffer vertex_buffer = { 0 };
-   struct probe_buffer index_buffer = { 0 };
+   struct probe_buffer index32_buffer = { 0 };
+   struct probe_buffer index16_buffer = { 0 };
    struct probe_buffer transform_buffer = { 0 };
    create_buffer(physical_device, device, sizeof(vertices),
                  VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
                  &vertex_buffer);
-   create_buffer(physical_device, device, sizeof(indices),
+   create_buffer(physical_device, device, sizeof(indices32),
                  VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                 &index_buffer);
+                 &index32_buffer);
+   create_buffer(physical_device, device, sizeof(indices16),
+                 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+                 &index16_buffer);
    create_buffer(physical_device, device, sizeof(transforms),
                  VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
                  &transform_buffer);
    upload_buffer(device, &vertex_buffer, vertices, sizeof(vertices));
-   upload_buffer(device, &index_buffer, indices, sizeof(indices));
+   upload_buffer(device, &index32_buffer, indices32, sizeof(indices32));
+   upload_buffer(device, &index16_buffer, indices16, sizeof(indices16));
    upload_buffer(device, &transform_buffer, transforms, sizeof(transforms));
 
-   VkAccelerationStructureGeometryKHR geometries[2];
+   VkAccelerationStructureGeometryKHR geometries[3];
    memset(geometries, 0, sizeof(geometries));
-   for (uint32_t i = 0; i < 2; i++) {
+   for (uint32_t i = 0; i < 3; i++) {
       geometries[i].sType =
          VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
       geometries[i].geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-      geometries[i].flags = i == 0 ? VK_GEOMETRY_OPAQUE_BIT_KHR : 0;
+      geometries[i].flags =
+         i == 1 ? 0 : VK_GEOMETRY_OPAQUE_BIT_KHR;
       geometries[i].geometry.triangles.sType =
          VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
       geometries[i].geometry.triangles.vertexFormat =
@@ -380,20 +395,26 @@ main(void)
       geometries[i].geometry.triangles.vertexData.deviceAddress =
          vertex_buffer.address;
       geometries[i].geometry.triangles.vertexStride = sizeof(vertices[0]);
-      geometries[i].geometry.triangles.maxVertex = 5;
-      geometries[i].geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
-      geometries[i].geometry.triangles.indexData.deviceAddress =
-         index_buffer.address;
+      geometries[i].geometry.triangles.maxVertex = 8;
       geometries[i].geometry.triangles.transformData.deviceAddress =
          transform_buffer.address;
    }
-   const uint32_t primitive_counts[2] = { 1, 1 };
+   geometries[0].geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
+   geometries[0].geometry.triangles.indexData.deviceAddress =
+      index32_buffer.address;
+   geometries[1].geometry.triangles.indexType = VK_INDEX_TYPE_UINT16;
+   geometries[1].geometry.triangles.indexData.deviceAddress =
+      index16_buffer.address;
+   geometries[2].geometry.triangles.indexType = VK_INDEX_TYPE_NONE_KHR;
+   geometries[2].geometry.triangles.indexData.deviceAddress = 0;
+
+   const uint32_t primitive_counts[3] = { 1, 1, 1 };
    const VkAccelerationStructureBuildGeometryInfoKHR size_info = {
       .sType =
          VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
       .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
       .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
-      .geometryCount = 2,
+      .geometryCount = 3,
       .pGeometries = geometries,
    };
    VkAccelerationStructureBuildSizesInfoKHR multi_sizes = {
@@ -462,7 +483,7 @@ main(void)
    build_info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
    build_info.dstAccelerationStructure = acceleration_structure;
    build_info.scratchData.deviceAddress = scratch_buffer.address;
-   const VkAccelerationStructureBuildRangeInfoKHR ranges[2] = {
+   const VkAccelerationStructureBuildRangeInfoKHR ranges[3] = {
       {
          .primitiveCount = 1,
          .primitiveOffset = 0,
@@ -471,9 +492,15 @@ main(void)
       },
       {
          .primitiveCount = 1,
-         .primitiveOffset = 3 * sizeof(uint32_t),
-         .firstVertex = 0,
+         .primitiveOffset = 0,
+         .firstVertex = 3,
          .transformOffset = sizeof(VkTransformMatrixKHR),
+      },
+      {
+         .primitiveCount = 1,
+         .primitiveOffset = 6 * sizeof(vertices[0]),
+         .firstVertex = 0,
+         .transformOffset = 2 * sizeof(VkTransformMatrixKHR),
       },
    };
    const VkAccelerationStructureBuildRangeInfoKHR *range_array = ranges;
@@ -505,45 +532,49 @@ main(void)
       fail("built object does not contain a VTAS header");
    if (load_u32(as_data, VENTUS_AS_HEADER_TYPE) != VENTUS_AS_TYPE_BLAS)
       fail("built VTAS object is not a BLAS");
-   if (load_u32(as_data, VENTUS_AS_HEADER_PRIMITIVE_COUNT) != 2)
-      fail("VTAS header did not aggregate both geometry primitive counts");
-   if (load_u32(as_data, VENTUS_AS_HEADER_NODE_COUNT) != 3)
-      fail("two-leaf BLAS does not contain one internal box node");
+   if (load_u32(as_data, VENTUS_AS_HEADER_PRIMITIVE_COUNT) != 3)
+      fail("VTAS header did not aggregate all geometry primitive counts");
+   if (load_u32(as_data, VENTUS_AS_HEADER_NODE_COUNT) != 4)
+      fail("three-leaf BLAS does not contain one internal box node");
 
    uint32_t leaf_offsets[4] = { 0 };
    uint32_t leaf_count = 0;
    collect_triangle_offsets(
       as_data, load_u32(as_data, VENTUS_AS_HEADER_ROOT_NODE_REF),
       leaf_offsets, &leaf_count);
-   if (leaf_count != 2)
-      fail("VTAS tree does not expose two triangle leaves");
+   if (leaf_count != 3)
+      fail("VTAS tree does not expose three triangle leaves");
 
-   uint32_t geometry_offsets[2] = { 0 };
+   uint32_t geometry_offsets[3] = { 0 };
    for (uint32_t i = 0; i < leaf_count; i++) {
       const uint32_t geometry_id = load_u32(
          as_data + leaf_offsets[i], VENTUS_TRIANGLE_GEOMETRY_ID);
-      if (geometry_id >= 2)
+      if (geometry_id >= 3)
          fail("VTAS leaf has an out-of-range geometry id");
       geometry_offsets[geometry_id] = leaf_offsets[i];
    }
-   if (!geometry_offsets[0] || !geometry_offsets[1])
-      fail("VTAS leaves do not cover geometry ids zero and one");
+   if (!geometry_offsets[0] || !geometry_offsets[1] || !geometry_offsets[2])
+      fail("VTAS leaves do not cover geometry ids zero through two");
 
    const float geometry0_v0[3] = { -1.0f, -1.0f, 5.0f };
    const float geometry1_v0[3] = { 1.5f, -0.5f, 8.0f };
+   const float geometry2_v0[3] = { -2.25f, -0.25f, 11.0f };
    verify_triangle_leaf(
-      as_data, geometry_offsets[0], 0, 1, index_buffer.address,
+      as_data, geometry_offsets[0], 0, 1, index32_buffer.address,
       geometry0_v0);
    verify_triangle_leaf(
       as_data, geometry_offsets[1], 1, 0,
-      index_buffer.address + 3 * sizeof(uint32_t), geometry1_v0);
-   require_f32(load_f32(as_data, VENTUS_AS_HEADER_ROOT_AABB_MIN_X), -1.0f,
+      index16_buffer.address, geometry1_v0);
+   verify_triangle_leaf(
+      as_data, geometry_offsets[2], 2, 1,
+      vertex_buffer.address + 6 * sizeof(vertices[0]), geometry2_v0);
+   require_f32(load_f32(as_data, VENTUS_AS_HEADER_ROOT_AABB_MIN_X), -2.25f,
                "root_aabb.min.x");
    require_f32(load_f32(as_data, VENTUS_AS_HEADER_ROOT_AABB_MAX_X), 2.5f,
                "root_aabb.max.x");
 
-   printf("PASS multi-geometry-blas geometries=2 primitives=2 nodes=3 "
-          "transform_offset=%zu\n",
+   printf("PASS multi-geometry-blas geometries=3 primitives=3 nodes=4 "
+          "index_modes=UINT32,UINT16,NONE transform_offset=%zu\n",
           sizeof(VkTransformMatrixKHR));
 
    vkDeviceWaitIdle(device);
@@ -552,7 +583,8 @@ main(void)
    destroy_buffer(device, &scratch_buffer);
    destroy_buffer(device, &as_buffer);
    destroy_buffer(device, &transform_buffer);
-   destroy_buffer(device, &index_buffer);
+   destroy_buffer(device, &index16_buffer);
+   destroy_buffer(device, &index32_buffer);
    destroy_buffer(device, &vertex_buffer);
    vkDestroyDevice(device, NULL);
    vkDestroyInstance(instance, NULL);

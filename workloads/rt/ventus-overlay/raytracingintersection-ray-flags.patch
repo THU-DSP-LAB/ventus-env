@@ -1,0 +1,21 @@
+diff --git a/examples/raytracingintersection/raytracingintersection.cpp b/examples/raytracingintersection/raytracingintersection.cpp
+--- a/examples/raytracingintersection/raytracingintersection.cpp
++++ b/examples/raytracingintersection/raytracingintersection.cpp
+@@ -14,0 +15 @@
++#include <cstdlib>
+@@ -32,0 +34 @@ class VulkanExample : public VulkanRaytracingSample
++		glm::uvec4 traceConfig{ 1, 0, 0, 0 };
+@@ -65,0 +68,3 @@ class VulkanExample : public VulkanRaytracingSample
++		if (const char* rayFlags = std::getenv("VENTUS_RT_SAMPLE_RAY_FLAGS")) {
++			uniformData.traceConfig.x = static_cast<uint32_t>(std::strtoul(rayFlags, nullptr, 0));
++		}
+@@ -495,0 +501 @@ class VulkanExample : public VulkanRaytracingSample
++		enabledRayTracingPipelineFeatures.rayTraversalPrimitiveCulling = VK_TRUE;
+diff --git a/shaders/glsl/raytracingintersection/raygen.rgen b/shaders/glsl/raytracingintersection/raygen.rgen
+--- a/shaders/glsl/raytracingintersection/raygen.rgen
++++ b/shaders/glsl/raytracingintersection/raygen.rgen
+@@ -11,0 +12 @@ layout(binding = 2, set = 0) uniform CameraProperties
++	uvec4 traceConfig;
+@@ -26 +27 @@ void main()
+-	uint rayFlags = gl_RayFlagsOpaqueEXT;
++	uint rayFlags = cam.traceConfig.x;

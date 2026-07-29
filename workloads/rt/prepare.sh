@@ -84,6 +84,7 @@ PATCH_FILES=(
   "${OVERLAY_DIR}/raytracingbasic-indirect.patch"
   "${OVERLAY_DIR}/raytracingbasic-indirect-as.patch"
   "${OVERLAY_DIR}/raytracingbasic-ray-flags.patch"
+  "${OVERLAY_DIR}/raytracingintersection-ray-flags.patch"
 )
 require_file "${UPSTREAM_ASSET}"
 require_file "${REFLECTION_ASSET}"
@@ -120,6 +121,10 @@ done
 "${GLSLANG_VALIDATOR}" -V \
   "${TEMP_SOURCE}/shaders/glsl/raytracingbasic/raygen.rgen" \
   -o "${TEMP_SOURCE}/shaders/glsl/raytracingbasic/raygen.rgen.spv" \
+  --target-env vulkan1.2
+"${GLSLANG_VALIDATOR}" -V \
+  "${TEMP_SOURCE}/shaders/glsl/raytracingintersection/raygen.rgen" \
+  -o "${TEMP_SOURCE}/shaders/glsl/raytracingintersection/raygen.rgen.spv" \
   --target-env vulkan1.2
 mkdir -p "${TEMP_SOURCE}/assets/models"
 mkdir -p "${TEMP_SOURCE}/assets/textures"

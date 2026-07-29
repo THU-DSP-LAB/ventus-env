@@ -174,7 +174,8 @@ int main(void) {
   };
   vkGetPhysicalDeviceFeatures2(physical_device, &queried_features);
   if (queried_rt.rayTracingPipeline != VK_TRUE ||
-      queried_rt.rayTracingPipelineTraceRaysIndirect != VK_TRUE)
+      queried_rt.rayTracingPipelineTraceRaysIndirect != VK_TRUE ||
+      queried_rt.rayTraversalPrimitiveCulling != VK_TRUE)
     fail("indirect ray tracing dispatch feature is not advertised");
   if (queried_maintenance.rayTracingMaintenance1 != VK_FALSE ||
       queried_maintenance.rayTracingPipelineTraceRaysIndirect2 != VK_TRUE)
@@ -219,6 +220,7 @@ int main(void) {
       .pNext = &enabled_bda,
       .rayTracingPipeline = VK_TRUE,
       .rayTracingPipelineTraceRaysIndirect = VK_TRUE,
+      .rayTraversalPrimitiveCulling = VK_TRUE,
   };
   VkPhysicalDeviceRayTracingMaintenance1FeaturesKHR enabled_maintenance = {
       .sType =

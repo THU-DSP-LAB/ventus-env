@@ -21,6 +21,8 @@ diff --git a/examples/raytracingbasic/raytracingbasic.cpp b/examples/raytracingb
 +		} else {
 +			instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 +		}
+@@ -738,0 +746 @@ class VulkanExample : public VulkanExampleBase
++		enabledRayTracingPipelineFeatures.rayTraversalPrimitiveCulling = VK_TRUE;
 diff --git a/shaders/glsl/raytracingbasic/raygen.rgen b/shaders/glsl/raytracingbasic/raygen.rgen
 --- a/shaders/glsl/raytracingbasic/raygen.rgen
 +++ b/shaders/glsl/raytracingbasic/raygen.rgen

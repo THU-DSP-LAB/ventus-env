@@ -31,6 +31,11 @@ case "${RT_PROFILE}" in
     ;;
 esac
 EXPECTED_PPM_SHA256="${EXPECTED_PPM_SHA256:-${DEFAULT_PPM_SHA256}}"
+if [[ "${RT_PROFILE}" == "global" ]]; then
+  DEBUG_GLOBAL_DISPATCH=1
+else
+  DEBUG_GLOBAL_DISPATCH=0
+fi
 EXPECTED_UPSTREAM_COMMIT="3b843fbf667a89a1cfcc64405e9fc6f9018e03b4"
 EXPECTED_GLM_COMMIT="1ad55c5016339b83b7eec98c31007e0aee57d2bf"
 EXPECTED_ASSET_SHA256="d20d0fb6ba02333b37f77f4fef576c1748eaa138a588654643196fb859325585"
@@ -46,7 +51,7 @@ die() {
   exit 1
 }
 
-for tool in git python3 readlink rg sha256sum; do
+for tool in git python3 readlink rg sha256sum sort wc; do
   command -v "${tool}" >/dev/null 2>&1 || die "required tool not found: ${tool}"
 done
 
@@ -99,6 +104,7 @@ CCACHE_DIR="${CCACHE_DIR:-/tmp/ventus-rt-reflections-ccache}" \
 XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/ventus-rt-reflections-cache}" \
 MESA_SHADER_CACHE_DISABLE=true \
 VENTUS_SPIKE_LOG="${VENTUS_SPIKE_LOG:-0}" \
+VENTUS_VK_RT_DEBUG_GLOBAL="${DEBUG_GLOBAL_DISPATCH}" \
 "${RUNNER}"
 
 PPM="${OUT_DIR}/160x96/raytracingreflections_spike.ppm"
@@ -111,6 +117,20 @@ rg -q 'descriptors=5' "${LOG}" ||
   die "runtime log does not prove all reflection descriptors were bound"
 if rg -q 'PHINode should have one entry|input module cannot be verified|llc: error' "${LOG}"; then
   die "compiler rejected the iterative reflection control flow"
+fi
+if [[ "${RT_PROFILE}" == "global" ]]; then
+  rg -q 'global RT dispatched .*ray_ref_list=0x[0-9a-f]+' "${LOG}" ||
+    die "global dispatch log does not expose the ray-ref scratch address"
+  COMPACT_DISPATCHES="$(
+    rg 'global RT dispatched .*ray_ref_list=0x[0-9a-f]+' "${LOG}" | wc -l
+  )"
+  [[ "${COMPACT_DISPATCHES}" -ge 4 ]] ||
+    die "expected multiple compact dispatches, got ${COMPACT_DISPATCHES}"
+  mapfile -t RAY_REF_SCRATCH_BASES < <(
+    rg -o 'ray_ref_list=0x[0-9a-f]+' "${LOG}" | sort -u
+  )
+  [[ "${#RAY_REF_SCRATCH_BASES[@]}" -eq 1 ]] ||
+    die "compact dispatches did not reuse one ray-ref scratch address"
 fi
 
 python3 - "${PPM}" "${EXPECTED_PPM_SHA256}" "${RT_PROFILE}" <<'PY'
@@ -203,6 +223,10 @@ VALIDATION_MANIFEST="${OUT_DIR}/iterative-reflections-validation.txt"
   echo "expected_sha256=${EXPECTED_PPM_SHA256}"
   echo "actual_sha256=$(sha256sum "${PPM}" | awk '{print $1}')"
   echo "comparison=byte-identical-plus-${RT_PROFILE}-structured-payload-and-reflection-semantic-thresholds"
+  if [[ "${RT_PROFILE}" == "global" ]]; then
+    echo "compact_dispatches=${COMPACT_DISPATCHES}"
+    echo "ray_ref_scratch_base=${RAY_REF_SCRATCH_BASES[0]#ray_ref_list=}"
+  fi
 } >"${VALIDATION_MANIFEST}"
 
 echo "manifest=${VALIDATION_MANIFEST}"

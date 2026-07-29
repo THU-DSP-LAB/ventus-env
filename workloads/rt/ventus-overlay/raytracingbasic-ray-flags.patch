@@ -1,0 +1,31 @@
+diff --git a/examples/raytracingbasic/raytracingbasic.cpp b/examples/raytracingbasic/raytracingbasic.cpp
+--- a/examples/raytracingbasic/raytracingbasic.cpp
++++ b/examples/raytracingbasic/raytracingbasic.cpp
+@@ -9,0 +10 @@
++#include <cstdlib>
+@@ -67,4 +69,5 @@ class VulkanExample : public VulkanExampleBase
+ 	struct UniformData {
+ 		glm::mat4 viewInverse;
+ 		glm::mat4 projInverse;
++		glm::uvec4 traceConfig{ 1, 0, 0, 0 };
+ 	} uniformData;
+@@ -85,0 +89,3 @@ class VulkanExample : public VulkanExampleBase
++		if (const char* rayFlags = std::getenv("VENTUS_RT_SAMPLE_RAY_FLAGS")) {
++			uniformData.traceConfig.x = static_cast<uint32_t>(std::strtoul(rayFlags, nullptr, 0));
++		}
+@@ -411 +418,6 @@ class VulkanExample : public VulkanExampleBase
+-		instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
++		if (const char* instanceFlags = std::getenv("VENTUS_RT_SAMPLE_INSTANCE_FLAGS")) {
++			instance.flags = static_cast<VkGeometryInstanceFlagsKHR>(
++				std::strtoul(instanceFlags, nullptr, 0));
++		} else {
++			instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
++		}
+diff --git a/shaders/glsl/raytracingbasic/raygen.rgen b/shaders/glsl/raytracingbasic/raygen.rgen
+--- a/shaders/glsl/raytracingbasic/raygen.rgen
++++ b/shaders/glsl/raytracingbasic/raygen.rgen
+@@ -10,0 +11 @@ layout(binding = 2, set = 0) uniform CameraProperties
++	uvec4 traceConfig;
+@@ -30 +31 @@ void main()
+-    traceRayEXT(topLevelAS, gl_RayFlagsOpaqueEXT, 0xff, 0, 0, 0, origin.xyz, tmin, direction.xyz, tmax, 0);
++    traceRayEXT(topLevelAS, cam.traceConfig.x, 0xff, 0, 0, 0, origin.xyz, tmin, direction.xyz, tmax, 0);

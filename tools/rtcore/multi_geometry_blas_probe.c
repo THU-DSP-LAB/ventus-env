@@ -206,6 +206,44 @@ load_as_functions(VkDevice device, struct as_functions *functions)
 #undef LOAD_FUNCTION
 }
 
+static VkCommandBuffer
+begin_one_time_command_buffer(VkDevice device, VkCommandPool command_pool)
+{
+   const VkCommandBufferAllocateInfo allocation_info = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = command_pool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1,
+   };
+   VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+   require_result(vkAllocateCommandBuffers(device, &allocation_info,
+                                           &command_buffer),
+                  "vkAllocateCommandBuffers");
+   const VkCommandBufferBeginInfo begin_info = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+   };
+   require_result(vkBeginCommandBuffer(command_buffer, &begin_info),
+                  "vkBeginCommandBuffer");
+   return command_buffer;
+}
+
+static void
+submit_and_wait(VkDevice device, VkQueue queue,
+                VkCommandBuffer command_buffer)
+{
+   require_result(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
+   const VkSubmitInfo submit_info = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .commandBufferCount = 1,
+      .pCommandBuffers = &command_buffer,
+   };
+   require_result(vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE),
+                  "vkQueueSubmit");
+   require_result(vkQueueWaitIdle(queue), "vkQueueWaitIdle");
+   (void)device;
+}
+
 static void
 collect_triangle_offsets(const uint8_t *as_data, uint32_t ref,
                          uint32_t offsets[4], uint32_t *count)
@@ -329,8 +367,10 @@ main(void)
                   "vkCreateDevice");
    struct as_functions as_functions;
    load_as_functions(device, &as_functions);
+   VkQueue queue = VK_NULL_HANDLE;
+   vkGetDeviceQueue(device, queue_family, 0, &queue);
 
-   const float vertices[9][3] = {
+   float vertices[9][3] = {
       { -1.0f, -1.0f, 5.0f },
       { 1.0f, -1.0f, 5.0f },
       { 0.0f, 1.0f, 5.0f },
@@ -415,7 +455,8 @@ main(void)
       .sType =
          VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
       .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
-      .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
+      .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+               VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
       .geometryCount = 3,
       .pGeometries = geometries,
    };
@@ -491,22 +532,8 @@ main(void)
    VkCommandPool command_pool = VK_NULL_HANDLE;
    require_result(vkCreateCommandPool(device, &pool_info, NULL, &command_pool),
                   "vkCreateCommandPool");
-   const VkCommandBufferAllocateInfo command_buffer_info = {
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool = command_pool,
-      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-      .commandBufferCount = 1,
-   };
-   VkCommandBuffer command_buffer = VK_NULL_HANDLE;
-   require_result(vkAllocateCommandBuffers(device, &command_buffer_info,
-                                           &command_buffer),
-                  "vkAllocateCommandBuffers");
-   const VkCommandBufferBeginInfo begin_info = {
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-   };
-   require_result(vkBeginCommandBuffer(command_buffer, &begin_info),
-                  "vkBeginCommandBuffer");
+   VkCommandBuffer command_buffer =
+      begin_one_time_command_buffer(device, command_pool);
 
    VkAccelerationStructureBuildGeometryInfoKHR build_info = size_info;
    build_info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
@@ -541,18 +568,7 @@ main(void)
       .mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_CLONE_KHR,
    };
    as_functions.cmd_copy(command_buffer, &copy_info);
-   require_result(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
-
-   VkQueue queue = VK_NULL_HANDLE;
-   vkGetDeviceQueue(device, queue_family, 0, &queue);
-   const VkSubmitInfo submit_info = {
-      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-      .commandBufferCount = 1,
-      .pCommandBuffers = &command_buffer,
-   };
-   require_result(vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE),
-                  "vkQueueSubmit");
-   require_result(vkQueueWaitIdle(queue), "vkQueueWaitIdle");
+   submit_and_wait(device, queue, command_buffer);
 
    const VkDeviceAddress as_address =
       as_functions.get_address(device, &address_info);
@@ -696,12 +712,8 @@ main(void)
    if (!prebuild_tlas_address || (prebuild_tlas_address & 255))
       fail("created TLAS address is not 256-byte aligned");
 
-   VkCommandBuffer tlas_command_buffer = VK_NULL_HANDLE;
-   require_result(vkAllocateCommandBuffers(device, &command_buffer_info,
-                                           &tlas_command_buffer),
-                  "vkAllocateCommandBuffers(TLAS)");
-   require_result(vkBeginCommandBuffer(tlas_command_buffer, &begin_info),
-                  "vkBeginCommandBuffer(TLAS)");
+   VkCommandBuffer tlas_command_buffer =
+      begin_one_time_command_buffer(device, command_pool);
    VkAccelerationStructureBuildGeometryInfoKHR tlas_build_info =
       tlas_size_info;
    tlas_build_info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
@@ -715,16 +727,7 @@ main(void)
       &tlas_range;
    as_functions.cmd_build(tlas_command_buffer, 1, &tlas_build_info,
                           &tlas_range_array);
-   require_result(vkEndCommandBuffer(tlas_command_buffer),
-                  "vkEndCommandBuffer(TLAS)");
-   const VkSubmitInfo tlas_submit_info = {
-      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-      .commandBufferCount = 1,
-      .pCommandBuffers = &tlas_command_buffer,
-   };
-   require_result(vkQueueSubmit(queue, 1, &tlas_submit_info, VK_NULL_HANDLE),
-                  "vkQueueSubmit(TLAS)");
-   require_result(vkQueueWaitIdle(queue), "vkQueueWaitIdle(TLAS)");
+   submit_and_wait(device, queue, tlas_command_buffer);
 
    const VkDeviceAddress tlas_address =
       as_functions.get_address(device, &tlas_address_info);
@@ -752,14 +755,113 @@ main(void)
           VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR)
       fail("TLAS instance metadata was not preserved");
 
+   vertices[0][0] = -3.0f;
+   upload_buffer(device, &vertex_buffer, vertices, sizeof(vertices));
+   VkAccelerationStructureBuildGeometryInfoKHR update_info = build_info;
+   update_info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+   update_info.srcAccelerationStructure = clone_acceleration_structure;
+   update_info.dstAccelerationStructure = clone_acceleration_structure;
+   VkCommandBuffer update_command_buffer =
+      begin_one_time_command_buffer(device, command_pool);
+   as_functions.cmd_build(update_command_buffer, 1, &update_info,
+                          &range_array);
+   submit_and_wait(device, queue, update_command_buffer);
+   if (as_functions.get_address(device, &clone_address_info) != clone_address)
+      fail("in-place AS update changed the clone address");
+   require_f32(load_f32((const uint8_t *)(uintptr_t)clone_address,
+                        VENTUS_AS_HEADER_ROOT_AABB_MIN_X),
+               -3.0f, "updated_clone.root_aabb.min.x");
+   require_f32(load_f32((const uint8_t *)(uintptr_t)as_address,
+                        VENTUS_AS_HEADER_ROOT_AABB_MIN_X),
+               -2.25f, "source_after_clone_update.root_aabb.min.x");
+
+   const uint32_t empty_primitive_count = 0;
+   VkAccelerationStructureBuildSizesInfoKHR empty_sizes = {
+      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR,
+   };
+   as_functions.get_sizes(
+      device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+      &single_size_info, &empty_primitive_count, &empty_sizes);
+   if (empty_sizes.accelerationStructureSize >=
+       single_sizes.accelerationStructureSize)
+      fail("zero-primitive BLAS size was forced to one leaf");
+
+   struct probe_buffer empty_as_buffer = { 0 };
+   struct probe_buffer empty_scratch_buffer = { 0 };
+   create_buffer(
+      physical_device, device, empty_sizes.accelerationStructureSize,
+      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+      &empty_as_buffer);
+   create_buffer(physical_device, device, empty_sizes.buildScratchSize,
+                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &empty_scratch_buffer);
+   const VkAccelerationStructureCreateInfoKHR empty_create_info = {
+      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+      .buffer = empty_as_buffer.buffer,
+      .size = empty_sizes.accelerationStructureSize,
+      .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+   };
+   VkAccelerationStructureKHR empty_as = VK_NULL_HANDLE;
+   require_result(as_functions.create(device, &empty_create_info, NULL,
+                                      &empty_as),
+                  "vkCreateAccelerationStructureKHR(empty)");
+   VkAccelerationStructureBuildGeometryInfoKHR empty_build_info =
+      single_size_info;
+   empty_build_info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+   empty_build_info.dstAccelerationStructure = empty_as;
+   empty_build_info.scratchData.deviceAddress = empty_scratch_buffer.address;
+   const VkAccelerationStructureBuildRangeInfoKHR empty_range = {
+      .primitiveCount = 0,
+   };
+   const VkAccelerationStructureBuildRangeInfoKHR *empty_range_array =
+      &empty_range;
+   VkCommandBuffer empty_command_buffer =
+      begin_one_time_command_buffer(device, command_pool);
+   as_functions.cmd_build(empty_command_buffer, 1, &empty_build_info,
+                          &empty_range_array);
+   submit_and_wait(device, queue, empty_command_buffer);
+   const VkAccelerationStructureDeviceAddressInfoKHR empty_address_info = {
+      .sType =
+         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+      .accelerationStructure = empty_as,
+   };
+   const VkDeviceAddress empty_address =
+      as_functions.get_address(device, &empty_address_info);
+   const uint8_t *empty_data = (const uint8_t *)(uintptr_t)empty_address;
+   if (!empty_address ||
+       load_u32(empty_data, VENTUS_AS_HEADER_ROOT_NODE_REF) !=
+          VENTUS_AS_INVALID_NODE ||
+       load_u32(empty_data, VENTUS_AS_HEADER_NODE_COUNT) != 0 ||
+       load_u32(empty_data, VENTUS_AS_HEADER_PRIMITIVE_COUNT) != 0)
+      fail("zero-primitive BLAS does not contain an empty VTAS header");
+
+   const VkAccelerationStructureBuildRangeInfoKHR empty_tlas_range = {
+      .primitiveCount = 0,
+   };
+   const VkAccelerationStructureBuildRangeInfoKHR *empty_tlas_range_array =
+      &empty_tlas_range;
+   VkCommandBuffer empty_tlas_command_buffer =
+      begin_one_time_command_buffer(device, command_pool);
+   as_functions.cmd_build(empty_tlas_command_buffer, 1, &tlas_build_info,
+                          &empty_tlas_range_array);
+   submit_and_wait(device, queue, empty_tlas_command_buffer);
+   if (as_functions.get_address(device, &tlas_address_info) != tlas_address ||
+       load_u32(tlas_data, VENTUS_AS_HEADER_ROOT_NODE_REF) !=
+          VENTUS_AS_INVALID_NODE ||
+       load_u32(tlas_data, VENTUS_AS_HEADER_NODE_COUNT) != 0 ||
+       load_u32(tlas_data, VENTUS_AS_HEADER_INSTANCE_COUNT) != 0)
+      fail("zero-instance TLAS does not contain an empty stable VTAS header");
+
    printf("PASS multi-geometry-blas geometries=3 primitives=3 nodes=4 "
           "index_modes=UINT32,UINT16,NONE clone=1 "
           "tlas_pointer_offset=16 stable_address=1 alignment=256 "
-          "transform_offset=%zu\n",
+          "update=1 empty_blas=1 empty_tlas=1 transform_offset=%zu\n",
           sizeof(VkTransformMatrixKHR));
 
    vkDeviceWaitIdle(device);
    vkDestroyCommandPool(device, command_pool, NULL);
+   as_functions.destroy(device, empty_as, NULL);
+   destroy_buffer(device, &empty_scratch_buffer);
+   destroy_buffer(device, &empty_as_buffer);
    as_functions.destroy(device, tlas, NULL);
    destroy_buffer(device, &tlas_scratch_buffer);
    destroy_buffer(device, &tlas_buffer);

@@ -86,6 +86,53 @@ require_false(VkBool32 value, const char *name)
    exit(EXIT_FAILURE);
 }
 
+static void
+verify_as_vertex_format(VkPhysicalDevice physical_device)
+{
+   VkFormatProperties legacy = {0};
+   vkGetPhysicalDeviceFormatProperties(
+      physical_device, VK_FORMAT_R32G32B32_SFLOAT, &legacy);
+   if (!(legacy.bufferFeatures &
+         VK_FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR))
+      fail("legacy format query omits the implemented AS vertex format");
+   if ((legacy.linearTilingFeatures &
+        VK_FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR) ||
+       (legacy.optimalTilingFeatures &
+        VK_FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR))
+      fail("AS vertex-buffer support was reported as an image feature");
+
+   VkFormatProperties3 properties3 = {
+      .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3,
+   };
+   VkFormatProperties2 properties2 = {
+      .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+      .pNext = &properties3,
+   };
+   vkGetPhysicalDeviceFormatProperties2(
+      physical_device, VK_FORMAT_R32G32B32_SFLOAT, &properties2);
+   if (!(properties2.formatProperties.bufferFeatures &
+         VK_FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR))
+      fail("format-properties2 omits the implemented AS vertex format");
+   if (!(properties3.bufferFeatures &
+         VK_FORMAT_FEATURE_2_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR))
+      fail("format-properties3 omits the implemented AS vertex format");
+
+   properties3 = (VkFormatProperties3){
+      .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3,
+   };
+   properties2 = (VkFormatProperties2){
+      .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+      .pNext = &properties3,
+   };
+   vkGetPhysicalDeviceFormatProperties2(
+      physical_device, VK_FORMAT_R32G32_SFLOAT, &properties2);
+   if ((properties2.formatProperties.bufferFeatures &
+        VK_FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR) ||
+       (properties3.bufferFeatures &
+        VK_FORMAT_FEATURE_2_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR))
+      fail("format query advertises an unsupported AS vertex format");
+}
+
 int
 main(void)
 {
@@ -124,6 +171,8 @@ main(void)
    if (!has_extension(physical_device,
                       VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME))
       fail("VK_KHR_deferred_host_operations is not available");
+
+   verify_as_vertex_format(physical_device);
 
    VkPhysicalDeviceAccelerationStructureFeaturesKHR queried_as = {
       .sType =
@@ -253,6 +302,7 @@ main(void)
    vkDestroyInstance(instance, NULL);
    printf("PASS as-host-capability-profile device_build=1 host_commands=0 "
           "indirect_build=0 capture_replay=0 deferred_operation=sync "
+          "as_vertex_format=R32G32B32_SFLOAT format_properties3=1 "
           "unsupported_request=%d\n",
           VK_ERROR_FEATURE_NOT_PRESENT);
    return EXIT_SUCCESS;

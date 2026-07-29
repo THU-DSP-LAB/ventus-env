@@ -604,12 +604,154 @@ main(void)
    require_f32(load_f32(as_data, VENTUS_AS_HEADER_ROOT_AABB_MAX_X), 2.5f,
                "root_aabb.max.x");
 
+   const VkAccelerationStructureInstanceKHR tlas_instance = {
+      .transform = { .matrix = {
+         { 1.0f, 0.0f, 0.0f, 4.0f },
+         { 0.0f, 1.0f, 0.0f, 0.0f },
+         { 0.0f, 0.0f, 1.0f, 0.0f },
+      } },
+      .instanceCustomIndex = 7,
+      .mask = 0x5a,
+      .instanceShaderBindingTableRecordOffset = 9,
+      .flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR,
+      .accelerationStructureReference = clone_address,
+   };
+   struct probe_buffer instance_buffer = { 0 };
+   struct probe_buffer instance_pointer_buffer = { 0 };
+   create_buffer(
+      physical_device, device, sizeof(tlas_instance),
+      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+      &instance_buffer);
+   create_buffer(
+      physical_device, device, 16 + sizeof(VkDeviceAddress),
+      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+      &instance_pointer_buffer);
+   upload_buffer(device, &instance_buffer, &tlas_instance,
+                 sizeof(tlas_instance));
+   const VkDeviceAddress instance_pointer_table[3] = {
+      0,
+      0,
+      instance_buffer.address,
+   };
+   upload_buffer(device, &instance_pointer_buffer, instance_pointer_table,
+                 sizeof(instance_pointer_table));
+
+   const VkAccelerationStructureGeometryKHR tlas_geometry = {
+      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+      .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR,
+      .geometry.instances = {
+         .sType =
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+         .arrayOfPointers = VK_TRUE,
+         .data.deviceAddress = instance_pointer_buffer.address,
+      },
+   };
+   const VkAccelerationStructureBuildGeometryInfoKHR tlas_size_info = {
+      .sType =
+         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+      .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+      .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
+      .geometryCount = 1,
+      .pGeometries = &tlas_geometry,
+   };
+   const uint32_t tlas_primitive_count = 1;
+   VkAccelerationStructureBuildSizesInfoKHR tlas_sizes = {
+      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR,
+   };
+   as_functions.get_sizes(
+      device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+      &tlas_size_info, &tlas_primitive_count, &tlas_sizes);
+
+   struct probe_buffer tlas_buffer = { 0 };
+   struct probe_buffer tlas_scratch_buffer = { 0 };
+   create_buffer(
+      physical_device, device, tlas_sizes.accelerationStructureSize,
+      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, &tlas_buffer);
+   create_buffer(physical_device, device, tlas_sizes.buildScratchSize,
+                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &tlas_scratch_buffer);
+   const VkAccelerationStructureCreateInfoKHR tlas_create_info = {
+      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+      .buffer = tlas_buffer.buffer,
+      .size = tlas_sizes.accelerationStructureSize,
+      .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+   };
+   VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
+   require_result(as_functions.create(device, &tlas_create_info, NULL, &tlas),
+                  "vkCreateAccelerationStructureKHR(TLAS)");
+
+   VkCommandBuffer tlas_command_buffer = VK_NULL_HANDLE;
+   require_result(vkAllocateCommandBuffers(device, &command_buffer_info,
+                                           &tlas_command_buffer),
+                  "vkAllocateCommandBuffers(TLAS)");
+   require_result(vkBeginCommandBuffer(tlas_command_buffer, &begin_info),
+                  "vkBeginCommandBuffer(TLAS)");
+   VkAccelerationStructureBuildGeometryInfoKHR tlas_build_info =
+      tlas_size_info;
+   tlas_build_info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+   tlas_build_info.dstAccelerationStructure = tlas;
+   tlas_build_info.scratchData.deviceAddress = tlas_scratch_buffer.address;
+   const VkAccelerationStructureBuildRangeInfoKHR tlas_range = {
+      .primitiveCount = 1,
+      .primitiveOffset = 16,
+   };
+   const VkAccelerationStructureBuildRangeInfoKHR *tlas_range_array =
+      &tlas_range;
+   as_functions.cmd_build(tlas_command_buffer, 1, &tlas_build_info,
+                          &tlas_range_array);
+   require_result(vkEndCommandBuffer(tlas_command_buffer),
+                  "vkEndCommandBuffer(TLAS)");
+   const VkSubmitInfo tlas_submit_info = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .commandBufferCount = 1,
+      .pCommandBuffers = &tlas_command_buffer,
+   };
+   require_result(vkQueueSubmit(queue, 1, &tlas_submit_info, VK_NULL_HANDLE),
+                  "vkQueueSubmit(TLAS)");
+   require_result(vkQueueWaitIdle(queue), "vkQueueWaitIdle(TLAS)");
+
+   const VkAccelerationStructureDeviceAddressInfoKHR tlas_address_info = {
+      .sType =
+         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+      .accelerationStructure = tlas,
+   };
+   const VkDeviceAddress tlas_address =
+      as_functions.get_address(device, &tlas_address_info);
+   if (!tlas_address)
+      fail("pointer-array TLAS has no address");
+   const uint8_t *tlas_data = (const uint8_t *)(uintptr_t)tlas_address;
+   if (load_u32(tlas_data, VENTUS_AS_HEADER_TYPE) != VENTUS_AS_TYPE_TLAS ||
+       load_u32(tlas_data, VENTUS_AS_HEADER_INSTANCE_COUNT) != 1)
+      fail("pointer-array build did not produce a one-instance TLAS");
+   const uint32_t instance_ref =
+      load_u32(tlas_data, VENTUS_AS_HEADER_ROOT_NODE_REF);
+   if ((instance_ref & VENTUS_NODE_REF_TYPE_MASK) !=
+       VENTUS_BVH_NODE_INSTANCE)
+      fail("one-instance TLAS root is not an instance node");
+   const uint32_t instance_offset =
+      instance_ref & VENTUS_NODE_REF_OFFSET_MASK;
+   const uint8_t *instance_leaf = tlas_data + instance_offset;
+   if (load_u64(instance_leaf, VENTUS_INSTANCE_BLAS_ADDR_LO) !=
+       clone_address)
+      fail("TLAS does not reference the cloned BLAS");
+   if (load_u32(instance_leaf, VENTUS_INSTANCE_CUSTOM_INDEX) != 7 ||
+       load_u32(instance_leaf, VENTUS_INSTANCE_MASK) != 0x5a ||
+       load_u32(instance_leaf, VENTUS_INSTANCE_SBT_RECORD_OFFSET) != 9 ||
+       load_u32(instance_leaf, VENTUS_INSTANCE_FLAGS) !=
+          VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR)
+      fail("TLAS instance metadata was not preserved");
+
    printf("PASS multi-geometry-blas geometries=3 primitives=3 nodes=4 "
-          "index_modes=UINT32,UINT16,NONE clone=1 transform_offset=%zu\n",
+          "index_modes=UINT32,UINT16,NONE clone=1 "
+          "tlas_pointer_offset=16 transform_offset=%zu\n",
           sizeof(VkTransformMatrixKHR));
 
    vkDeviceWaitIdle(device);
    vkDestroyCommandPool(device, command_pool, NULL);
+   as_functions.destroy(device, tlas, NULL);
+   destroy_buffer(device, &tlas_scratch_buffer);
+   destroy_buffer(device, &tlas_buffer);
+   destroy_buffer(device, &instance_pointer_buffer);
+   destroy_buffer(device, &instance_buffer);
    as_functions.destroy(device, clone_acceleration_structure, NULL);
    as_functions.destroy(device, acceleration_structure, NULL);
    destroy_buffer(device, &scratch_buffer);

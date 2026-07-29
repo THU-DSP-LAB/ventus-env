@@ -16,12 +16,20 @@ ICD="${ICD:-${MESA_BUILD}/src/ventus/vulkan/ventus_devenv_icd.x86_64.json}"
 DRIVER_LIB="${DRIVER_LIB:-${ENV_ROOT}/driver/build/driver/spike_device/libspike_driver.so}"
 OUT_DIR="${OUT_DIR:-${ENV_ROOT}/artifacts/rtcore-spike/iterative_reflections_exact_image}"
 
-RT_PROFILE=compat
-DEFAULT_PPM_SHA256=65480e26a328cd5bb1205d33fc6114837f7cae71cea0754eec9c4b31e5334703
-if [[ "${VENTUS_VK_RT_WAVEFRONT_GLOBAL:-0}" == "1" ]]; then
-  RT_PROFILE=global
-  DEFAULT_PPM_SHA256=ebe1a1a08e3474d1d3e5a6fe942e841363df828248d09833fad0abb57f9fa452
-fi
+source "${ENV_ROOT}/tools/rtcore/rt_profile.sh"
+RT_PROFILE="$(ventus_rt_execution_profile)"
+case "${RT_PROFILE}" in
+  compat)
+    DEFAULT_PPM_SHA256=65480e26a328cd5bb1205d33fc6114837f7cae71cea0754eec9c4b31e5334703
+    ;;
+  global)
+    DEFAULT_PPM_SHA256=ebe1a1a08e3474d1d3e5a6fe942e841363df828248d09833fad0abb57f9fa452
+    ;;
+  *)
+    echo "error: no iterative-reflections golden for RT profile ${RT_PROFILE}" >&2
+    exit 1
+    ;;
+esac
 EXPECTED_PPM_SHA256="${EXPECTED_PPM_SHA256:-${DEFAULT_PPM_SHA256}}"
 EXPECTED_UPSTREAM_COMMIT="3b843fbf667a89a1cfcc64405e9fc6f9018e03b4"
 EXPECTED_GLM_COMMIT="1ad55c5016339b83b7eec98c31007e0aee57d2bf"

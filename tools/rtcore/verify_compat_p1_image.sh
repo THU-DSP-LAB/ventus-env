@@ -104,6 +104,7 @@ RUN_320X192=0 \
 CCACHE_DIR="${CCACHE_DIR:-/tmp/ventus-rtcore-p1-ccache}" \
 XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/ventus-rtcore-p1-cache}" \
 MESA_SHADER_CACHE_DISABLE=true \
+VENTUS_VK_RT_EXECUTION_PROFILE=compat \
 VENTUS_SPIKE_LOG="${VENTUS_SPIKE_LOG:-0}" \
 "${RUNNER}"
 

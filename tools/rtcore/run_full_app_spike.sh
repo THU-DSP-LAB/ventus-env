@@ -6,6 +6,8 @@ set -euo pipefail
 # cannot fall back to another checkout.
 
 ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+source "${ROOT_DIR}/tools/rtcore/rt_profile.sh"
+RT_EXECUTION_PROFILE="$(ventus_rt_execution_profile)"
 MESA_BUILD="${MESA_BUILD:-${ROOT_DIR}/mesa/build-ventus}"
 LLVM_BUILD="${LLVM_BUILD:-${ROOT_DIR}/llvm/build}"
 SPIKE_BUILD="${SPIKE_BUILD:-${ROOT_DIR}/spike/build}"
@@ -185,6 +187,7 @@ PY
   echo "workload=${WORKLOAD_DIR}"
   echo "app=${APP}"
   echo "app_name=${APP_NAME}"
+  echo "rt_execution_profile=${RT_EXECUTION_PROFILE}"
   echo "app_sha256=$(sha256sum "${APP}" | awk '{print $1}')"
   echo "icd=${ICD}"
   echo

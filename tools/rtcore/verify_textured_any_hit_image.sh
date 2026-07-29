@@ -15,14 +15,22 @@ ICD="${ICD:-${MESA_BUILD}/src/ventus/vulkan/ventus_devenv_icd.x86_64.json}"
 DRIVER_LIB="${DRIVER_LIB:-${ENV_ROOT}/driver/build/driver/spike_device/libspike_driver.so}"
 OUT_DIR="${OUT_DIR:-${ENV_ROOT}/artifacts/rtcore-spike/textured_any_hit_exact_image}"
 
-RT_PROFILE=compat
-DEFAULT_PPM_SHA256=b38c155a8a65f0fdca801f382b5e2b57c63c9de4bac473a747989c8f3d9adaa1
-if [[ "${VENTUS_VK_RT_WAVEFRONT_GLOBAL:-0}" == "1" ]]; then
-  # The global continuation path invokes miss after ignoreIntersectionEXT;
-  # compat preserves the historical black payload for the same rejected rays.
-  RT_PROFILE=global
-  DEFAULT_PPM_SHA256=0a11a83f1beca8bd433dd2f2652938596744a42841fd0ce304ac1c5c64fadae1
-fi
+source "${ENV_ROOT}/tools/rtcore/rt_profile.sh"
+RT_PROFILE="$(ventus_rt_execution_profile)"
+case "${RT_PROFILE}" in
+  compat)
+    DEFAULT_PPM_SHA256=b38c155a8a65f0fdca801f382b5e2b57c63c9de4bac473a747989c8f3d9adaa1
+    ;;
+  global)
+    # Global continuation invokes miss after ignoreIntersectionEXT; compat
+    # preserves the historical black payload for the same rejected rays.
+    DEFAULT_PPM_SHA256=0a11a83f1beca8bd433dd2f2652938596744a42841fd0ce304ac1c5c64fadae1
+    ;;
+  *)
+    echo "error: no textured-any-hit golden for RT profile ${RT_PROFILE}" >&2
+    exit 1
+    ;;
+esac
 EXPECTED_PPM_SHA256="${EXPECTED_PPM_SHA256:-${DEFAULT_PPM_SHA256}}"
 EXPECTED_UPSTREAM_COMMIT="3b843fbf667a89a1cfcc64405e9fc6f9018e03b4"
 EXPECTED_ASSET_SHA256="f27af40f84e22a1f9a423204af5cff1f822fe4c1cbf6a66247f191c842e9078b"

@@ -21,6 +21,7 @@ struct as_functions {
    PFN_vkDestroyAccelerationStructureKHR destroy;
    PFN_vkGetAccelerationStructureBuildSizesKHR get_sizes;
    PFN_vkCmdBuildAccelerationStructuresKHR cmd_build;
+   PFN_vkCmdCopyAccelerationStructureKHR cmd_copy;
    PFN_vkGetAccelerationStructureDeviceAddressKHR get_address;
 };
 
@@ -200,6 +201,7 @@ load_as_functions(VkDevice device, struct as_functions *functions)
    LOAD_FUNCTION(destroy, vkDestroyAccelerationStructureKHR);
    LOAD_FUNCTION(get_sizes, vkGetAccelerationStructureBuildSizesKHR);
    LOAD_FUNCTION(cmd_build, vkCmdBuildAccelerationStructuresKHR);
+   LOAD_FUNCTION(cmd_copy, vkCmdCopyAccelerationStructureKHR);
    LOAD_FUNCTION(get_address, vkGetAccelerationStructureDeviceAddressKHR);
 #undef LOAD_FUNCTION
 }
@@ -437,10 +439,14 @@ main(void)
       fail("multi-geometry size query ignored geometry one");
 
    struct probe_buffer as_buffer = { 0 };
+   struct probe_buffer clone_buffer = { 0 };
    struct probe_buffer scratch_buffer = { 0 };
    create_buffer(physical_device, device, multi_sizes.accelerationStructureSize,
                  VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
                  &as_buffer);
+   create_buffer(physical_device, device, multi_sizes.accelerationStructureSize,
+                 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+                 &clone_buffer);
    create_buffer(physical_device, device, multi_sizes.buildScratchSize,
                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &scratch_buffer);
 
@@ -454,6 +460,12 @@ main(void)
    require_result(as_functions.create(device, &create_info, NULL,
                                       &acceleration_structure),
                   "vkCreateAccelerationStructureKHR");
+   VkAccelerationStructureCreateInfoKHR clone_create_info = create_info;
+   clone_create_info.buffer = clone_buffer.buffer;
+   VkAccelerationStructureKHR clone_acceleration_structure = VK_NULL_HANDLE;
+   require_result(as_functions.create(device, &clone_create_info, NULL,
+                                      &clone_acceleration_structure),
+                  "vkCreateAccelerationStructureKHR(clone)");
 
    const VkCommandPoolCreateInfo pool_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -505,6 +517,13 @@ main(void)
    };
    const VkAccelerationStructureBuildRangeInfoKHR *range_array = ranges;
    as_functions.cmd_build(command_buffer, 1, &build_info, &range_array);
+   const VkCopyAccelerationStructureInfoKHR copy_info = {
+      .sType = VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR,
+      .src = acceleration_structure,
+      .dst = clone_acceleration_structure,
+      .mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_CLONE_KHR,
+   };
+   as_functions.cmd_copy(command_buffer, &copy_info);
    require_result(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
 
    VkQueue queue = VK_NULL_HANDLE;
@@ -527,7 +546,19 @@ main(void)
       as_functions.get_address(device, &address_info);
    if (!as_address)
       fail("built acceleration structure has no address");
-   const uint8_t *as_data = (const uint8_t *)(uintptr_t)as_address;
+   VkAccelerationStructureDeviceAddressInfoKHR clone_address_info =
+      address_info;
+   clone_address_info.accelerationStructure = clone_acceleration_structure;
+   const VkDeviceAddress clone_address =
+      as_functions.get_address(device, &clone_address_info);
+   if (!clone_address || clone_address == as_address)
+      fail("cloned acceleration structure has no independent address");
+   if (memcmp((const void *)(uintptr_t)as_address,
+              (const void *)(uintptr_t)clone_address,
+              multi_sizes.accelerationStructureSize) != 0)
+      fail("cloned acceleration structure byte image differs from source");
+
+   const uint8_t *as_data = (const uint8_t *)(uintptr_t)clone_address;
    if (load_u32(as_data, VENTUS_AS_HEADER_MAGIC) != VENTUS_AS_MAGIC)
       fail("built object does not contain a VTAS header");
    if (load_u32(as_data, VENTUS_AS_HEADER_TYPE) != VENTUS_AS_TYPE_BLAS)
@@ -574,13 +605,15 @@ main(void)
                "root_aabb.max.x");
 
    printf("PASS multi-geometry-blas geometries=3 primitives=3 nodes=4 "
-          "index_modes=UINT32,UINT16,NONE transform_offset=%zu\n",
+          "index_modes=UINT32,UINT16,NONE clone=1 transform_offset=%zu\n",
           sizeof(VkTransformMatrixKHR));
 
    vkDeviceWaitIdle(device);
    vkDestroyCommandPool(device, command_pool, NULL);
+   as_functions.destroy(device, clone_acceleration_structure, NULL);
    as_functions.destroy(device, acceleration_structure, NULL);
    destroy_buffer(device, &scratch_buffer);
+   destroy_buffer(device, &clone_buffer);
    destroy_buffer(device, &as_buffer);
    destroy_buffer(device, &transform_buffer);
    destroy_buffer(device, &index16_buffer);

@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include <vulkan/vulkan.h>
 
@@ -108,6 +109,17 @@ static void destroy_address_buffer(VkDevice device,
   vkFreeMemory(device, buffer.memory, NULL);
 }
 
+static void write_address_buffer(VkDevice device,
+                                 struct address_buffer buffer,
+                                 const void *data,
+                                 VkDeviceSize size) {
+  void *mapped = NULL;
+  require_result(vkMapMemory(device, buffer.memory, 0, size, 0, &mapped),
+                 "vkMapMemory");
+  memcpy(mapped, data, (size_t)size);
+  vkUnmapMemory(device, buffer.memory);
+}
+
 int main(void) {
   const VkApplicationInfo application_info = {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -168,6 +180,7 @@ int main(void) {
       queried_maintenance.rayTracingPipelineTraceRaysIndirect2 != VK_TRUE)
     fail("indirect2 feature profile is not narrowly advertised");
   if (queried_as.accelerationStructure != VK_TRUE ||
+      queried_as.accelerationStructureIndirectBuild != VK_TRUE ||
       queried_bda.bufferDeviceAddress != VK_TRUE)
     fail("required AS or buffer-device-address feature is not advertised");
 
@@ -193,6 +206,7 @@ int main(void) {
       .sType =
           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
       .accelerationStructure = VK_TRUE,
+      .accelerationStructureIndirectBuild = VK_TRUE,
   };
   VkPhysicalDeviceBufferDeviceAddressFeatures enabled_bda = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
@@ -236,6 +250,11 @@ int main(void) {
           device, "vkCmdTraceRaysIndirect2KHR");
   if (!trace_indirect2)
     fail("vkCmdTraceRaysIndirect2KHR device entrypoint is unavailable");
+  PFN_vkCmdBuildAccelerationStructuresIndirectKHR build_as_indirect =
+      (PFN_vkCmdBuildAccelerationStructuresIndirectKHR)vkGetDeviceProcAddr(
+          device, "vkCmdBuildAccelerationStructuresIndirectKHR");
+  if (!build_as_indirect)
+    fail("vkCmdBuildAccelerationStructuresIndirectKHR entrypoint is unavailable");
 
   const VkCommandPoolCreateInfo pool_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -277,7 +296,57 @@ int main(void) {
   trace_indirect2(command_buffer, wrong_usage.address);
   trace_indirect2(command_buffer, short_range.address);
 
+  const VkAccelerationStructureBuildGeometryInfoKHR invalid_build_info = {
+      .sType =
+          VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+      .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+      .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+      .geometryCount = 1,
+  };
+  const VkDeviceAddress unaligned_address = wrong_usage.address + 2;
+  const uint32_t range_stride =
+      sizeof(VkAccelerationStructureBuildRangeInfoKHR);
+  const uint32_t unaligned_stride = 2;
+  const uint32_t max_primitive_count = 1;
+  const uint32_t *max_primitive_counts = &max_primitive_count;
+  build_as_indirect(command_buffer, 1, &invalid_build_info,
+                    &unaligned_address, &range_stride,
+                    &max_primitive_counts);
+  build_as_indirect(command_buffer, 1, &invalid_build_info,
+                    &wrong_usage.address, &unaligned_stride,
+                    &max_primitive_counts);
+  build_as_indirect(command_buffer, 1, &invalid_build_info,
+                    &wrong_usage.address, &range_stride,
+                    &max_primitive_counts);
+  build_as_indirect(command_buffer, 1, &invalid_build_info,
+                    &short_range.address, &range_stride,
+                    &max_primitive_counts);
+
+  const uint32_t padded_stride =
+      2 * sizeof(VkAccelerationStructureBuildRangeInfoKHR);
+  const struct address_buffer excessive_count =
+      create_address_buffer(device, 2 * padded_stride,
+                            VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  uint8_t padded_ranges[2 * sizeof(VkAccelerationStructureBuildRangeInfoKHR) *
+                        2] = {0};
+  VkAccelerationStructureBuildRangeInfoKHR excessive_range = {
+      .primitiveCount = 2,
+  };
+  memcpy(padded_ranges + padded_stride, &excessive_range,
+         sizeof(excessive_range));
+  write_address_buffer(device, excessive_count, padded_ranges,
+                       sizeof(padded_ranges));
+  VkAccelerationStructureBuildGeometryInfoKHR strided_build_info =
+      invalid_build_info;
+  strided_build_info.geometryCount = 2;
+  const uint32_t strided_max_primitive_counts[] = {0, 1};
+  const uint32_t *strided_max_counts = strided_max_primitive_counts;
+  build_as_indirect(command_buffer, 1, &strided_build_info,
+                    &excessive_count.address, &padded_stride,
+                    &strided_max_counts);
+
   require_result(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
+  destroy_address_buffer(device, excessive_count);
   destroy_address_buffer(device, short_range);
   destroy_address_buffer(device, wrong_usage);
   vkDestroyCommandPool(device, command_pool, NULL);
@@ -285,6 +354,6 @@ int main(void) {
   vkDestroyInstance(instance, NULL);
 
   puts("PASS indirect-rt-dispatch-negative indirect1=1 indirect2=1 "
-       "maintenance1=0 rejected=6");
+       "as_indirect=1 maintenance1=0 rejected=11");
   return EXIT_SUCCESS;
 }

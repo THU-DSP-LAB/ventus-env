@@ -1,0 +1,59 @@
+diff --git a/examples/raytracingbasic/raytracingbasic.cpp b/examples/raytracingbasic/raytracingbasic.cpp
+--- a/examples/raytracingbasic/raytracingbasic.cpp
++++ b/examples/raytracingbasic/raytracingbasic.cpp
+@@ -35 +35 @@ class VulkanExample : public VulkanExampleBase
+-	PFN_vkCmdBuildAccelerationStructuresKHR vkCmdBuildAccelerationStructuresKHR{ nullptr };
++	PFN_vkCmdBuildAccelerationStructuresIndirectKHR vkCmdBuildAccelerationStructuresIndirectKHR{ nullptr };
+@@ -376 +376,11 @@ class VulkanExample : public VulkanExampleBase
+-		std::vector<VkAccelerationStructureBuildRangeInfoKHR*> accelerationBuildStructureRangeInfos = { &accelerationStructureBuildRangeInfo };
++		vks::Buffer indirectBuildBuffer;
++		VkBufferUsageFlags indirectBuildUsage = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
++			VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
++		VK_CHECK_RESULT(vulkanDevice->createBuffer(
++			indirectBuildUsage,
++			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
++			&indirectBuildBuffer, sizeof(accelerationStructureBuildRangeInfo),
++			&accelerationStructureBuildRangeInfo));
++		VkDeviceAddress indirectBuildAddress = getBufferDeviceAddress(indirectBuildBuffer.buffer);
++		uint32_t indirectBuildStride = sizeof(accelerationStructureBuildRangeInfo);
++		const uint32_t* maxPrimitiveCounts = &numTriangles;
+@@ -381 +391 @@ class VulkanExample : public VulkanExampleBase
+-		vkCmdBuildAccelerationStructuresKHR(
++		vkCmdBuildAccelerationStructuresIndirectKHR(
+@@ -385 +395,3 @@ class VulkanExample : public VulkanExampleBase
+-			accelerationBuildStructureRangeInfos.data());
++			&indirectBuildAddress,
++			&indirectBuildStride,
++			&maxPrimitiveCounts);
+@@ -386,0 +399 @@ class VulkanExample : public VulkanExampleBase
++		indirectBuildBuffer.destroy();
+@@ -483 +496,11 @@ class VulkanExample : public VulkanExampleBase
+-		std::vector<VkAccelerationStructureBuildRangeInfoKHR*> accelerationBuildStructureRangeInfos = { &accelerationStructureBuildRangeInfo };
++		vks::Buffer indirectBuildBuffer;
++		VkBufferUsageFlags indirectBuildUsage = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
++			VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
++		VK_CHECK_RESULT(vulkanDevice->createBuffer(
++			indirectBuildUsage,
++			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
++			&indirectBuildBuffer, sizeof(accelerationStructureBuildRangeInfo),
++			&accelerationStructureBuildRangeInfo));
++		VkDeviceAddress indirectBuildAddress = getBufferDeviceAddress(indirectBuildBuffer.buffer);
++		uint32_t indirectBuildStride = sizeof(accelerationStructureBuildRangeInfo);
++		const uint32_t* maxPrimitiveCounts = &primitive_count;
+@@ -488 +511 @@ class VulkanExample : public VulkanExampleBase
+-		vkCmdBuildAccelerationStructuresKHR(
++		vkCmdBuildAccelerationStructuresIndirectKHR(
+@@ -492 +515,3 @@ class VulkanExample : public VulkanExampleBase
+-			accelerationBuildStructureRangeInfos.data());
++			&indirectBuildAddress,
++			&indirectBuildStride,
++			&maxPrimitiveCounts);
+@@ -493,0 +519 @@ class VulkanExample : public VulkanExampleBase
++		indirectBuildBuffer.destroy();
+@@ -742 +768,2 @@ class VulkanExample : public VulkanExampleBase
+-		enabledAccelerationStructureFeatures.accelerationStructure = VK_TRUE;
++		enabledAccelerationStructureFeatures.accelerationStructure = VK_TRUE;
++		enabledAccelerationStructureFeatures.accelerationStructureIndirectBuild = VK_TRUE;
+@@ -771 +798 @@ class VulkanExample : public VulkanExampleBase
+-		vkCmdBuildAccelerationStructuresKHR = reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR"));
++		vkCmdBuildAccelerationStructuresIndirectKHR = reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresIndirectKHR>(vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresIndirectKHR"));

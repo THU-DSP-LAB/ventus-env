@@ -184,12 +184,11 @@ main(void)
    };
    vkGetPhysicalDeviceFeatures2(physical_device, &queried_features);
 
-   if (queried_as.accelerationStructure != VK_TRUE)
-      fail("device AS build support is not available");
+   if (queried_as.accelerationStructure != VK_TRUE ||
+       queried_as.accelerationStructureIndirectBuild != VK_TRUE)
+      fail("direct or indirect device AS build support is not available");
    require_false(queried_as.accelerationStructureCaptureReplay,
                  "accelerationStructureCaptureReplay");
-   require_false(queried_as.accelerationStructureIndirectBuild,
-                 "accelerationStructureIndirectBuild");
    require_false(queried_as.accelerationStructureHostCommands,
                  "accelerationStructureHostCommands");
    require_false(queried_as.descriptorBindingAccelerationStructureUpdateAfterBind,
@@ -301,7 +300,7 @@ main(void)
 
    vkDestroyInstance(instance, NULL);
    printf("PASS as-host-capability-profile device_build=1 host_commands=0 "
-          "indirect_build=0 capture_replay=0 deferred_operation=sync "
+          "indirect_build=1 capture_replay=0 deferred_operation=sync "
           "as_vertex_format=R32G32B32_SFLOAT format_properties3=1 "
           "unsupported_request=%d\n",
           VK_ERROR_FEATURE_NOT_PRESENT);

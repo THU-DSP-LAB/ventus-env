@@ -42,7 +42,7 @@ probe_output="$(
 )"
 printf '%s\n' "${probe_output}"
 
-rg -q '^PASS indirect-rt-dispatch-negative indirect1=1 indirect2=1 maintenance1=0 rejected=6$' \
+rg -q '^PASS indirect-rt-dispatch-negative indirect1=1 indirect2=1 as_indirect=1 maintenance1=0 rejected=11$' \
   <<<"${probe_output}" ||
   die "indirect dispatch probe did not report PASS"
 [[ "$(rg -c 'indirect RT dispatch address is not 4-byte aligned' \
@@ -57,3 +57,12 @@ rg -q '^PASS indirect-rt-dispatch-negative indirect1=1 indirect2=1 maintenance1=
 [[ "$(rg -c 'indirect2 RT dispatch address is not a complete INDIRECT_BUFFER range' \
        <<<"${probe_output}")" == 2 ]] ||
   die "indirect2 usage and range errors were not both rejected"
+[[ "$(rg -c 'indirect AS build address/stride is not 4-byte aligned' \
+       <<<"${probe_output}")" == 2 ]] ||
+  die "indirect AS address and stride alignment errors were not rejected"
+[[ "$(rg -c 'indirect AS build 0 does not name a complete INDIRECT_BUFFER range' \
+       <<<"${probe_output}")" == 2 ]] ||
+  die "indirect AS usage and range errors were not both rejected"
+[[ "$(rg -c 'indirect AS build 0 geometry 1 primitiveCount=2 exceeds maximum=1' \
+       <<<"${probe_output}")" == 1 ]] ||
+  die "strided indirect AS primitive count was not bounded"

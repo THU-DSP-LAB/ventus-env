@@ -1,0 +1,22 @@
+diff --git a/examples/raytracingbasic/raytracingbasic.cpp b/examples/raytracingbasic/raytracingbasic.cpp
+--- a/examples/raytracingbasic/raytracingbasic.cpp
++++ b/examples/raytracingbasic/raytracingbasic.cpp
+@@ -408 +408,5 @@ class VulkanExample : public VulkanExampleBase
+-		instance.instanceCustomIndex = 0;
++		if (const char* customIndex = std::getenv("VENTUS_RT_SAMPLE_INSTANCE_CUSTOM_INDEX")) {
++			instance.instanceCustomIndex = static_cast<uint32_t>(std::strtoul(customIndex, nullptr, 0));
++		} else {
++			instance.instanceCustomIndex = 0;
++		}
+diff --git a/shaders/glsl/raytracingbasic/closesthit.rchit b/shaders/glsl/raytracingbasic/closesthit.rchit
+--- a/shaders/glsl/raytracingbasic/closesthit.rchit
++++ b/shaders/glsl/raytracingbasic/closesthit.rchit
+@@ -11 +11,7 @@ void main()
+-  hitValue = barycentricCoords;
++  const uint instanceCustomIndex = gl_InstanceCustomIndexEXT;
++  if (instanceCustomIndex == 0u)
++    hitValue = barycentricCoords;
++  else if (instanceCustomIndex == 0x5au)
++    hitValue = vec3(1.0f, 0.0f, 1.0f);
++  else
++    hitValue = vec3(0.0f, 1.0f, 1.0f);

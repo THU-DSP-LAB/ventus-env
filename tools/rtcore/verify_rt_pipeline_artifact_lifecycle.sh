@@ -12,6 +12,7 @@ OUT_BASE="${OUT_BASE:-/tmp/ventus-rt-pipeline-artifact-lifecycle}"
 FAIL_OUT="${OUT_BASE}/failure"
 CLEAN_OUT="${OUT_BASE}/cleanup"
 RETAIN_OUT="${OUT_BASE}/retain"
+LOG_OUT="${OUT_BASE}/logging"
 EXPECTED_1X1_SHA256="8e1b9d83fa583f46b14a33fac42e5cd399afd312cda413d18f391d367b400f78"
 
 die() {
@@ -25,6 +26,12 @@ artifact_count() {
        -o -name 'ventus_vk_rt_*.ld' \
        -o -name 'ventus_vk_rt_*.o' \
        -o -name 'ventus_vk_rt_*.riscv' \) \
+    -printf '.\n' |
+    wc -l
+}
+
+spike_log_count() {
+  find "$1" -maxdepth 1 -type f -name 'ventus_vk_rt_*.riscv.log' \
     -printf '.\n' |
     wc -l
 }
@@ -54,6 +61,8 @@ done
 [[ -f "${DRIVER_LIB}" ]] || die "driver library not found: ${DRIVER_LIB}"
 [[ -f "${MESA_BUILD}/src/ventus/vulkan/ventus_devenv_icd.x86_64.json" ]] ||
   die "Ventus ICD not found under ${MESA_BUILD}"
+[[ -n "${OUT_BASE}" && "${OUT_BASE}" != / ]] ||
+  die "unsafe OUT_BASE: ${OUT_BASE}"
 
 rm -rf -- "${OUT_BASE}"
 mkdir -p "${OUT_BASE}"
@@ -87,6 +96,8 @@ for iteration in 1 2; do
     die "cleanup run ${iteration} changed the frozen 1x1 image"
   [[ "$(artifact_count "${CLEAN_ARTIFACT_DIR}")" == 0 ]] ||
     die "pipeline-owned artifacts survived cleanup run ${iteration}"
+  [[ "$(spike_log_count "${CLEAN_ARTIFACT_DIR}")" == 0 ]] ||
+    die "disabled Spike logging created sidecars in cleanup run ${iteration}"
 done
 
 run_1x1 global "${RETAIN_OUT}" \
@@ -99,4 +110,16 @@ for suffix in .ll .emit.ll .ld .o .riscv; do
     die "debug retention did not preserve ${suffix} artifacts"
 done
 
-echo "PASS rt-pipeline-artifact-lifecycle clean_count=0 retained_count=$(artifact_count "${RETAIN_ARTIFACT_DIR}")"
+run_1x1 global "${LOG_OUT}" \
+  VENTUS_SPIKE_LOG=1 \
+  VENTUS_VK_RETAIN_SHADER_ARTIFACTS=0 \
+  VENTUS_VK_DUMP_LLVM=0
+LOG_ARTIFACT_DIR="${LOG_OUT}/1x1/elf"
+LOG_COUNT="$(spike_log_count "${LOG_ARTIFACT_DIR}")"
+[[ "${LOG_COUNT}" -gt 0 ]] ||
+  die "enabled Spike logging created no sidecars"
+find "${LOG_ARTIFACT_DIR}" -maxdepth 1 -type f \
+  -name 'ventus_vk_rt_*.riscv.log' -size +0c -print -quit | rg -q . ||
+  die "enabled Spike logging created only empty sidecars"
+
+echo "PASS rt-pipeline-artifact-lifecycle clean_count=0 retained_count=$(artifact_count "${RETAIN_ARTIFACT_DIR}") enabled_log_count=${LOG_COUNT}"

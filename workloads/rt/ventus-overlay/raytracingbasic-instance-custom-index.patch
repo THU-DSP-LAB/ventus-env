@@ -1,7 +1,15 @@
 diff --git a/examples/raytracingbasic/raytracingbasic.cpp b/examples/raytracingbasic/raytracingbasic.cpp
 --- a/examples/raytracingbasic/raytracingbasic.cpp
 +++ b/examples/raytracingbasic/raytracingbasic.cpp
-@@ -407,2 +407,15 @@ class VulkanExample : public VulkanExampleBase
+@@ -45 +45,2 @@ class VulkanExample : public VulkanExampleBase
+-	VkPhysicalDeviceRayTracingPipelineFeaturesKHR enabledRayTracingPipelineFeatures{};
++	VkPhysicalDeviceRayTracingPipelineFeaturesKHR enabledRayTracingPipelineFeatures{};
++	VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR enabledRayTracingPositionFetchFeatures{};
+@@ -92 +93,2 @@ class VulkanExample : public VulkanExampleBase
+-		enabledDeviceExtensions.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
++		enabledDeviceExtensions.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
++		enabledDeviceExtensions.push_back(VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME);
+@@ -407,2 +409,15 @@ class VulkanExample : public VulkanExampleBase
 +		if (const char* affineInstance = std::getenv("VENTUS_RT_SAMPLE_AFFINE_INSTANCE");
 +		    affineInstance && std::strtoul(affineInstance, nullptr, 0) != 0) {
 +			transformMatrix = {
@@ -19,10 +27,24 @@ diff --git a/examples/raytracingbasic/raytracingbasic.cpp b/examples/raytracingb
 +		} else {
 +			instance.instanceCustomIndex = 0;
 +		}
+@@ -741 +756,5 @@ class VulkanExample : public VulkanExampleBase
+-		enabledAccelerationStructureFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
++		enabledRayTracingPositionFetchFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR;
++		enabledRayTracingPositionFetchFeatures.rayTracingPositionFetch = VK_TRUE;
++		enabledRayTracingPositionFetchFeatures.pNext = &enabledRayTracingPipelineFeatures;
++
++		enabledAccelerationStructureFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+@@ -743 +762 @@ class VulkanExample : public VulkanExampleBase
+-		enabledAccelerationStructureFeatures.pNext = &enabledRayTracingPipelineFeatures;
++		enabledAccelerationStructureFeatures.pNext = &enabledRayTracingPositionFetchFeatures;
 diff --git a/shaders/glsl/raytracingbasic/closesthit.rchit b/shaders/glsl/raytracingbasic/closesthit.rchit
 --- a/shaders/glsl/raytracingbasic/closesthit.rchit
 +++ b/shaders/glsl/raytracingbasic/closesthit.rchit
-@@ -11 +11,33 @@ void main()
+@@ -2 +2,2 @@
+-#extension GL_EXT_ray_tracing : enable
++#extension GL_EXT_ray_tracing : enable
++#extension GL_EXT_ray_tracing_position_fetch : require
+@@ -11 +12,41 @@ void main()
 -  hitValue = barycentricCoords;
 +  const uint instanceCustomIndex = gl_InstanceCustomIndexEXT;
 +  if (instanceCustomIndex == 0u)
@@ -54,6 +76,14 @@ diff --git a/shaders/glsl/raytracingbasic/closesthit.rchit b/shaders/glsl/raytra
 +      length(reconstructedWorldDirection - gl_WorldRayDirectionEXT);
 +    hitValue = matrixError < 0.0001f && rayError < 0.0001f
 +      ? vec3(0.0f, 1.0f, 0.0f)
++      : vec3(1.0f, 0.0f, 0.0f);
++  } else if (instanceCustomIndex == 0x5cu) {
++    const float vertexError =
++      length(gl_HitTriangleVertexPositionsEXT[0] - vec3(1.0f, 1.0f, 0.0f)) +
++      length(gl_HitTriangleVertexPositionsEXT[1] - vec3(-1.0f, 1.0f, 0.0f)) +
++      length(gl_HitTriangleVertexPositionsEXT[2] - vec3(0.0f, -1.0f, 0.0f));
++    hitValue = vertexError < 0.0001f
++      ? vec3(0.0f, 0.0f, 1.0f)
 +      : vec3(1.0f, 0.0f, 0.0f);
 +  } else
 +    hitValue = vec3(0.0f, 1.0f, 1.0f);

@@ -1,0 +1,104 @@
+diff --git a/examples/raytracingcallable/raytracingcallable.cpp b/examples/raytracingcallable/raytracingcallable.cpp
+--- a/examples/raytracingcallable/raytracingcallable.cpp
++++ b/examples/raytracingcallable/raytracingcallable.cpp
+@@ -13,0 +14 @@
++#include <cstdlib>
+@@ -44,0 +46,2 @@
++	bool useCallableRecordData = false;
++	std::string callableShaderOverride{};
+@@ -48,0 +52,7 @@
++		const char* recordDataEnv = std::getenv("VENTUS_CALLABLE_RECORD_DATA_ALT");
++		useCallableRecordData =
++			recordDataEnv && std::strtoul(recordDataEnv, nullptr, 0) != 0;
++		const std::string negativeCallableMode =
++			std::getenv("VENTUS_CALLABLE_NEGATIVE") ? std::getenv("VENTUS_CALLABLE_NEGATIVE") : "";
++		if (negativeCallableMode == "nested")
++			callableShaderOverride = "callable_nested.rcall.spv";
+@@ -336 +346,18 @@
+-		createShaderBindingTable(shaderBindingTables.callable, objectCount);
++		uint32_t callableRecordStride = handleSizeAligned;
++		if (useCallableRecordData) {
++			callableRecordStride = vks::tools::alignedSize(handleSize + sizeof(uint32_t), rayTracingPipelineProperties.shaderGroupHandleAlignment);
++			const VkBufferUsageFlags callableBufferUsage = VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
++			const VkMemoryPropertyFlags callableMemoryUsage = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
++			VK_CHECK_RESULT(vulkanDevice->createBuffer(
++				callableBufferUsage,
++				callableMemoryUsage,
++				&shaderBindingTables.callable,
++				callableRecordStride * objectCount));
++			shaderBindingTables.callable.stridedDeviceAddressRegion.deviceAddress =
++				getBufferDeviceAddress(shaderBindingTables.callable.buffer);
++			shaderBindingTables.callable.stridedDeviceAddressRegion.stride = callableRecordStride;
++			shaderBindingTables.callable.stridedDeviceAddressRegion.size = callableRecordStride * objectCount;
++			shaderBindingTables.callable.map();
++		} else {
++			createShaderBindingTable(shaderBindingTables.callable, objectCount);
++		}
+@@ -342 +369,14 @@
+-		memcpy(shaderBindingTables.callable.mapped, shaderHandleStorage.data() + handleSizeAligned * 3, handleSize * 3);
++		if (useCallableRecordData) {
++			const std::array<uint32_t, 3> callableRecordIds = {
++				1u,
++				2u,
++				3u
++			};
++			for (uint32_t i = 0; i < objectCount; i++) {
++				uint8_t* record = static_cast<uint8_t*>(shaderBindingTables.callable.mapped) + i * callableRecordStride;
++				memcpy(record, shaderHandleStorage.data() + handleSizeAligned * (3 + i), handleSize);
++				memcpy(record + handleSize, &callableRecordIds[i], sizeof(uint32_t));
++			}
++		} else {
++			memcpy(shaderBindingTables.callable.mapped, shaderHandleStorage.data() + handleSizeAligned * 3, handleSize * 3);
++		}
+@@ -465 +505,8 @@
+-			shaderStages.push_back(loadShader(getShadersPath() + "raytracingcallable/callable" + std::to_string(i+1) + ".rcall.spv", VK_SHADER_STAGE_CALLABLE_BIT_KHR));
++			std::string callableShaderName;
++			if (!callableShaderOverride.empty())
++				callableShaderName = callableShaderOverride;
++			else if (useCallableRecordData)
++				callableShaderName = "callable_record_data.rcall.spv";
++			else
++				callableShaderName = "callable" + std::to_string(i+1) + ".rcall.spv";
++			shaderStages.push_back(loadShader(getShadersPath() + "raytracingcallable/" + callableShaderName, VK_SHADER_STAGE_CALLABLE_BIT_KHR));
+diff --git a/shaders/glsl/raytracingcallable/callable_record_data.rcall b/shaders/glsl/raytracingcallable/callable_record_data.rcall
+new file mode 100644
+--- /dev/null
++++ b/shaders/glsl/raytracingcallable/callable_record_data.rcall
+@@ -0,0 +1,20 @@
++#version 460 core
++#extension GL_EXT_ray_tracing : enable
++
++layout(location = 0) callableDataInEXT vec3 outColor;
++
++layout(shaderRecordEXT, std430) buffer CallableRecord {
++	uint recordId;
++} callableRecord;
++
++void main()
++{
++	if (callableRecord.recordId == 1u)
++		outColor = vec3(1.0, 0.0, 0.0);
++	else if (callableRecord.recordId == 2u)
++		outColor = vec3(0.0, 0.0, 1.0);
++	else if (callableRecord.recordId == 3u)
++		outColor = vec3(1.0, 1.0, 0.0);
++	else
++		outColor = vec3(1.0, 0.0, 1.0);
++}
+diff --git a/shaders/glsl/raytracingcallable/callable_nested.rcall b/shaders/glsl/raytracingcallable/callable_nested.rcall
+new file mode 100644
+--- /dev/null
++++ b/shaders/glsl/raytracingcallable/callable_nested.rcall
+@@ -0,0 +1,12 @@
++#version 460 core
++#extension GL_EXT_ray_tracing : enable
++
++layout(location = 0) callableDataInEXT vec3 outColor;
++layout(location = 1) callableDataEXT vec3 nestedColor;
++
++void main()
++{
++	nestedColor = outColor;
++	executeCallableEXT(0, 1);
++	outColor = nestedColor;
++}

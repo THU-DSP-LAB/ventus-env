@@ -305,6 +305,7 @@ build_rt_workload() {
     raytracingshadows \
     raytracingintersection \
     raytracingsbtdata \
+    raytracingcallable \
     raytracingreflections \
     raytracingtextures
 }

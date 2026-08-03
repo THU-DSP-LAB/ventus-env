@@ -5,6 +5,8 @@ set -euo pipefail
 # dynamically selected callable SBT record, not from the caller's SBT record.
 
 ENV_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${ENV_ROOT}/tools/rtcore/rt_profile.sh"
+RT_PROFILE="$(ventus_rt_execution_profile)"
 WORKLOAD_DIR="${WORKLOAD_DIR:-${ENV_ROOT}/build/rt-workload/source}"
 APP="${APP:-${ENV_ROOT}/build/rt-workload/build/bin/raytracingcallable}"
 RUNNER="${RUNNER:-${ENV_ROOT}/tools/rtcore/run_full_app_spike.sh}"
@@ -41,7 +43,7 @@ RUN_160X96=1 \
 RUN_320X192=0 \
 VENTUS_VK_NIR_PROBE=1 \
 VENTUS_VK_PROBE_LOG=1 \
-VENTUS_VK_RT_EXECUTION_PROFILE=global \
+VENTUS_VK_RT_EXECUTION_PROFILE="${RT_PROFILE}" \
 "${RUNNER}"
 
 PPM="${OUT_DIR}/160x96/raytracingcallable_spike.ppm"
@@ -51,7 +53,12 @@ LOG="${OUT_DIR}/160x96/raytracingcallable.log"
 
 rg -q 'driver bridge callable SBT .* size=192 stride=64' "${LOG}" ||
   die "driver bridge did not preserve the 64-byte callable records"
-rg -q 'before global CPS ABI lowering stage=closest hit trace_ray=0 execute_callable=0' \
+if [[ "${RT_PROFILE}" == "global" ]]; then
+  ABI_PROBE_LABEL='before global CPS ABI lowering'
+else
+  ABI_PROBE_LABEL='before vt_nir_lower_rt_payload'
+fi
+rg -q "${ABI_PROBE_LABEL} stage=closest hit trace_ray=0 execute_callable=0" \
   "${LOG}" || die "Ventus callable lowering did not consume executeCallableEXT"
 
 actual_sha="$(sha256sum "${PPM}" | awk '{print $1}')"

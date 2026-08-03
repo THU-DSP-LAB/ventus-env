@@ -5,6 +5,8 @@ set -euo pipefail
 # Vulkan rendering on the Ventus Spike-backed path.
 
 ENV_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${ENV_ROOT}/tools/rtcore/rt_profile.sh"
+RT_PROFILE="$(ventus_rt_execution_profile)"
 WORKLOAD_DIR="${WORKLOAD_DIR:-${ENV_ROOT}/build/rt-workload/source}"
 APP="${APP:-${ENV_ROOT}/build/rt-workload/build/bin/raytracingbasic}"
 RUNNER="${RUNNER:-${ENV_ROOT}/tools/rtcore/run_full_app_spike.sh}"
@@ -52,7 +54,7 @@ run_case() {
   RUN_320X192=0 \
   VENTUS_RT_SAMPLE_AFFINE_INSTANCE="${affine}" \
   VENTUS_RT_SAMPLE_INSTANCE_CUSTOM_INDEX="${custom_index}" \
-  VENTUS_VK_RT_EXECUTION_PROFILE=global \
+  VENTUS_VK_RT_EXECUTION_PROFILE="${RT_PROFILE}" \
   "${RUNNER}"
 }
 

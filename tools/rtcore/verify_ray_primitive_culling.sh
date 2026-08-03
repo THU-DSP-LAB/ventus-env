@@ -2,9 +2,11 @@
 set -euo pipefail
 
 # Prove selective SkipTriangles and SkipAABBs behavior through the live
-# Vulkan -> compiler -> global queue -> Spike RTcore path.
+# Vulkan -> compiler -> selected RT backend -> Spike RTcore path.
 
 ENV_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${ENV_ROOT}/tools/rtcore/rt_profile.sh"
+RT_PROFILE="$(ventus_rt_execution_profile)"
 WORKLOAD_DIR="${WORKLOAD_DIR:-${ENV_ROOT}/build/rt-workload/source}"
 APP_DIR="${APP_DIR:-${ENV_ROOT}/build/rt-workload/build/bin}"
 RUNNER="${RUNNER:-${ENV_ROOT}/tools/rtcore/run_full_app_spike.sh}"
@@ -35,7 +37,7 @@ run_case() {
   RUN_16X16=1 \
   RUN_160X96=0 \
   RUN_320X192=0 \
-  VENTUS_VK_RT_EXECUTION_PROFILE=global \
+  VENTUS_VK_RT_EXECUTION_PROFILE="${RT_PROFILE}" \
   VENTUS_RT_SAMPLE_RAY_FLAGS="${ray_flags}" \
   VENTUS_RT_SAMPLE_INSTANCE_FLAGS=1 \
   "${RUNNER}" >/dev/null

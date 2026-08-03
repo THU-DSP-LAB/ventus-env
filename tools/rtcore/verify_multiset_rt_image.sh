@@ -6,6 +6,8 @@ set -euo pipefail
 # must remain pixel-identical to its frozen single-set baseline.
 
 ENV_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${ENV_ROOT}/tools/rtcore/rt_profile.sh"
+RT_PROFILE="$(ventus_rt_execution_profile)"
 WORKLOAD_DIR="${WORKLOAD_DIR:-${ENV_ROOT}/build/rt-workload/source}"
 APP="${APP:-${ENV_ROOT}/build/rt-workload/build/bin/raytracingbasic}"
 RUNNER="${RUNNER:-${ENV_ROOT}/tools/rtcore/run_full_app_spike.sh}"
@@ -38,7 +40,7 @@ RUN_16X16=0 \
 RUN_160X96=1 \
 RUN_320X192=0 \
 VENTUS_VK_PROBE_LOG=1 \
-VENTUS_VK_RT_EXECUTION_PROFILE=global \
+VENTUS_VK_RT_EXECUTION_PROFILE="${RT_PROFILE}" \
 "${RUNNER}"
 
 PPM="${OUT_DIR}/160x96/raytracingbasic_spike.ppm"

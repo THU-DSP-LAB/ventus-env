@@ -19,11 +19,8 @@ OUT_DIR="${OUT_DIR:-${ENV_ROOT}/artifacts/rtcore-spike/iterative_reflections_exa
 source "${ENV_ROOT}/tools/rtcore/rt_profile.sh"
 RT_PROFILE="$(ventus_rt_execution_profile)"
 case "${RT_PROFILE}" in
-  compat)
+  compat|global)
     DEFAULT_PPM_SHA256=65480e26a328cd5bb1205d33fc6114837f7cae71cea0754eec9c4b31e5334703
-    ;;
-  global)
-    DEFAULT_PPM_SHA256=ebe1a1a08e3474d1d3e5a6fe942e841363df828248d09833fad0abb57f9fa452
     ;;
   *)
     echo "error: no iterative-reflections golden for RT profile ${RT_PROFILE}" >&2

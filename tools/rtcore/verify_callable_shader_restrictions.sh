@@ -6,6 +6,8 @@ set -euo pipefail
 # explicit compiler rejection even though glslang cannot produce that stage.
 
 ENV_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${ENV_ROOT}/tools/rtcore/rt_profile.sh"
+RT_PROFILE="$(ventus_rt_execution_profile)"
 WORKLOAD_DIR="${WORKLOAD_DIR:-${ENV_ROOT}/build/rt-workload/source}"
 APP="${APP:-${ENV_ROOT}/build/rt-workload/build/bin/raytracingcallable}"
 RUNNER="${RUNNER:-${ENV_ROOT}/tools/rtcore/run_full_app_spike.sh}"
@@ -17,10 +19,7 @@ die() {
   exit 1
 }
 
-for tool in rg; do
-  command -v "${tool}" >/dev/null 2>&1 ||
-    die "required tool not found: ${tool}"
-done
+command -v rg >/dev/null 2>&1 || die "required tool not found: rg"
 
 [[ -x "${APP}" ]] || die "raytracingcallable executable not found: ${APP}"
 [[ -x "${RUNNER}" ]] || die "runner not found: ${RUNNER}"
@@ -38,7 +37,7 @@ if VENTUS_CALLABLE_NEGATIVE=nested \
    RUN_16X16=0 \
    RUN_160X96=0 \
    RUN_320X192=0 \
-   VENTUS_VK_RT_EXECUTION_PROFILE=global \
+   VENTUS_VK_RT_EXECUTION_PROFILE="${RT_PROFILE}" \
    "${RUNNER}"; then
   die "nested callable pipeline unexpectedly compiled"
 fi
@@ -55,4 +54,4 @@ rg -q 'nir_intrinsic_trace_ray' "${PIPELINE_SOURCE}" ||
 rg -q 'callable-originated traceRayEXT is not' "${PIPELINE_SOURCE}" ||
   die "callable traceRayEXT rejection diagnostic is missing"
 
-echo "PASS callable-shader-restrictions nested=live-rejected traceRay=frontend-unrepresentable-and-compiler-guarded"
+echo "PASS callable-shader-restrictions profile=${RT_PROFILE} nested=live-rejected traceRay=frontend-unrepresentable-and-compiler-guarded"

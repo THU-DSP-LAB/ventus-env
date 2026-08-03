@@ -18,12 +18,7 @@ OUT_DIR="${OUT_DIR:-${ENV_ROOT}/artifacts/rtcore-spike/textured_any_hit_exact_im
 source "${ENV_ROOT}/tools/rtcore/rt_profile.sh"
 RT_PROFILE="$(ventus_rt_execution_profile)"
 case "${RT_PROFILE}" in
-  compat)
-    DEFAULT_PPM_SHA256=b38c155a8a65f0fdca801f382b5e2b57c63c9de4bac473a747989c8f3d9adaa1
-    ;;
-  global)
-    # Global continuation invokes miss after ignoreIntersectionEXT; compat
-    # preserves the historical black payload for the same rejected rays.
+  compat|global)
     DEFAULT_PPM_SHA256=0a11a83f1beca8bd433dd2f2652938596744a42841fd0ce304ac1c5c64fadae1
     ;;
   *)
@@ -133,11 +128,9 @@ gray = sum(
 )
 actual_sha = hashlib.sha256(data).hexdigest()
 
-coverage_incomplete = len(colors) < 2500 or gray < 3000
-if profile == "global":
-    coverage_incomplete |= background < 10000 or black != 0
-else:
-    coverage_incomplete |= background < 8500 or black < 900
+coverage_incomplete = (
+    len(colors) < 2500 or gray < 3000 or background < 10000 or black != 0
+)
 if coverage_incomplete:
     raise SystemExit(
         "textured transparency coverage is incomplete: "

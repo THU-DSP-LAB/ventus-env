@@ -95,8 +95,8 @@ rg -q 'stages=4 groups=3' "${LOG}" ||
   die "runtime log does not prove the four-stage RT pipeline"
 rg -q 'descriptors=4.*push=16' "${LOG}" ||
   die "runtime log does not prove the complete texture dispatch state"
-rg -q 'uploaded RT push constants bytes=16 relocated_buffer_addresses=2' "${LOG}" ||
-  die "runtime log does not prove both buffer addresses were relocated"
+rg -q 'uploaded opaque RT push constants bytes=16' "${LOG}" ||
+  die "runtime log does not prove opaque push-constant upload"
 rg -q 'driver bridge executed raygen kernel' "${LOG}" ||
   die "runtime log does not prove Spike execution completed"
 if rg -q 'load access fault|bad syscall|failed|unsupported texture operation' "${LOG}"; then

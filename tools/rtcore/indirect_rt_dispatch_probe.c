@@ -100,6 +100,19 @@ static struct address_buffer create_address_buffer(VkDevice device,
   result.address = vkGetBufferDeviceAddress(device, &address_info);
   if (!result.address)
     fail("bound device-address buffer returned address zero");
+  if (vkGetBufferDeviceAddress(device, &address_info) != result.address)
+    fail("buffer device address changed across repeated queries");
+  if ((result.address >> 32) != 0 || result.address < 0x90000000ull)
+    fail("buffer device address is outside the RV32 Ventus DVA profile");
+
+  void *mapped = NULL;
+  require_result(vkMapMemory(device, result.memory, 0,
+                             requirements.memoryRequirements.size, 0,
+                             &mapped),
+                 "vkMapMemory(address identity)");
+  if ((VkDeviceAddress)(uintptr_t)mapped == result.address)
+    fail("buffer device address leaked the host mapping pointer");
+  vkUnmapMemory(device, result.memory);
   return result;
 }
 
@@ -118,6 +131,130 @@ static void write_address_buffer(VkDevice device,
                  "vkMapMemory");
   memcpy(mapped, data, (size_t)size);
   vkUnmapMemory(device, buffer.memory);
+}
+
+static VkDeviceAddress query_address_with_contract(VkDevice device,
+                                                   VkBufferUsageFlags usage,
+                                                   VkMemoryAllocateFlags flags) {
+  VkBuffer buffer = VK_NULL_HANDLE;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  const VkBufferCreateInfo buffer_info = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = 64,
+      .usage = usage,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+  };
+  require_result(vkCreateBuffer(device, &buffer_info, NULL, &buffer),
+                 "vkCreateBuffer(BDA contract)");
+
+  const VkBufferMemoryRequirementsInfo2 requirements_info = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2,
+      .buffer = buffer,
+  };
+  VkMemoryRequirements2 requirements = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
+  };
+  vkGetBufferMemoryRequirements2(device, &requirements_info, &requirements);
+  const VkMemoryAllocateFlagsInfo flags_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+      .flags = flags,
+  };
+  const VkMemoryAllocateInfo allocation_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .pNext = flags ? &flags_info : NULL,
+      .allocationSize = requirements.memoryRequirements.size,
+      .memoryTypeIndex = 0,
+  };
+  require_result(vkAllocateMemory(device, &allocation_info, NULL, &memory),
+                 "vkAllocateMemory(BDA contract)");
+  const VkBindBufferMemoryInfo bind_info = {
+      .sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
+      .buffer = buffer,
+      .memory = memory,
+  };
+  require_result(vkBindBufferMemory2(device, 1, &bind_info),
+                 "vkBindBufferMemory2(BDA contract)");
+  const VkBufferDeviceAddressInfo address_info = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+      .buffer = buffer,
+  };
+  const VkDeviceAddress address =
+      vkGetBufferDeviceAddress(device, &address_info);
+  vkDestroyBuffer(device, buffer, NULL);
+  vkFreeMemory(device, memory, NULL);
+  return address;
+}
+
+static void check_device_address_aliasing(VkDevice device) {
+  VkBuffer buffers[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+  const VkBufferCreateInfo buffer_info = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = 64,
+      .usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+  };
+  for (uint32_t i = 0; i < 3; ++i)
+    require_result(vkCreateBuffer(device, &buffer_info, NULL, &buffers[i]),
+                   "vkCreateBuffer(BDA aliasing)");
+
+  const VkMemoryAllocateFlagsInfo flags_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+      .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT,
+  };
+  const VkMemoryAllocateInfo allocation_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .pNext = &flags_info,
+      .allocationSize = 128,
+      .memoryTypeIndex = 0,
+  };
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  require_result(vkAllocateMemory(device, &allocation_info, NULL, &memory),
+                 "vkAllocateMemory(BDA aliasing)");
+
+  const VkBindBufferMemoryInfo binds[3] = {
+      {.sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
+       .buffer = buffers[0], .memory = memory, .memoryOffset = 0},
+      {.sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
+       .buffer = buffers[1], .memory = memory, .memoryOffset = 0},
+      {.sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
+       .buffer = buffers[2], .memory = memory, .memoryOffset = 64},
+  };
+  require_result(vkBindBufferMemory2(device, 3, binds),
+                 "vkBindBufferMemory2(BDA aliasing)");
+
+  VkDeviceAddress addresses[3] = {0, 0, 0};
+  for (uint32_t i = 0; i < 3; ++i) {
+    const VkBufferDeviceAddressInfo address_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+        .buffer = buffers[i],
+    };
+    addresses[i] = vkGetBufferDeviceAddress(device, &address_info);
+  }
+  if (!addresses[0] || addresses[0] != addresses[1] ||
+      addresses[2] != addresses[0] + 64)
+    fail("buffer device addresses do not preserve memory aliasing offsets");
+
+  for (uint32_t i = 0; i < 3; ++i)
+    vkDestroyBuffer(device, buffers[i], NULL);
+  vkFreeMemory(device, memory, NULL);
+}
+
+static void check_capture_replay_rejected(VkDevice device) {
+  const VkMemoryAllocateFlagsInfo flags_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+      .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT,
+  };
+  const VkMemoryAllocateInfo allocation_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .pNext = &flags_info,
+      .allocationSize = 64,
+      .memoryTypeIndex = 0,
+  };
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  VkResult result =
+      vkAllocateMemory(device, &allocation_info, NULL, &memory);
+  if (result != VK_ERROR_FEATURE_NOT_PRESENT || memory != VK_NULL_HANDLE)
+    fail("capture/replay device address allocation was not rejected");
 }
 
 int main(void) {
@@ -242,6 +379,24 @@ int main(void) {
   require_result(vkCreateDevice(physical_device, &device_info, NULL, &device),
                  "vkCreateDevice");
 
+  if (query_address_with_contract(
+          device, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+          VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT) != 0)
+    fail("buffer without SHADER_DEVICE_ADDRESS usage returned a BDA");
+  if (query_address_with_contract(
+          device, VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, 0) != 0)
+    fail("buffer backed by memory without DEVICE_ADDRESS flag returned a BDA");
+  const VkDeviceAddress reusable_address = query_address_with_contract(
+      device, VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+      VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT);
+  const VkDeviceAddress reused_address = query_address_with_contract(
+      device, VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+      VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT);
+  if (!reusable_address || reused_address != reusable_address)
+    fail("released Vulkan device address range was not reused");
+  check_device_address_aliasing(device);
+  check_capture_replay_rejected(device);
+
   PFN_vkCmdTraceRaysIndirectKHR trace_indirect =
       (PFN_vkCmdTraceRaysIndirectKHR)vkGetDeviceProcAddr(
           device, "vkCmdTraceRaysIndirectKHR");
@@ -286,6 +441,8 @@ int main(void) {
                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   const struct address_buffer short_range =
       create_address_buffer(device, 8, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  if (wrong_usage.address == short_range.address)
+    fail("simultaneously live device memory allocations overlap");
   const VkStridedDeviceAddressRegionKHR empty_region = {0};
 
   trace_indirect(command_buffer, &empty_region, &empty_region, &empty_region,

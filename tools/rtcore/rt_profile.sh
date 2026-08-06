@@ -43,5 +43,5 @@ ventus_rt_execution_profile() {
     return 0
   fi
 
-  printf 'global\n'
+  printf 'compat\n'
 }

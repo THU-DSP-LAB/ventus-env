@@ -135,6 +135,12 @@ run_case() {
     export VENTUS_VK_LLVM_NM="${LLVM_NM}"
     export VENTUS_VK_CRT0="${CRT0}"
     export VENTUS_VK_LLVM_TOOL_LIB_DIR="${LLVM_TOOL_LIB_DIR}"
+    # compat/global remains a test-harness selector while the ICD exposes
+    # execution policy only through the per-pipeline private pNext contract.
+    export VENTUS_VK_INTERNAL_RT_ORACLE_PROFILE="${RT_EXECUTION_PROFILE}"
+    unset VENTUS_VK_RT_EXECUTION_PROFILE
+    unset VENTUS_VK_RT_WAVEFRONT_GLOBAL
+    unset VENTUS_VK_RT_WAVEFRONT_MIRROR
     export VENTUS_SPIKE_LOG="${VENTUS_SPIKE_LOG:-0}"
     export LD_LIBRARY_PATH="${SPIKE_BUILD}:$(dirname "${DRIVER_LIB}"):${LLVM_TOOL_LIB_DIR}:${LD_LIBRARY_PATH:-}"
     "${app_command[@]}"

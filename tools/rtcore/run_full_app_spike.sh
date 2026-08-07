@@ -46,20 +46,20 @@ first_executable() {
 }
 
 DRIVER_LIB="${DRIVER_LIB:-${VENTUS_VK_DRIVER_LIB:-$(first_file \
-  "${VENTUS_INSTALL_PREFIX}/lib/libspike_driver.so" \
-  "${ROOT_DIR}/driver/build/driver/spike_device/libspike_driver.so" || true)}}"
+  "${ROOT_DIR}/driver/build/driver/spike_device/libspike_driver.so" \
+  "${VENTUS_INSTALL_PREFIX}/lib/libspike_driver.so" || true)}}"
 LLC="${VENTUS_VK_LLC:-$(first_executable \
-  "${VENTUS_INSTALL_PREFIX}/bin/llc" "${LLVM_BUILD}/bin/llc" || true)}"
+  "${LLVM_BUILD}/bin/llc" "${VENTUS_INSTALL_PREFIX}/bin/llc" || true)}"
 LD_LLD="${VENTUS_VK_LD_LLD:-$(first_executable \
-  "${VENTUS_INSTALL_PREFIX}/bin/ld.lld" "${LLVM_BUILD}/bin/ld.lld" || true)}"
+  "${LLVM_BUILD}/bin/ld.lld" "${VENTUS_INSTALL_PREFIX}/bin/ld.lld" || true)}"
 LLVM_NM="${VENTUS_VK_LLVM_NM:-$(first_executable \
-  "${VENTUS_INSTALL_PREFIX}/bin/llvm-nm" "${LLVM_BUILD}/bin/llvm-nm" || true)}"
+  "${LLVM_BUILD}/bin/llvm-nm" "${VENTUS_INSTALL_PREFIX}/bin/llvm-nm" || true)}"
 CRT0="${VENTUS_VK_CRT0:-$(first_file \
-  "${VENTUS_INSTALL_PREFIX}/lib/crt0.o" \
   "${ROOT_DIR}/llvm/build-rt-libclc/lib/crt0.o" \
   "${ROOT_DIR}/llvm/build-rt-libclc/riscv32/lib/CMakeFiles/ctr0_obj.dir/crt0.S.o" \
   "${ROOT_DIR}/llvm/build-libclc/lib/crt0.o" \
-  "${ROOT_DIR}/llvm/build-libclc/riscv32/lib/CMakeFiles/ctr0_obj.dir/crt0.S.o" || true)}"
+  "${ROOT_DIR}/llvm/build-libclc/riscv32/lib/CMakeFiles/ctr0_obj.dir/crt0.S.o" \
+  "${VENTUS_INSTALL_PREFIX}/lib/crt0.o" || true)}"
 LLVM_TOOL_LIB_DIR="${VENTUS_VK_LLVM_TOOL_LIB_DIR:-${LLVM_BUILD}/lib}"
 
 RUN_1X1="${RUN_1X1:-0}"

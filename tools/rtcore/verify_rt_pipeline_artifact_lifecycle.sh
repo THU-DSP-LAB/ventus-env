@@ -37,11 +37,9 @@ spike_log_count() {
 }
 
 run_1x1() {
-  local profile="$1"
-  local out_dir="$2"
-  shift 2
+  local out_dir="$1"
+  shift
   env \
-    VENTUS_VK_RT_EXECUTION_PROFILE="${profile}" \
     MESA_BUILD="${MESA_BUILD}" \
     DRIVER_LIB="${DRIVER_LIB}" \
     OUT_DIR="${out_dir}" \
@@ -67,7 +65,7 @@ done
 rm -rf -- "${OUT_BASE}"
 mkdir -p "${OUT_BASE}"
 
-if run_1x1 compat "${FAIL_OUT}" \
+if run_1x1 "${FAIL_OUT}" \
      VENTUS_VK_LLC=/bin/false \
      VENTUS_VK_RETAIN_SHADER_ARTIFACTS=0 \
      VENTUS_VK_DUMP_LLVM=0; then
@@ -86,7 +84,7 @@ fi
   die "partial RT compiler artifacts survived failed pipeline creation"
 
 for iteration in 1 2; do
-  run_1x1 global "${CLEAN_OUT}" \
+  run_1x1 "${CLEAN_OUT}" \
     VENTUS_VK_RETAIN_SHADER_ARTIFACTS=0 \
     VENTUS_VK_DUMP_LLVM=0
   CLEAN_PPM="${CLEAN_OUT}/1x1/raytracingshadows_spike.ppm"
@@ -100,7 +98,7 @@ for iteration in 1 2; do
     die "disabled Spike logging created sidecars in cleanup run ${iteration}"
 done
 
-run_1x1 global "${RETAIN_OUT}" \
+run_1x1 "${RETAIN_OUT}" \
   VENTUS_VK_RETAIN_SHADER_ARTIFACTS=1 \
   VENTUS_VK_DUMP_LLVM=0
 RETAIN_ARTIFACT_DIR="${RETAIN_OUT}/1x1/elf"
@@ -110,7 +108,7 @@ for suffix in .ll .emit.ll .ld .o .riscv; do
     die "debug retention did not preserve ${suffix} artifacts"
 done
 
-run_1x1 global "${LOG_OUT}" \
+run_1x1 "${LOG_OUT}" \
   VENTUS_SPIKE_LOG=1 \
   VENTUS_VK_RETAIN_SHADER_ARTIFACTS=0 \
   VENTUS_VK_DUMP_LLVM=0

@@ -17,15 +17,7 @@ OUT_DIR="${OUT_DIR:-${ENV_ROOT}/artifacts/rtcore-spike/textured_any_hit_exact_im
 
 source "${ENV_ROOT}/tools/rtcore/rt_profile.sh"
 RT_PROFILE="$(ventus_rt_execution_profile)"
-case "${RT_PROFILE}" in
-  compat|global)
-    DEFAULT_PPM_SHA256=0a11a83f1beca8bd433dd2f2652938596744a42841fd0ce304ac1c5c64fadae1
-    ;;
-  *)
-    echo "error: no textured-any-hit golden for RT profile ${RT_PROFILE}" >&2
-    exit 1
-    ;;
-esac
+DEFAULT_PPM_SHA256=0a11a83f1beca8bd433dd2f2652938596744a42841fd0ce304ac1c5c64fadae1
 EXPECTED_PPM_SHA256="${EXPECTED_PPM_SHA256:-${DEFAULT_PPM_SHA256}}"
 EXPECTED_UPSTREAM_COMMIT="3b843fbf667a89a1cfcc64405e9fc6f9018e03b4"
 EXPECTED_ASSET_SHA256="f27af40f84e22a1f9a423204af5cff1f822fe4c1cbf6a66247f191c842e9078b"

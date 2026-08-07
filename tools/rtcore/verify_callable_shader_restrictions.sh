@@ -37,7 +37,6 @@ if VENTUS_CALLABLE_NEGATIVE=nested \
    RUN_16X16=0 \
    RUN_160X96=0 \
    RUN_320X192=0 \
-   VENTUS_VK_RT_EXECUTION_PROFILE="${RT_PROFILE}" \
    "${RUNNER}"; then
   die "nested callable pipeline unexpectedly compiled"
 fi

@@ -42,7 +42,6 @@ RUN_160X96=1 \
 RUN_320X192=0 \
 VENTUS_VK_NIR_PROBE=1 \
 VENTUS_VK_PROBE_LOG=1 \
-VENTUS_VK_RT_EXECUTION_PROFILE="${RT_PROFILE}" \
 "${RUNNER}"
 
 PPM="${OUT_DIR}/160x96/raytracingcallable_spike.ppm"
@@ -52,11 +51,7 @@ LOG="${OUT_DIR}/160x96/raytracingcallable.log"
 
 rg -q 'stage=closest hit trace_ray=0 execute_callable=1' "${LOG}" ||
   die "SPIR-V frontend did not expose executeCallableEXT"
-if [[ "${RT_PROFILE}" == "global" ]]; then
-  ABI_PROBE_LABEL='before global CPS ABI lowering'
-else
-  ABI_PROBE_LABEL='before vt_nir_lower_rt_payload'
-fi
+ABI_PROBE_LABEL='before vt_nir_lower_rt_payload'
 rg -q "${ABI_PROBE_LABEL} stage=closest hit trace_ray=0 execute_callable=0" \
   "${LOG}" || die "Ventus callable lowering did not consume executeCallableEXT"
 rg -q 'driver bridge callable SBT .* size=96 stride=32' "${LOG}" ||

@@ -37,7 +37,6 @@ run_case() {
   RUN_16X16=1 \
   RUN_160X96=0 \
   RUN_320X192=0 \
-  VENTUS_VK_RT_EXECUTION_PROFILE="${RT_PROFILE}" \
   VENTUS_RT_SAMPLE_RAY_FLAGS="${ray_flags}" \
   VENTUS_RT_SAMPLE_INSTANCE_FLAGS="${instance_flags}" \
   "${RUNNER}" >/dev/null

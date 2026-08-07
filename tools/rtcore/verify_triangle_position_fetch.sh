@@ -47,7 +47,6 @@ run_case() {
   RUN_160X96=0 \
   RUN_320X192=0 \
   VENTUS_RT_SAMPLE_INSTANCE_CUSTOM_INDEX="${custom_index}" \
-  VENTUS_VK_RT_EXECUTION_PROFILE="${RT_PROFILE}" \
   "${RUNNER}"
 }
 

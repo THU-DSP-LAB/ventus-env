@@ -24,6 +24,37 @@ static void require_result(VkResult result, const char *operation) {
   exit(EXIT_FAILURE);
 }
 
+static void submit_rejected_rt_command(
+    VkQueue queue, VkCommandBuffer command_buffer,
+    const VkCommandBufferBeginInfo *begin_info,
+    PFN_vkQueueSubmit2 queue_submit2) {
+  require_result(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
+  VkResult result;
+  if (queue_submit2) {
+    const VkCommandBufferSubmitInfo command_buffer_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+        .commandBuffer = command_buffer,
+    };
+    const VkSubmitInfo2 submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+        .commandBufferInfoCount = 1,
+        .pCommandBufferInfos = &command_buffer_info,
+    };
+    result = queue_submit2(queue, 1, &submit_info, VK_NULL_HANDLE);
+  } else {
+    const VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &command_buffer,
+    };
+    result = vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE);
+  }
+  if (result != VK_ERROR_DEVICE_LOST)
+    fail("invalid RT command was not rejected during queue submission");
+  require_result(vkBeginCommandBuffer(command_buffer, begin_info),
+                 "vkBeginCommandBuffer after rejected submit");
+}
+
 static uint32_t find_queue_family(VkPhysicalDevice physical_device) {
   uint32_t count = 0;
   vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &count, NULL);
@@ -264,7 +295,7 @@ int main(void) {
       .applicationVersion = 1,
       .pEngineName = "none",
       .engineVersion = 1,
-      .apiVersion = VK_API_VERSION_1_2,
+      .apiVersion = VK_API_VERSION_1_3,
   };
   const VkInstanceCreateInfo instance_info = {
       .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -378,6 +409,10 @@ int main(void) {
   VkDevice device = VK_NULL_HANDLE;
   require_result(vkCreateDevice(physical_device, &device_info, NULL, &device),
                  "vkCreateDevice");
+  VkQueue queue = VK_NULL_HANDLE;
+  vkGetDeviceQueue(device, queue_family, 0, &queue);
+  if (queue == VK_NULL_HANDLE)
+    fail("vkGetDeviceQueue returned a null queue");
 
   if (query_address_with_contract(
           device, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -407,6 +442,10 @@ int main(void) {
           device, "vkCmdTraceRaysIndirect2KHR");
   if (!trace_indirect2)
     fail("vkCmdTraceRaysIndirect2KHR device entrypoint is unavailable");
+  PFN_vkQueueSubmit2 queue_submit2 =
+      (PFN_vkQueueSubmit2)vkGetDeviceProcAddr(device, "vkQueueSubmit2");
+  if (!queue_submit2)
+    fail("vkQueueSubmit2 device entrypoint is unavailable");
   PFN_vkCmdBuildAccelerationStructuresIndirectKHR build_as_indirect =
       (PFN_vkCmdBuildAccelerationStructuresIndirectKHR)vkGetDeviceProcAddr(
           device, "vkCmdBuildAccelerationStructuresIndirectKHR");
@@ -447,13 +486,22 @@ int main(void) {
 
   trace_indirect(command_buffer, &empty_region, &empty_region, &empty_region,
                  &empty_region, wrong_usage.address + 2);
+  submit_rejected_rt_command(queue, command_buffer, &begin_info, NULL);
   trace_indirect(command_buffer, &empty_region, &empty_region, &empty_region,
                  &empty_region, wrong_usage.address);
+  submit_rejected_rt_command(queue, command_buffer, &begin_info, NULL);
   trace_indirect(command_buffer, &empty_region, &empty_region, &empty_region,
                  &empty_region, short_range.address);
+  submit_rejected_rt_command(queue, command_buffer, &begin_info, NULL);
   trace_indirect2(command_buffer, wrong_usage.address + 2);
+  submit_rejected_rt_command(queue, command_buffer, &begin_info,
+                             queue_submit2);
   trace_indirect2(command_buffer, wrong_usage.address);
+  submit_rejected_rt_command(queue, command_buffer, &begin_info,
+                             queue_submit2);
   trace_indirect2(command_buffer, short_range.address);
+  submit_rejected_rt_command(queue, command_buffer, &begin_info,
+                             queue_submit2);
 
   const VkAccelerationStructureBuildGeometryInfoKHR invalid_build_info = {
       .sType =

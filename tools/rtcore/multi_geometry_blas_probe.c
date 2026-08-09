@@ -179,6 +179,17 @@ upload_buffer(VkDevice device, const struct probe_buffer *buffer,
    vkUnmapMemory(device, buffer->memory);
 }
 
+static uint8_t *
+map_buffer(VkDevice device, const struct probe_buffer *buffer,
+           const char *operation)
+{
+   void *mapping = NULL;
+   require_result(vkMapMemory(device, buffer->memory, 0, buffer->size, 0,
+                              &mapping),
+                  operation);
+   return mapping;
+}
+
 static void
 destroy_buffer(VkDevice device, struct probe_buffer *buffer)
 {
@@ -606,12 +617,13 @@ main(void)
    if (as_address != prebuild_as_address ||
        clone_address != prebuild_clone_address)
       fail("build or clone changed an acceleration structure address");
-   if (memcmp((const void *)(uintptr_t)as_address,
-              (const void *)(uintptr_t)clone_address,
-              source_as_size) != 0)
+   uint8_t *source_as_data =
+      map_buffer(device, &as_buffer, "vkMapMemory(source AS)");
+   uint8_t *as_data =
+      map_buffer(device, &clone_buffer, "vkMapMemory(clone AS)");
+   if (memcmp(source_as_data, as_data, source_as_size) != 0)
       fail("cloned acceleration structure byte image differs from source");
 
-   const uint8_t *as_data = (const uint8_t *)(uintptr_t)clone_address;
    if (load_u32(as_data, VENTUS_AS_HEADER_MAGIC) != VENTUS_AS_MAGIC)
       fail("built object does not contain a VTAS header");
    if (load_u32(as_data, VENTUS_AS_HEADER_TYPE) != VENTUS_AS_TYPE_BLAS)
@@ -737,10 +749,10 @@ main(void)
    submit_and_wait(device, queue, compact_command_buffer);
    const VkDeviceAddress compact_address =
       as_functions.get_address(device, &compact_address_info);
+   uint8_t *compact_data =
+      map_buffer(device, &compact_buffer, "vkMapMemory(compact AS)");
    if (compact_address != prebuild_compact_address ||
-       memcmp((const void *)(uintptr_t)compact_address,
-              (const void *)(uintptr_t)clone_address,
-              compact_query_result[0]) != 0)
+       memcmp(compact_data, as_data, compact_query_result[0]) != 0)
       fail("compact copy changed its address or VTAS used bytes");
 
    const VkAccelerationStructureInstanceKHR tlas_instance = {
@@ -848,7 +860,8 @@ main(void)
       as_functions.get_address(device, &tlas_address_info);
    if (tlas_address != prebuild_tlas_address)
       fail("TLAS build changed its acceleration structure address");
-   const uint8_t *tlas_data = (const uint8_t *)(uintptr_t)tlas_address;
+   uint8_t *tlas_data =
+      map_buffer(device, &tlas_buffer, "vkMapMemory(TLAS)");
    if (load_u32(tlas_data, VENTUS_AS_HEADER_TYPE) != VENTUS_AS_TYPE_TLAS ||
        load_u32(tlas_data, VENTUS_AS_HEADER_INSTANCE_COUNT) != 1)
       fail("pointer-array build did not produce a one-instance TLAS");
@@ -883,11 +896,9 @@ main(void)
    submit_and_wait(device, queue, update_command_buffer);
    if (as_functions.get_address(device, &clone_address_info) != clone_address)
       fail("in-place AS update changed the clone address");
-   require_f32(load_f32((const uint8_t *)(uintptr_t)clone_address,
-                        VENTUS_AS_HEADER_ROOT_AABB_MIN_X),
+   require_f32(load_f32(as_data, VENTUS_AS_HEADER_ROOT_AABB_MIN_X),
                -3.0f, "updated_clone.root_aabb.min.x");
-   require_f32(load_f32((const uint8_t *)(uintptr_t)as_address,
-                        VENTUS_AS_HEADER_ROOT_AABB_MIN_X),
+   require_f32(load_f32(source_as_data, VENTUS_AS_HEADER_ROOT_AABB_MIN_X),
                -2.25f, "source_after_clone_update.root_aabb.min.x");
 
    const uint32_t empty_primitive_count = 0;
@@ -941,7 +952,8 @@ main(void)
    };
    const VkDeviceAddress empty_address =
       as_functions.get_address(device, &empty_address_info);
-   const uint8_t *empty_data = (const uint8_t *)(uintptr_t)empty_address;
+   uint8_t *empty_data =
+      map_buffer(device, &empty_as_buffer, "vkMapMemory(empty AS)");
    if (!empty_address ||
        load_u32(empty_data, VENTUS_AS_HEADER_ROOT_NODE_REF) !=
           VENTUS_AS_INVALID_NODE ||
@@ -975,6 +987,11 @@ main(void)
           sizeof(VkTransformMatrixKHR));
 
    vkDeviceWaitIdle(device);
+   vkUnmapMemory(device, empty_as_buffer.memory);
+   vkUnmapMemory(device, tlas_buffer.memory);
+   vkUnmapMemory(device, compact_buffer.memory);
+   vkUnmapMemory(device, clone_buffer.memory);
+   vkUnmapMemory(device, as_buffer.memory);
    vkDestroyQueryPool(device, compact_query_pool, NULL);
    vkDestroyCommandPool(device, command_pool, NULL);
    as_functions.destroy(device, empty_as, NULL);

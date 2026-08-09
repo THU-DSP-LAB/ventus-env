@@ -24,7 +24,7 @@ static void require_result(VkResult result, const char *operation) {
   exit(EXIT_FAILURE);
 }
 
-static void submit_rejected_rt_command(
+static void submit_rejected_command(
     VkQueue queue, VkCommandBuffer command_buffer,
     const VkCommandBufferBeginInfo *begin_info,
     PFN_vkQueueSubmit2 queue_submit2) {
@@ -49,8 +49,8 @@ static void submit_rejected_rt_command(
     };
     result = vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE);
   }
-  if (result != VK_ERROR_DEVICE_LOST)
-    fail("invalid RT command was not rejected during queue submission");
+  if (result == VK_SUCCESS)
+    fail("invalid recorded command was not rejected during queue submission");
   require_result(vkBeginCommandBuffer(command_buffer, begin_info),
                  "vkBeginCommandBuffer after rejected submit");
 }
@@ -486,29 +486,31 @@ int main(void) {
 
   trace_indirect(command_buffer, &empty_region, &empty_region, &empty_region,
                  &empty_region, wrong_usage.address + 2);
-  submit_rejected_rt_command(queue, command_buffer, &begin_info, NULL);
+  submit_rejected_command(queue, command_buffer, &begin_info, NULL);
   trace_indirect(command_buffer, &empty_region, &empty_region, &empty_region,
                  &empty_region, wrong_usage.address);
-  submit_rejected_rt_command(queue, command_buffer, &begin_info, NULL);
+  submit_rejected_command(queue, command_buffer, &begin_info, NULL);
   trace_indirect(command_buffer, &empty_region, &empty_region, &empty_region,
                  &empty_region, short_range.address);
-  submit_rejected_rt_command(queue, command_buffer, &begin_info, NULL);
+  submit_rejected_command(queue, command_buffer, &begin_info, NULL);
   trace_indirect2(command_buffer, wrong_usage.address + 2);
-  submit_rejected_rt_command(queue, command_buffer, &begin_info,
-                             queue_submit2);
+  submit_rejected_command(queue, command_buffer, &begin_info, queue_submit2);
   trace_indirect2(command_buffer, wrong_usage.address);
-  submit_rejected_rt_command(queue, command_buffer, &begin_info,
-                             queue_submit2);
+  submit_rejected_command(queue, command_buffer, &begin_info, queue_submit2);
   trace_indirect2(command_buffer, short_range.address);
-  submit_rejected_rt_command(queue, command_buffer, &begin_info,
-                             queue_submit2);
+  submit_rejected_command(queue, command_buffer, &begin_info, queue_submit2);
 
+  const VkAccelerationStructureGeometryKHR dummy_geometry = {
+      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+      .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
+  };
   const VkAccelerationStructureBuildGeometryInfoKHR invalid_build_info = {
       .sType =
           VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
       .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
       .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
       .geometryCount = 1,
+      .pGeometries = &dummy_geometry,
   };
   const VkDeviceAddress unaligned_address = wrong_usage.address + 2;
   const uint32_t range_stride =
@@ -519,15 +521,19 @@ int main(void) {
   build_as_indirect(command_buffer, 1, &invalid_build_info,
                     &unaligned_address, &range_stride,
                     &max_primitive_counts);
+  submit_rejected_command(queue, command_buffer, &begin_info, NULL);
   build_as_indirect(command_buffer, 1, &invalid_build_info,
                     &wrong_usage.address, &unaligned_stride,
                     &max_primitive_counts);
+  submit_rejected_command(queue, command_buffer, &begin_info, NULL);
   build_as_indirect(command_buffer, 1, &invalid_build_info,
                     &wrong_usage.address, &range_stride,
                     &max_primitive_counts);
+  submit_rejected_command(queue, command_buffer, &begin_info, NULL);
   build_as_indirect(command_buffer, 1, &invalid_build_info,
                     &short_range.address, &range_stride,
                     &max_primitive_counts);
+  submit_rejected_command(queue, command_buffer, &begin_info, NULL);
 
   const uint32_t padded_stride =
       2 * sizeof(VkAccelerationStructureBuildRangeInfoKHR);
@@ -551,6 +557,7 @@ int main(void) {
   build_as_indirect(command_buffer, 1, &strided_build_info,
                     &excessive_count.address, &padded_stride,
                     &strided_max_counts);
+  submit_rejected_command(queue, command_buffer, &begin_info, NULL);
 
   require_result(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
   destroy_address_buffer(device, excessive_count);

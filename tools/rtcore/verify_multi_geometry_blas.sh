@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MESA_BUILD="${MESA_BUILD:-${ROOT_DIR}/mesa/build-ventus}"
 ICD="${ICD:-${MESA_BUILD}/src/ventus/vulkan/ventus_devenv_icd.x86_64.json}"
+DRIVER_LIB="${DRIVER_LIB:-${ROOT_DIR}/driver/build/driver/spike_device/libspike_driver.so}"
+SPIKE_BUILD="${SPIKE_BUILD:-${ROOT_DIR}/spike/build}"
 SOURCE="${ROOT_DIR}/tools/rtcore/multi_geometry_blas_probe.c"
 OUT_DIR="${OUT_DIR:-/tmp/ventus-multi-geometry-blas}"
 CC="${CC:-cc}"
@@ -19,6 +21,7 @@ for tool in "${CC}" "${PKG_CONFIG}" rg; do
     die "required tool not found: ${tool}"
 done
 [[ -f "${ICD}" ]] || die "Ventus ICD not found: ${ICD}"
+[[ -f "${DRIVER_LIB}" ]] || die "Ventus Spike Driver not found: ${DRIVER_LIB}"
 [[ -f "${SOURCE}" ]] || die "probe source not found: ${SOURCE}"
 [[ -n "${OUT_DIR}" && "${OUT_DIR}" != / ]] ||
   die "unsafe OUT_DIR: ${OUT_DIR}"
@@ -39,6 +42,8 @@ mkdir -p "${OUT_DIR}"
 probe_output="$(
   env \
     VK_ICD_FILENAMES="${ICD}" \
+    VENTUS_VK_DRIVER_LIB="${DRIVER_LIB}" \
+    LD_LIBRARY_PATH="${SPIKE_BUILD}:$(dirname "${DRIVER_LIB}"):${LD_LIBRARY_PATH:-}" \
     "${OUT_DIR}/multi_geometry_blas_probe"
 )"
 printf '%s\n' "${probe_output}"

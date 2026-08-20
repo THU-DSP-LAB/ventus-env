@@ -60,3 +60,42 @@ not only a rendered image. For each frame or dispatch, collect at least:
 Comparisons should vary one RTcore design parameter at a time, such as stack
 layout, ray-box pipeline, ray-triangle pipeline, BVH memory layout, early
 termination, or shadow-ray fast path.
+
+## V5 Software Migration
+
+Development for the V5 software contract is isolated on
+`feature/rt-v5-software-contract`. The migration keeps the current V3/V4 image
+path runnable until all V5 producers and consumers are ready.
+
+Completed foundation:
+
+- Mesa has one shared definition and validator for the 56-byte V3 and 96-byte
+  V4 kernel resource records.
+- NIR-to-LLVM can attach a structured V5 RT resource trailer to a kernel.
+- LLVM object summaries and LLD preserve that trailer and emit the final
+  `.ventus.resource.<kernel>` byte image.
+- The Mesa runtime accepts existing V3 kernels, validates V4 layout and extent
+  fields, and rejects missing or inconsistent RT contracts across pipeline
+  entries.
+
+The default RT pipeline does not publish the V5 trailer yet. Activation follows
+these implementation slices in order:
+
+1. Replace the V4 scratch layout producer with the frozen 384-byte hot Software
+   PDS V5 layout and bounded continuation allocation.
+2. Provision the per-CTA shared traversal-private region and expose its stable
+   base/offset through launch metadata.
+3. Generate the per-lane PDS and 128-byte-aligned private-state addresses, then
+   carry both through the NIR intrinsic, LLVM instruction, Spike, and RTL issue
+   interfaces.
+4. Emit the 68-byte fresh private-state initialization stores, distinguish
+   empty from invalid AS roots, and place a visibility `fence` before the hard
+   traversal operation.
+5. Enable V4 resource publication for V5 kernels and require one matching
+   contract across all participating entries.
+6. Add terminal release, resident nested-ray reuse, and image regressions before
+   retiring the compatibility path.
+
+The dual-source instruction encoding must preserve existing single-source V4
+binaries. Its exact compatibility encoding is an ISA decision and must be
+settled before slice 3 changes the assembler or decoder.

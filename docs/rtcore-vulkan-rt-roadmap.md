@@ -96,6 +96,8 @@ these implementation slices in order:
 6. Add terminal release, resident nested-ray reuse, and image regressions before
    retiring the compatibility path.
 
-The dual-source instruction encoding must preserve existing single-source V4
-binaries. Its exact compatibility encoding is an ISA decision and must be
-settled before slice 3 changes the assembler or decoder.
+Slice 3 software plumbing preserves the existing single-source V4 binary at
+`funct3=000` and uses `funct3=010` for the dual-source V5 form. Mesa exposes the
+V5 form explicitly but does not select it from the default lowering yet. This
+encoding remains local to LLVM and Spike until the corresponding GPIDL change
+has been coordinated and accepted; it is not an ISA freeze by itself.

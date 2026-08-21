@@ -61,7 +61,7 @@ rg -q 'descriptor set=1 binding=1 type=6' "${LOG}" ||
   die "set 1 camera descriptor did not reach the driver table"
 rg -q 'vkCmdTraceRaysIndirect2KHR resolved 160x96x1 and SBT regions' "${LOG}" ||
   die "SBT regions and dimensions did not come through the indirect2 command"
-[[ "$(rg -c 'indirect AS build wrote Ventus BVH ABI v1 objects=1 geometries=1' \
+[[ "$(rg -c 'indirect AS build wrote Ventus BVH ABI v2 objects=1 geometries=1' \
        "${LOG}")" == 2 ]] ||
   die "BLAS and TLAS were not both built from indirect range records"
 

@@ -68,6 +68,17 @@ load_f32(const uint8_t *base, uint32_t offset)
 }
 
 static void
+write_fixture_if_requested(const uint8_t *data, size_t size)
+{
+   const char *path = getenv("VENTUS_VTAS_V2_FIXTURE_OUT");
+   if (!path || !path[0])
+      return;
+   FILE *file = fopen(path, "wb");
+   if (!file || fwrite(data, 1, size, file) != size || fclose(file) != 0)
+      fail("failed to write VTAS V2 fixture");
+}
+
+static void
 require_f32(float actual, float expected, const char *name)
 {
    if (fabsf(actual - expected) <= 1.0e-6f)
@@ -626,6 +637,9 @@ main(void)
 
    if (load_u32(as_data, VENTUS_AS_HEADER_MAGIC) != VENTUS_AS_MAGIC)
       fail("built object does not contain a VTAS header");
+   if ((load_u32(as_data, VENTUS_AS_HEADER_VERSION) & 0xffffu) !=
+       VENTUS_AS_VERSION_V2)
+      fail("built object is not a VTAS V2 image");
    if (load_u32(as_data, VENTUS_AS_HEADER_TYPE) != VENTUS_AS_TYPE_BLAS)
       fail("built VTAS object is not a BLAS");
    if (load_u32(as_data, VENTUS_AS_HEADER_PRIMITIVE_COUNT) != 3)
@@ -640,6 +654,18 @@ main(void)
       leaf_offsets, &leaf_count);
    if (leaf_count != 3)
       fail("VTAS tree does not expose three triangle leaves");
+   const uint32_t blas_root_ref =
+      load_u32(as_data, VENTUS_AS_HEADER_ROOT_NODE_REF);
+   const uint32_t blas_root_offset =
+      blas_root_ref & VENTUS_NODE_REF_OFFSET_MASK;
+   const uint8_t *blas_root = as_data + blas_root_offset;
+   if ((blas_root_offset & (VENTUS_AS_BOX4_NODE_SIZE - 1)) != 0 ||
+       load_u32(blas_root, VENTUS_BOX4_V2_PARENT_NODE_REF) !=
+          VENTUS_AS_INVALID_NODE ||
+       blas_root[VENTUS_BOX4_V2_PARENT_CHILD_INDEX] != 0xff ||
+       blas_root[VENTUS_BOX4_V2_NODE_FLAGS] !=
+          VENTUS_BOX4_V2_NODE_FLAG_ROOT)
+      fail("VTAS V2 BLAS root parent metadata is invalid");
 
    uint32_t geometry_offsets[3] = { 0 };
    for (uint32_t i = 0; i < leaf_count; i++) {
@@ -876,6 +902,9 @@ main(void)
    if (load_u64(instance_leaf, VENTUS_INSTANCE_BLAS_ADDR_LO) !=
        compact_address)
       fail("TLAS does not reference the compacted BLAS");
+   if (load_u32(instance_leaf, VENTUS_INSTANCE_V2_PARENT_EDGE) !=
+       VENTUS_INSTANCE_V2_ROOT_PARENT_EDGE)
+      fail("single-instance VTAS V2 TLAS lacks the root parent sentinel");
    if (load_u32(instance_leaf, VENTUS_INSTANCE_CUSTOM_INDEX) != 7 ||
        load_u32(instance_leaf, VENTUS_INSTANCE_MASK) != 0x5a ||
        load_u32(instance_leaf, VENTUS_INSTANCE_SBT_RECORD_OFFSET) != 9 ||
@@ -978,12 +1007,15 @@ main(void)
        load_u32(tlas_data, VENTUS_AS_HEADER_INSTANCE_COUNT) != 0)
       fail("zero-instance TLAS does not contain an empty stable VTAS header");
 
+   write_fixture_if_requested(as_data, expected_compacted_size);
+
    printf("PASS multi-geometry-blas geometries=3 primitives=3 nodes=4 "
           "index_modes=UINT32,UINT16,NONE clone=1 "
           "tlas_pointer_offset=16 stable_address=1 alignment=256 "
           "update=1 compaction=1 query_widths=32,64 "
           "query_transport=host,buffer "
-          "empty_blas=1 empty_tlas=1 transform_offset=%zu\n",
+          "empty_blas=1 empty_tlas=1 vtas_version=2 parent_replay=1 "
+          "transform_offset=%zu\n",
           sizeof(VkTransformMatrixKHR));
 
    vkDeviceWaitIdle(device);

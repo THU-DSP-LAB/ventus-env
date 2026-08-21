@@ -71,7 +71,13 @@ VENTUS_SPIKE_LOG="${VENTUS_SPIKE_LOG:-0}" \
 "${RUNNER}"
 
 PPM="${OUT_DIR}/160x96/raytracingintersection_spike.ppm"
+LOG="${OUT_DIR}/160x96/raytracingintersection.log"
 [[ -f "${PPM}" ]] || die "expected PPM not found: ${PPM}"
+[[ -f "${LOG}" ]] || die "expected log not found: ${LOG}"
+if [[ "${VENTUS_VK_RT_SBT_MULTI_ENTRY:-0}" == 1 ]]; then
+  rg -q 'RT entry_ref=.*symbol=vt_intersection_g2 target=0x[1-9a-f]' "${LOG}" ||
+    die "independent intersection entry was not resolved"
+fi
 
 python3 - "${PPM}" "${EXPECTED_PPM_SHA256}" <<'PY'
 from collections import Counter

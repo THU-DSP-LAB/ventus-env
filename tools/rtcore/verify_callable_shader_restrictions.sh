@@ -45,8 +45,8 @@ LOG="${OUT_DIR}/1x1/raytracingcallable.log"
 [[ -f "${LOG}" ]] || die "nested callable failure log not found: ${LOG}"
 rg -q 'nested callable shader invocation is not supported' "${LOG}" ||
   die "nested callable failure did not reach the Ventus compiler gate"
-rg -q 'executeCallableEXT lowering failed' "${LOG}" ||
-  die "nested callable failure did not reject pipeline creation"
+rg -q 'executeCallableEXT lowering failed|independent callable-entry lowering failed' \
+  "${LOG}" || die "nested callable failure did not reject pipeline creation"
 
 rg -q 'nir_intrinsic_trace_ray' "${PIPELINE_SOURCE}" ||
   die "callable traceRayEXT intrinsic gate is missing"

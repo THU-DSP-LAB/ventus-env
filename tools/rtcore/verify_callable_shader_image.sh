@@ -58,6 +58,12 @@ rg -q 'driver bridge callable SBT .* size=96 stride=32' "${LOG}" ||
   die "driver bridge did not upload the three-record callable SBT"
 rg -q 'RT pipeline compiled .* stages=6 groups=6' "${LOG}" ||
   die "callable pipeline did not retain the expected stage/group layout"
+if [[ "${VENTUS_VK_RT_SBT_MULTI_ENTRY:-0}" == 1 ]]; then
+  for symbol in vt_closest_hit_g2 vt_callable_g3 vt_callable_g4 vt_callable_g5; do
+    rg -q "RT entry_ref=.*symbol=${symbol} target=0x[1-9a-f]" "${LOG}" ||
+      die "independent RT entry was not resolved: ${symbol}"
+  done
+fi
 
 actual_sha="$(sha256sum "${PPM}" | awk '{print $1}')"
 [[ "${actual_sha}" == "${EXPECTED_SHA256}" ]] ||

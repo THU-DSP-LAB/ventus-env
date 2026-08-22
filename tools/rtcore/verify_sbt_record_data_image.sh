@@ -84,12 +84,10 @@ PPM="${OUT_DIR}/160x96/raytracingsbtdata_spike.ppm"
 LOG="${OUT_DIR}/160x96/raytracingsbtdata.log"
 [[ -f "${PPM}" ]] || die "expected PPM not found: ${PPM}"
 [[ -f "${LOG}" ]] || die "expected log not found: ${LOG}"
-if [[ "${VENTUS_VK_RT_SBT_MULTI_ENTRY:-0}" == 1 ]]; then
-  for symbol in vt_miss_g1 vt_closest_hit_g2; do
-    rg -q "RT entry_ref=.*symbol=${symbol} target=0x[1-9a-f]" "${LOG}" ||
-      die "independent RT entry was not resolved: ${symbol}"
-  done
-fi
+for symbol in vt_miss_g1 vt_closest_hit_g2; do
+  rg -q "RT entry_ref=.*symbol=${symbol} target=0x[1-9a-f]" "${LOG}" ||
+    die "independent RT entry was not resolved: ${symbol}"
+done
 
 python3 - "${PPM}" "${EXPECTED_PPM_SHA256}" <<'PY'
 from collections import Counter

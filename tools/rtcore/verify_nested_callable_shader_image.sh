@@ -34,8 +34,6 @@ rg -q 'callableDataInEXT.*nestedColor' "${LEAF_SHADER}" ||
   die "nested Callable leaf does not consume the child call-data location"
 
 VENTUS_CALLABLE_NESTED=1 \
-VENTUS_VK_RT_ABI_V5=1 \
-VENTUS_VK_RT_SBT_MULTI_ENTRY=1 \
 VENTUS_VK_RETAIN_SHADER_ARTIFACTS=1 \
 APP="${APP}" \
 APP_NAME=raytracingcallable \

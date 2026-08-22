@@ -83,10 +83,8 @@ PPM="${OUT_DIR}/160x96/raytracingtextures_spike.ppm"
 LOG="${OUT_DIR}/160x96/raytracingtextures.log"
 [[ -f "${PPM}" ]] || die "expected PPM not found: ${PPM}"
 [[ -f "${LOG}" ]] || die "expected execution log not found: ${LOG}"
-if [[ "${VENTUS_VK_RT_SBT_MULTI_ENTRY:-0}" == 1 ]]; then
-  rg -q 'RT entry_ref=.*symbol=vt_any_hit_g2 target=0x[1-9a-f]' "${LOG}" ||
-    die "independent any-hit entry was not resolved"
-fi
+rg -q 'RT entry_ref=.*symbol=vt_any_hit_g2 target=0x[1-9a-f]' "${LOG}" ||
+  die "independent any-hit entry was not resolved"
 rg -q 'stages=4 groups=3' "${LOG}" ||
   die "runtime log does not prove the four-stage RT pipeline"
 rg -q 'descriptors=4.*push=16' "${LOG}" ||

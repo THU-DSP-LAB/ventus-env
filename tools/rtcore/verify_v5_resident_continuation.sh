@@ -7,7 +7,6 @@ set -euo pipefail
 ENV_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LLVM_BUILD="${LLVM_BUILD:-${ENV_ROOT}/llvm/build}"
 
-export VENTUS_VK_RT_ABI_V5=1
 export VENTUS_VK_RETAIN_SHADER_ARTIFACTS=1
 export OUT_DIR="${OUT_DIR:-${ENV_ROOT}/artifacts/rtcore-spike/v5-resident-continuation}"
 

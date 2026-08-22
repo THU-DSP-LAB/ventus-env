@@ -53,8 +53,6 @@ PY
 "${GLSLANG_VALIDATOR}" --target-env vulkan1.2 -V \
   "${MODIFIED_SOURCE}" -o "${SPV}" >/dev/null
 
-VENTUS_VK_RT_ABI_V5=1 \
-VENTUS_VK_RT_SBT_MULTI_ENTRY=1 \
 OUT_DIR="${OUT_DIR}" \
 INTERSECTION_SOURCE="${MODIFIED_SOURCE}" \
 "${ENV_ROOT}/tools/rtcore/verify_procedural_aabb_image.sh"

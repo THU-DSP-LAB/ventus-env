@@ -32,8 +32,6 @@ rg -q 'gl_RayFlagsSkipClosestHitShaderEXT' "${MISS_SOURCE}" ||
   die "secondary-ray probe no longer isolates child traversal outcome"
 
 VENTUS_MISS_SECONDARY=1 \
-VENTUS_VK_RT_ABI_V5=1 \
-VENTUS_VK_RT_SBT_MULTI_ENTRY=1 \
 VENTUS_VK_RETAIN_SHADER_ARTIFACTS=1 \
 APP="${APP}" \
 APP_NAME=raytracingshadows \

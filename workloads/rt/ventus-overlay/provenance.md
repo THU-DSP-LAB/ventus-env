@@ -34,6 +34,11 @@
 `closest-hit -> Callable A -> Callable B`，其中 A 与 B 使用不同 callable-data location；该 overlay
 同时保留一级 Callable 和 record-data 测试路径。
 
+`raytracingcallable-stack-size.patch` 将 Callable workload 的 pipeline stack 声明为动态状态，
+逐 shader group 查询栈需求，按 Vulkan RT 公式合成 pipeline stack size，并在 trace 命令前通过
+`vkCmdSetRayTracingPipelineStackSizeKHR` 写入命令缓冲状态。该路径用于验证 Ventus runtime 的
+per-dispatch continuation backing 分配，而不是用固定测试常量替代 API。
+
 `vulkanscene_shadow_minimal.gltf` 是 Ventus 自建的快速测试场景。默认完整场景
 `vulkanscene_shadow.gltf` 仍来自官方资产子模块。该上游模型带有独立的使用与
 分发说明，因此本仓库只记录固定提交，不复制模型文件。

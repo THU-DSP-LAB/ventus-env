@@ -87,6 +87,7 @@ PATCH_FILES=(
   "${OVERLAY_DIR}/raytracingbasic-instance-custom-index.patch"
   "${OVERLAY_DIR}/raytracingintersection-ray-flags.patch"
   "${OVERLAY_DIR}/raytracingcallable-record-data.patch"
+  "${OVERLAY_DIR}/raytracingcallable-stack-size.patch"
 )
 require_file "${UPSTREAM_ASSET}"
 require_file "${REFLECTION_ASSET}"

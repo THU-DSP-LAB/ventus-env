@@ -54,6 +54,37 @@ LOG="${OUT_DIR}/160x96/raytracingcallable.log"
 [[ -f "${PPM}" ]] || die "nested Callable image not found: ${PPM}"
 [[ -f "${LOG}" ]] || die "nested Callable log not found: ${LOG}"
 
+python3 - "${LOG}" <<'PY'
+import re
+import sys
+
+log = open(sys.argv[1], encoding="utf-8").read()
+dispatch = re.search(r"collected Spike dispatch state .* stack=(\d+)", log)
+allocation = re.search(
+    r"Vulkan RT stack requested=(\d+) compiler-min=(\d+) "
+    r"allocated=(\d+) pds-static=(\d+)",
+    log,
+)
+if not dispatch or not allocation:
+    raise SystemExit("Vulkan RT stack command/allocation evidence is missing")
+
+command_stack = int(dispatch.group(1))
+requested, compiler_minimum, allocated, pds_static = map(
+    int, allocation.groups()
+)
+if command_stack != requested or requested == 0:
+    raise SystemExit(
+        f"stack command mismatch: command={command_stack} requested={requested}"
+    )
+if allocated < requested or allocated < compiler_minimum:
+    raise SystemExit(
+        "runtime continuation allocation is smaller than its Vulkan or "
+        "compiler requirement"
+    )
+if pds_static < allocated:
+    raise SystemExit("PDS static allocation does not contain the continuation stack")
+PY
+
 [[ "$(rg -c 'NIR after spirv_to_nir stage=callable .*execute_callable=1' "${LOG}")" == 1 ]] ||
   die "frontend did not expose exactly one nested executeCallableEXT"
 if rg -q 'NIR before vt_nir_lower_rt_payload stage=callable .*execute_callable=[1-9]' "${LOG}"; then

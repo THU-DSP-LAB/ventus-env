@@ -1,0 +1,56 @@
+diff --git a/examples/raytracingcallable/raytracingcallable.cpp b/examples/raytracingcallable/raytracingcallable.cpp
+--- a/examples/raytracingcallable/raytracingcallable.cpp
++++ b/examples/raytracingcallable/raytracingcallable.cpp
+@@ -33,6 +33,9 @@ public:
+ 	std::array<vks::Buffer, maxConcurrentFrames> uniformBuffers;
+ 
+ 	VkPipeline pipeline{ VK_NULL_HANDLE };
++	PFN_vkGetRayTracingShaderGroupStackSizeKHR vkGetRayTracingShaderGroupStackSizeKHR{ nullptr };
++	PFN_vkCmdSetRayTracingPipelineStackSizeKHR vkCmdSetRayTracingPipelineStackSizeKHR{ nullptr };
++	uint32_t rayTracingPipelineStackSize = 0;
+ 	VkPipelineLayout pipelineLayout{ VK_NULL_HANDLE };
+ 	VkDescriptorSetLayout descriptorSetLayout{ VK_NULL_HANDLE };
+ 	std::array<VkDescriptorSet, maxConcurrentFrames> descriptorSets{};
+@@ -475,9 +478,33 @@ public:
+ 		VkRayTracingPipelineCreateInfoKHR rayTracingPipelineCI = vks::initializers::rayTracingPipelineCreateInfoKHR();
++		const VkDynamicState dynamicStates[] = {
++			VK_DYNAMIC_STATE_RAY_TRACING_PIPELINE_STACK_SIZE_KHR
++		};
++		VkPipelineDynamicStateCreateInfo dynamicStateCI = vks::initializers::pipelineDynamicStateCreateInfo(dynamicStates, 1);
+ 		rayTracingPipelineCI.stageCount = static_cast<uint32_t>(shaderStages.size());
+ 		rayTracingPipelineCI.pStages = shaderStages.data();
+ 		rayTracingPipelineCI.groupCount = static_cast<uint32_t>(shaderGroups.size());
+ 		rayTracingPipelineCI.pGroups = shaderGroups.data();
+ 		rayTracingPipelineCI.maxPipelineRayRecursionDepth = std::min(uint32_t(2), rayTracingPipelineProperties.maxRayRecursionDepth);
+ 		rayTracingPipelineCI.layout = pipelineLayout;
++		rayTracingPipelineCI.pDynamicState = &dynamicStateCI;
+ 		VK_CHECK_RESULT(vkCreateRayTracingPipelinesKHR(device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &rayTracingPipelineCI, nullptr, &pipeline));
++
++		vkGetRayTracingShaderGroupStackSizeKHR = reinterpret_cast<PFN_vkGetRayTracingShaderGroupStackSizeKHR>(vkGetDeviceProcAddr(device, "vkGetRayTracingShaderGroupStackSizeKHR"));
++		vkCmdSetRayTracingPipelineStackSizeKHR = reinterpret_cast<PFN_vkCmdSetRayTracingPipelineStackSizeKHR>(vkGetDeviceProcAddr(device, "vkCmdSetRayTracingPipelineStackSizeKHR"));
++		assert(vkGetRayTracingShaderGroupStackSizeKHR && vkCmdSetRayTracingPipelineStackSizeKHR);
++		const uint32_t raygenStack = static_cast<uint32_t>(vkGetRayTracingShaderGroupStackSizeKHR(device, pipeline, 0, VK_SHADER_GROUP_SHADER_GENERAL_KHR));
++		const uint32_t missStack = static_cast<uint32_t>(vkGetRayTracingShaderGroupStackSizeKHR(device, pipeline, 1, VK_SHADER_GROUP_SHADER_GENERAL_KHR));
++		const uint32_t closestHitStack = static_cast<uint32_t>(vkGetRayTracingShaderGroupStackSizeKHR(device, pipeline, 2, VK_SHADER_GROUP_SHADER_CLOSEST_HIT_KHR));
++		uint32_t callableStack = 0;
++		for (uint32_t group = 3; group < shaderGroups.size(); group++) {
++			callableStack = std::max(callableStack, static_cast<uint32_t>(
++				vkGetRayTracingShaderGroupStackSizeKHR(device, pipeline, group, VK_SHADER_GROUP_SHADER_GENERAL_KHR)));
++		}
++		const uint32_t recursionDepth = rayTracingPipelineCI.maxPipelineRayRecursionDepth;
++		const uint32_t traceStack = std::max(closestHitStack, missStack);
++		rayTracingPipelineStackSize = raygenStack +
++			std::min(1u, recursionDepth) * traceStack +
++			(recursionDepth > 1 ? recursionDepth - 1 : 0) * traceStack +
++			2 * callableStack;
++		assert(rayTracingPipelineStackSize != 0);
+ 	}
+@@ -567,7 +594,8 @@ public:
+ 		/*
+ 			Dispatch the ray tracing commands
+ 		*/
+ 		vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline);
++		vkCmdSetRayTracingPipelineStackSizeKHR(cmdBuffer, rayTracingPipelineStackSize);
+ 		vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipelineLayout, 0, 1, &descriptorSets[currentBuffer], 0, 0);
+ 
+ 		vkCmdTraceRaysKHR(

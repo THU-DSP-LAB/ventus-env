@@ -3,13 +3,17 @@ diff --git a/examples/raytracingcallable/raytracingcallable.cpp b/examples/raytr
 +++ b/examples/raytracingcallable/raytracingcallable.cpp
 @@ -13,0 +14 @@
 +#include <cstdlib>
-@@ -44,0 +46,2 @@
+@@ -44,0 +46,3 @@
 +	bool useCallableRecordData = false;
++	bool useNestedCallable = false;
 +	std::string callableShaderOverride{};
-@@ -48,0 +52,7 @@
+@@ -48,0 +53,10 @@
 +		const char* recordDataEnv = std::getenv("VENTUS_CALLABLE_RECORD_DATA_ALT");
 +		useCallableRecordData =
 +			recordDataEnv && std::strtoul(recordDataEnv, nullptr, 0) != 0;
++		const char* nestedCallableEnv = std::getenv("VENTUS_CALLABLE_NESTED");
++		useNestedCallable =
++			nestedCallableEnv && std::strtoul(nestedCallableEnv, nullptr, 0) != 0;
 +		const std::string negativeCallableMode =
 +			std::getenv("VENTUS_CALLABLE_NEGATIVE") ? std::getenv("VENTUS_CALLABLE_NEGATIVE") : "";
 +		if (negativeCallableMode == "nested")
@@ -50,10 +54,14 @@ diff --git a/examples/raytracingcallable/raytracingcallable.cpp b/examples/raytr
 +		} else {
 +			memcpy(shaderBindingTables.callable.mapped, shaderHandleStorage.data() + handleSizeAligned * 3, handleSize * 3);
 +		}
-@@ -465 +505,8 @@
+@@ -465 +509,12 @@
 -			shaderStages.push_back(loadShader(getShadersPath() + "raytracingcallable/callable" + std::to_string(i+1) + ".rcall.spv", VK_SHADER_STAGE_CALLABLE_BIT_KHR));
 +			std::string callableShaderName;
-+			if (!callableShaderOverride.empty())
++			if (useNestedCallable && i == 1)
++				callableShaderName = "callable_nested.rcall.spv";
++			else if (useNestedCallable && i == 2)
++				callableShaderName = "callable_nested_leaf.rcall.spv";
++			else if (!callableShaderOverride.empty())
 +				callableShaderName = callableShaderOverride;
 +			else if (useCallableRecordData)
 +				callableShaderName = "callable_record_data.rcall.spv";
@@ -99,6 +107,22 @@ new file mode 100644
 +void main()
 +{
 +	nestedColor = outColor;
-+	executeCallableEXT(0, 1);
++	executeCallableEXT(2, 1);
 +	outColor = nestedColor;
++}
+diff --git a/shaders/glsl/raytracingcallable/callable_nested_leaf.rcall b/shaders/glsl/raytracingcallable/callable_nested_leaf.rcall
+new file mode 100644
+--- /dev/null
++++ b/shaders/glsl/raytracingcallable/callable_nested_leaf.rcall
+@@ -0,0 +1,11 @@
++#version 460 core
++#extension GL_EXT_ray_tracing : enable
++
++layout(location = 0) callableDataInEXT vec3 directColor;
++layout(location = 1) callableDataInEXT vec3 nestedColor;
++
++void main()
++{
++	directColor = vec3(1.0, 0.0, 1.0);
++	nestedColor = vec3(1.0, 0.0, 1.0);
 +}

@@ -25,7 +25,14 @@
 - 通过 `RT_SHADOW_ASSET` 选择场景；
 - 关闭 UI overlay，避免污染验证图像；
 - 通过 `RT_SHADOW_SCREENSHOT` 将 storage image 写为 P6 PPM；
-- 每次进程只保存一次验证图像。
+- 每次进程只保存一次验证图像；
+- 通过 `VENTUS_MISS_SECONDARY` 选择由 miss shader 发射 secondary ray 的验证路径，并向 miss
+  stage 暴露场景 AS descriptor。
+
+`raytracingcallable-record-data.patch` 在同一固定上游基线之上增加 Callable SBT record data 与
+嵌套调用验证。`VENTUS_CALLABLE_NESTED=1` 选择
+`closest-hit -> Callable A -> Callable B`，其中 A 与 B 使用不同 callable-data location；该 overlay
+同时保留一级 Callable 和 record-data 测试路径。
 
 `vulkanscene_shadow_minimal.gltf` 是 Ventus 自建的快速测试场景。默认完整场景
 `vulkanscene_shadow.gltf` 仍来自官方资产子模块。该上游模型带有独立的使用与

@@ -17,6 +17,16 @@ index 4ce7c58..4310793 100644
 +			? std::string(overrideAsset)
 +			: getAssetPath() + "models/vulkanscene_shadow.gltf";
 +		scene.loadFromFile(sceneAsset, vulkanDevice, queue, glTFLoadingFlags);
+@@ -340 +349 @@ public:
+-			vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, 0),
++			vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR, 0),
+@@ -377 +386,5 @@ public:
+-			shaderStages.push_back(loadShader(getShadersPath() + "raytracingshadows/miss.rmiss.spv", VK_SHADER_STAGE_MISS_BIT_KHR));
++			const char* missShader = "miss.rmiss.spv";
++			const char* secondaryMissEnv = std::getenv("VENTUS_MISS_SECONDARY");
++			if (secondaryMissEnv && std::strtoul(secondaryMissEnv, nullptr, 0) != 0)
++				missShader = "miss_secondary.rmiss.spv";
++			shaderStages.push_back(loadShader(getShadersPath() + "raytracingshadows/" + missShader, VK_SHADER_STAGE_MISS_BIT_KHR));
 @@ -561 +570,3 @@ public:
 -		drawUI(cmdBuffer, frameBuffers[currentImageIndex]);
 +		if (settings.overlay) {
@@ -110,3 +120,38 @@ index 4ce7c58..4310793 100644
 +
 @@ -573,0 +670 @@ public:
 +		saveStorageImageIfRequested();
+diff --git a/shaders/glsl/raytracingshadows/miss_secondary.rmiss b/shaders/glsl/raytracingshadows/miss_secondary.rmiss
+new file mode 100644
+--- /dev/null
++++ b/shaders/glsl/raytracingshadows/miss_secondary.rmiss
+@@ -0,0 +1,30 @@
++#version 460
++#extension GL_EXT_ray_tracing : require
++
++layout(binding = 0, set = 0) uniform accelerationStructureEXT topLevelAS;
++layout(binding = 2, set = 0) uniform CameraProperties
++{
++    mat4 viewInverse;
++    mat4 projInverse;
++    vec4 lightPos;
++} cam;
++
++layout(location = 0) rayPayloadInEXT vec3 hitValue;
++layout(location = 2) rayPayloadEXT bool secondaryHit;
++
++void main()
++{
++    vec4 target = cam.projInverse * vec4(0.0, 0.0, 1.0, 1.0);
++    vec3 direction =
++        (cam.viewInverse * vec4(normalize(target.xyz / target.w), 0.0)).xyz;
++
++    secondaryHit = true;
++    traceRayEXT(topLevelAS,
++        gl_RayFlagsTerminateOnFirstHitEXT |
++        gl_RayFlagsOpaqueEXT |
++        gl_RayFlagsSkipClosestHitShaderEXT,
++        0xff, 0, 0, 1,
++        gl_WorldRayOriginEXT, 0.001, direction, 10000.0, 2);
++
++    hitValue = secondaryHit ? vec3(0.4, 0.0, 0.4) : vec3(0.0, 0.0, 0.2);
++}

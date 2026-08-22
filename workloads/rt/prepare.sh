@@ -140,6 +140,14 @@ done
   "${TEMP_SOURCE}/shaders/glsl/raytracingcallable/callable_nested.rcall" \
   -o "${TEMP_SOURCE}/shaders/glsl/raytracingcallable/callable_nested.rcall.spv" \
   --target-env vulkan1.2
+"${GLSLANG_VALIDATOR}" -V \
+  "${TEMP_SOURCE}/shaders/glsl/raytracingcallable/callable_nested_leaf.rcall" \
+  -o "${TEMP_SOURCE}/shaders/glsl/raytracingcallable/callable_nested_leaf.rcall.spv" \
+  --target-env vulkan1.2
+"${GLSLANG_VALIDATOR}" -V \
+  "${TEMP_SOURCE}/shaders/glsl/raytracingshadows/miss_secondary.rmiss" \
+  -o "${TEMP_SOURCE}/shaders/glsl/raytracingshadows/miss_secondary.rmiss.spv" \
+  --target-env vulkan1.2
 mkdir -p "${TEMP_SOURCE}/assets/models"
 mkdir -p "${TEMP_SOURCE}/assets/textures"
 cp -a --reflink=auto "${UPSTREAM_ASSET}" \

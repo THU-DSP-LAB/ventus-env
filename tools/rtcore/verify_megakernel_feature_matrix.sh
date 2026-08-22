@@ -8,11 +8,13 @@ OUT_DIR="${OUT_DIR:-${ENV_ROOT}/artifacts/rtcore-spike/megakernel_feature_matrix
 
 GATES=(
   verify_callable_shader_image.sh
+  verify_nested_callable_shader_image.sh
   verify_callable_shader_record_data.sh
   verify_callable_shader_restrictions.sh
   verify_instance_custom_index_image.sh
   verify_instance_transform_builtins.sh
   verify_iterative_reflections_image.sh
+  verify_miss_secondary_ray_image.sh
   verify_multiset_rt_image.sh
   verify_procedural_aabb_image.sh
   verify_ray_culling_flags.sh
@@ -47,9 +49,12 @@ for gate in "${GATES[@]}"; do
   echo "RUN profile=megakernel gate=${gate_name}"
   OUT_DIR="${case_dir}" "${gate_path}"
 
-  mapfile -t ppms < <(
-    find "${case_dir}" -type f -name '*_spike.ppm' -printf '%P\n' | sort
-  )
+  ppms=()
+  if [[ -d "${case_dir}" ]]; then
+    mapfile -t ppms < <(
+      find "${case_dir}" -type f -name '*_spike.ppm' -printf '%P\n' | sort
+    )
+  fi
   printf 'megakernel\t%s\tPASS\t%s\n' \
     "${gate_name}" "${#ppms[@]}" >>"${MANIFEST}"
   for ppm in "${ppms[@]}"; do

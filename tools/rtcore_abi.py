@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Generate RT ABI constants from Mesa's canonical vt_rt_abi.h.
+"""Generate RT ABI constants from Mesa's canonical RT ABI headers.
 
-Background: Mesa, Spike, and RTL must use identical fixed PDS-header offsets.
-Flow: parse Mesa's source-of-truth header and emit checked-in C++ and Scala
-      constants for Spike and the RTL.
+Background: Mesa writes both the fixed PDS header and the VTAS binary layout;
+            Spike and RTL must not hand-copy either set of constants.
+Flow: parse Mesa's source-of-truth headers and emit checked-in C++ and Scala
+      constants for Spike and the RTL, plus C++ VTAS constants for Spike.
 Usage: python3 tools/rtcore_abi.py [--check]
-Maintenance: edit mesa/src/ventus/compiler/vt_rt_abi.h only, then run this
-             script and commit both generated outputs.  CI can use --check to
-             reject stale generated files.  Pipeline-dependent payload and
-             continuation sizes are deliberately not emitted as constants.
+Maintenance: edit the Mesa ABI header(s) only, then run this script and commit
+             every generated output.  CI can use --check to reject stale
+             generated files.  Pipeline-dependent payload and continuation
+             sizes are deliberately not emitted as constants.
 """
 
 from __future__ import annotations
@@ -21,8 +22,11 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "mesa/src/ventus/compiler/vt_rt_abi.h"
+VTAS_SOURCE = ROOT / "mesa/src/ventus/common/ventus_rt_bvh.h"
 SPIKE_OUTPUT = ROOT / "spike/riscv/ventus_rt_abi_generated.h"
+SPIKE_VTAS_OUTPUT = ROOT / "spike/riscv/ventus_vtas_abi_generated.h"
 SCALA_OUTPUT = ROOT / "gpgpu/ventus/src/rtcore/RtAbiLayout.scala"
+SCALA_VTAS_OUTPUT = ROOT / "gpgpu/ventus/src/rtcore/RtVtasLayout.scala"
 DYNAMIC_DEFAULTS = {
     "VT_RT_ABI_HIT_ATTRIB_SIZE_BYTES",
     "VT_RT_ABI_PAYLOAD_BASE_BYTES",
@@ -37,16 +41,16 @@ def source_without_comments(text: str) -> str:
     return re.sub(r"//.*", "", text)
 
 
-def parse_constants(text: str) -> dict[str, int]:
+def parse_constants(text: str, prefixes: tuple[str, ...]) -> dict[str, int]:
     text = source_without_comments(text)
     text = re.sub(r"\\\n\s*", " ", text)
     raw: dict[str, str] = {}
     order: list[str] = []
 
     for name, expression in re.findall(
-        r"^\s*#define[ \t]+(VT_RT_[A-Z0-9_]+)[ \t]+([^\r\n]+)$", text, re.MULTILINE
+        r"^\s*#define[ \t]+([A-Z][A-Z0-9_]+)[ \t]+([^\r\n]+)$", text, re.MULTILINE
     ):
-        if name == "VT_RT_ABI_H":
+        if not name.startswith(prefixes) or name.endswith("_H"):
             continue
         raw[name] = expression.strip()
         order.append(name)
@@ -57,10 +61,12 @@ def parse_constants(text: str) -> dict[str, int]:
             item = item.strip()
             if not item:
                 continue
-            match = re.fullmatch(r"(VT_RT_[A-Z0-9_]+)(?:\s*=\s*(.+))?", item)
+            match = re.fullmatch(r"([A-Z][A-Z0-9_]+)(?:\s*=\s*(.+))?", item)
             if not match:
-                raise ValueError(f"cannot parse ABI enum item: {item!r}")
+                continue
             name, expression = match.groups()
+            if not name.startswith(prefixes):
+                continue
             if expression is None:
                 current += 1
             else:
@@ -100,8 +106,8 @@ def resolve_constant(name: str, raw: dict[str, str], resolved: dict[str, int]) -
         identifier = match.group(0)
         return str(resolve_constant(identifier, raw, resolved)) if identifier in raw else identifier
 
-    expression = re.sub(r"\bVT_RT_[A-Z0-9_]+\b", replace_identifier, expression)
-    expression = re.sub(r"(?<=\d)[uUlL]+\b", "", expression)
+    expression = re.sub(r"\b[A-Z][A-Z0-9_]+\b", replace_identifier, expression)
+    expression = re.sub(r"\b(0[xX][0-9a-fA-F]+|[0-9]+)[uUlL]+\b", r"\1", expression)
     if not re.fullmatch(r"[0-9xXa-fA-F\s+\-*/%<>&|()~]+", expression):
         raise ValueError(f"unsafe ABI expression for {name}: {expression!r}")
     try:
@@ -137,6 +143,24 @@ def generated_banner(language: str) -> list[str]:
         "// Do not edit: update the Mesa ABI header and regenerate.",
         f"// {language}",
     ]
+
+
+def vtas_cxx_name(name: str) -> str:
+    if name == "VENTUS_AS_INVALID_NODE":
+        return "invalid_node_ref"
+    if name.startswith("VENTUS_BVH_NODE_"):
+        return "node_" + name.removeprefix("VENTUS_BVH_NODE_").lower()
+    return name.removeprefix("VENTUS_").lower()
+
+
+def vtas_scala_name(name: str) -> str:
+    if name == "VENTUS_AS_INVALID_NODE":
+        return "InvalidNodeRef"
+    if name.startswith("VENTUS_BVH_NODE_"):
+        return "Node" + "".join(
+            part.capitalize() for part in name.removeprefix("VENTUS_BVH_NODE_").lower().split("_")
+        )
+    return "".join(part.capitalize() for part in name.removeprefix("VENTUS_").lower().split("_"))
 
 
 def render_spike(constants: dict[str, int], function: tuple[str, str]) -> str:
@@ -184,6 +208,38 @@ def render_scala(constants: dict[str, int], function: tuple[str, str]) -> str:
     return "\n".join(lines)
 
 
+def render_spike_vtas(constants: dict[str, int]) -> str:
+    lines = [
+        "#ifndef RISCV_VENTUS_VTAS_ABI_GENERATED_H",
+        "#define RISCV_VENTUS_VTAS_ABI_GENERATED_H",
+        "// Generated by tools/rtcore_abi.py from mesa/src/ventus/common/ventus_rt_bvh.h.",
+        "// Do not edit: update the Mesa VTAS ABI header and regenerate.",
+        "// Fixed VTAS binary-layout constants for namespace ventus_rt.",
+        "",
+    ]
+    for name, value in constants.items():
+        rendered = f"0x{value & 0xffffffff:x}u" if value < 0 or value > 0x7fffffff else str(value)
+        lines.append(f"constexpr uint32_t {vtas_cxx_name(name)} = {rendered};")
+    lines.extend(["", "#endif", ""])
+    return "\n".join(lines)
+
+
+def render_scala_vtas(constants: dict[str, int]) -> str:
+    lines = [
+        "// Generated by tools/rtcore_abi.py from mesa/src/ventus/common/ventus_rt_bvh.h.",
+        "// Do not edit: update the Mesa VTAS ABI header and regenerate.",
+        "// Fixed VTAS binary-layout constants for package rtcore.",
+        "package rtcore",
+        "",
+        "object RtVtasLayout {",
+    ]
+    for name, value in constants.items():
+        rendered = f"0x{value & 0xffffffff:x}L" if value < 0 or value > 0x7fffffff else str(value)
+        lines.append(f"  final val {vtas_scala_name(name)}: Long = {rendered}")
+    lines.extend(["}", ""])
+    return "\n".join(lines)
+
+
 def update_or_check(path: pathlib.Path, content: str, check: bool) -> bool:
     current = path.read_text(encoding="utf-8") if path.exists() else None
     if current == content:
@@ -203,16 +259,27 @@ def main() -> int:
 
     try:
         source_text = SOURCE.read_text(encoding="utf-8")
-        constants = parse_constants(source_text)
+        constants = parse_constants(source_text, ("VT_RT_",))
         function = parse_payload_base_function(source_text)
+        vtas_constants = parse_constants(
+            VTAS_SOURCE.read_text(encoding="utf-8"),
+            ("VENTUS_AS_", "VENTUS_BVH_", "VENTUS_BOX4_", "VENTUS_TRIANGLE_",
+             "VENTUS_AABB_", "VENTUS_INSTANCE_", "VENTUS_NODE_REF_"),
+        )
     except (OSError, ValueError) as error:
         print(f"RT ABI generation failed: {error}", file=sys.stderr)
         return 1
 
     constants = {name: value for name, value in constants.items() if name not in DYNAMIC_DEFAULTS}
     spike_ok = update_or_check(SPIKE_OUTPUT, render_spike(constants, function), args.check)
+    spike_vtas_ok = update_or_check(
+        SPIKE_VTAS_OUTPUT, render_spike_vtas(vtas_constants), args.check
+    )
     scala_ok = update_or_check(SCALA_OUTPUT, render_scala(constants, function), args.check)
-    return 0 if spike_ok and scala_ok else 1
+    scala_vtas_ok = update_or_check(
+        SCALA_VTAS_OUTPUT, render_scala_vtas(vtas_constants), args.check
+    )
+    return 0 if spike_ok and spike_vtas_ok and scala_ok and scala_vtas_ok else 1
 
 
 if __name__ == "__main__":

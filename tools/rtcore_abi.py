@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate RT ABI constants from Mesa's canonical RT ABI headers.
 
-Background: Mesa writes both the fixed PDS header and the VTAS binary layout;
+Background: Mesa writes both the fixed RT Local header and the VTAS binary layout;
             Spike and RTL must not hand-copy either set of constants.
 Flow: parse Mesa's source-of-truth headers and emit checked-in C++ and Scala
       constants for Spike and the RTL, plus C++ VTAS constants for Spike.
@@ -28,12 +28,10 @@ SPIKE_VTAS_OUTPUT = ROOT / "spike/riscv/ventus_vtas_abi_generated.h"
 SCALA_OUTPUT = ROOT / "gpgpu/ventus/src/rtcore/RtAbiLayout.scala"
 SCALA_VTAS_OUTPUT = ROOT / "gpgpu/ventus/src/rtcore/RtVtasLayout.scala"
 DYNAMIC_DEFAULTS = {
-    "VT_RT_ABI_HIT_ATTRIB_SIZE_BYTES",
-    "VT_RT_ABI_PAYLOAD_BASE_BYTES",
-    "VT_RT_ABI_DEFAULT_PAYLOAD_SIZE_BYTES",
-    "VT_RT_ABI_REGION_SIZE_BYTES",
+    "VT_RT_PDS_HIT_ATTRIB_SIZE_BYTES",
+    "VT_RT_PDS_DEFAULT_PAYLOAD_SIZE_BYTES",
 }
-PAYLOAD_BASE_FUNCTION = "VT_RT_ABI_PAYLOAD_BASE_BYTES_FOR_HIT_ATTRIB_SIZE"
+PAYLOAD_BASE_FUNCTION = "VT_RT_PDS_PAYLOAD_BASE_BYTES"
 
 
 def source_without_comments(text: str) -> str:
@@ -170,7 +168,7 @@ def render_spike(constants: dict[str, int], function: tuple[str, str]) -> str:
     lines = [
         "#ifndef RISCV_VENTUS_RT_ABI_GENERATED_H",
         "#define RISCV_VENTUS_RT_ABI_GENERATED_H",
-        *generated_banner("Fixed PDS-header constants for namespace ventus_rt."),
+        *generated_banner("Fixed RT Local header constants for namespace ventus_rt."),
         "",
     ]
     for name, value in constants.items():
@@ -192,7 +190,7 @@ def render_scala(constants: dict[str, int], function: tuple[str, str]) -> str:
     scala_argument = lower_camel_name(argument)
     scala_expression = re.sub(rf"\b{re.escape(argument)}\b", scala_argument, scala_expression)
     lines = [
-        *generated_banner("Fixed PDS-header constants for package rtcore."),
+        *generated_banner("Fixed RT Local header constants for package rtcore."),
         "package rtcore",
         "",
         "object RtAbiLayout {",

@@ -1,4 +1,4 @@
-"""Regression checks for the generated fixed PDS-header ABI constants."""
+"""Regression checks for generated fixed RT Local header ABI constants."""
 
 from __future__ import annotations
 
@@ -33,14 +33,16 @@ class RtCoreAbiGeneratorTests(unittest.TestCase):
 
     def test_field_major_hit_record_layout(self) -> None:
         self.assertEqual(self.constants["VT_RT_ABI_VERSION"], 11)
-        self.assertEqual(self.constants["VT_RT_ABI_CANDIDATE_HIT_RECORD_BASE_BYTES"], 76)
-        self.assertEqual(self.constants["VT_RT_ABI_CANDIDATE_HIT_RECORD_SIZE_BYTES"], 36)
-        self.assertEqual(self.constants["VT_RT_ABI_COMMITTED_HIT_RECORD_BASE_BYTES"], 112)
-        self.assertEqual(self.constants["VT_RT_ABI_COMMITTED_HIT_RECORD_SIZE_BYTES"], 36)
-        self.assertEqual(self.constants["VT_RT_ABI_HIT_ATTRIB_BASE_BYTES"], 148)
-        self.assertEqual(self.constants["VT_RT_ABI_FIXED_HEADER_SIZE_BYTES"], 148)
+        self.assertEqual(self.constants["VT_RT_LOCAL_CANDIDATE_HIT_RECORD_BASE_BYTES"], 76)
+        self.assertEqual(self.constants["VT_RT_LOCAL_CANDIDATE_HIT_RECORD_SIZE_BYTES"], 36)
+        self.assertEqual(self.constants["VT_RT_LOCAL_COMMITTED_HIT_RECORD_BASE_BYTES"], 112)
+        self.assertEqual(self.constants["VT_RT_LOCAL_COMMITTED_HIT_RECORD_SIZE_BYTES"], 36)
+        self.assertEqual(self.constants["VT_RT_LOCAL_HEADER_SIZE_BYTES"], 148)
+        self.assertEqual(self.constants["VT_RT_PDS_CANDIDATE_HIT_ATTRIB_BASE_BYTES"], 0)
         self.assertEqual(self.constants["VT_RT_HIT_RECORD_WORD_COUNT"], 9)
-        self.assertEqual(self.constants["VT_RT_ABI_PDS_FIELD_MAJOR_FIXED_HEADER_WORD_COUNT"], 37)
+        self.assertEqual(
+            self.constants["VT_RT_LOCAL_FIELD_MAJOR_FIXED_HEADER_WORD_COUNT"], 37
+        )
         self.assertNotIn("VT_RT_ABI_PDS_LANE_MAJOR_HIT_RECORD_BODY_WORD_COUNT", self.constants)
         self.assertNotIn("VT_RT_ABI_PDS_CANDIDATE_HIT_KIND_BASE_WORD_COUNT", self.constants)
         self.assertNotIn("VT_RT_ABI_HIT_RECORD_ADDR_TAG", self.constants)
@@ -69,10 +71,10 @@ class RtCoreAbiGeneratorTests(unittest.TestCase):
             if name not in self.tool.DYNAMIC_DEFAULTS
         }
         rendered = self.tool.render_scala(constants, self.function)
-        self.assertIn("final val AbiCandidateHitRecordBaseBytes: Int = 76", rendered)
-        self.assertIn("final val AbiCommittedHitRecordBaseBytes: Int = 112", rendered)
-        self.assertIn("final val AbiFixedHeaderSizeBytes: Int = 148", rendered)
-        self.assertIn("final val AbiPdsFieldMajorFixedHeaderWordCount: Int = 37", rendered)
+        self.assertIn("final val LocalCandidateHitRecordBaseBytes: Int = 76", rendered)
+        self.assertIn("final val LocalCommittedHitRecordBaseBytes: Int = 112", rendered)
+        self.assertIn("final val LocalHeaderSizeBytes: Int = 148", rendered)
+        self.assertIn("final val LocalFieldMajorFixedHeaderWordCount: Int = 37", rendered)
         self.assertIn("final val HitRecordMeta0: Int = 0", rendered)
         self.assertIn("final val HitRecordMeta1: Int = 1", rendered)
         self.assertIn("final val HitRecordWordCount: Int = 9", rendered)

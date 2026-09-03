@@ -88,6 +88,8 @@ The following environment variables adjust simulation behavior:
 * `VENTUS_WAVEFORM_BEGIN` / `VENTUS_WAVEFORM_END` — Dump only a selected simulation interval for `rtlsim` (speeds up simulation). Not supported by `cyclesim`.
 * `VENTUS_DUMP_RESULT=filename.json` — Save all device→host copies from OpenCL programs and their device addresses to a JSON file (useful for debugging).
 * `VENTUS_TIMING_DDR=0` — Disable DDR timing in `cyclesim` (enabled by default). Current RTL simulation does not support DDR timing.
+* `VENTUS_RTL_EXTMEM_LATENCY=100` — Fixed non-LDS memory response latency used when generating the cache-enabled Verilator RTL; default is 100 cycles.
+* `VENTUS_RTLSIM_PERF_JSON=path` — Write the final cache-enabled Verilator PMU snapshot, including RTcore boundary counters, as JSON when the device closes.
 * `VENTUS_SPIKE_LOG=1` - Enable `spike` simulator to output instruction-granularity log into file. (disabled by default)
 * `NUM_THREAD=32` — Number of threads per warp reported by the POCL device. For `rtlsim`/`cyclesim`, this should match hardware specs; for `spike`, any value is acceptable.
 * `NUM_WARP=8` — Max warps per thread block reported by the POCL device. For `rtlsim`/`cyclesim`, match hardware specs; for `spike`, any value is acceptable.

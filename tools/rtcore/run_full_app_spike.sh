@@ -63,6 +63,7 @@ CRT0="${VENTUS_VK_CRT0:-$(first_file \
 LLVM_TOOL_LIB_DIR="${VENTUS_VK_LLVM_TOOL_LIB_DIR:-${LLVM_BUILD}/lib}"
 
 RUN_1X1="${RUN_1X1:-0}"
+RUN_4X4="${RUN_4X4:-0}"
 RUN_16X16="${RUN_16X16:-0}"
 RUN_160X96="${RUN_160X96:-1}"
 RUN_320X192="${RUN_320X192:-0}"
@@ -201,6 +202,9 @@ PY
 
 if [[ "${RUN_1X1}" != 0 ]]; then
   run_case 1x1 1 1
+fi
+if [[ "${RUN_4X4}" != 0 ]]; then
+  run_case 4x4 4 4
 fi
 if [[ "${RUN_16X16}" != 0 ]]; then
   run_case 16x16 16 16

@@ -5,7 +5,11 @@
 build/
 install/
 install-rt/
+install-rtcore-rtl/
+install-pdswarpbase/
 artifacts/
 regression-test-logs/
+out/
+nohup.out
 rodinia_data.tar.xz
 __pycache__

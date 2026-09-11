@@ -97,39 +97,69 @@ The following environment variables adjust simulation behavior:
 ### Vulkan Ray Tracing Baseline
 
 The pinned ray-tracing submodules can execute a real Vulkan RT vertical slice
-on the Ventus Spike backend. The verified path runs the SaschaWillems
+on the Ventus Spike backend or the cache-enabled Verilator RTL backend. The
+verified path runs the SaschaWillems
 `raytracingshadows` application through the Mesa Ventus ICD, compiles its
 SPIR-V shaders through NIR/LLVM into a Ventus RISC-V ELF, builds and uploads
 triangle BLAS plus instance TLAS data, executes the generated raygen kernel on
 Spike, and reads the storage image back as PPM.
 
-The repository-local compatibility gate produces a 160x96 image containing
-136 colors and requires an exact match with the frozen baseline SHA-256
-`f43328945bdeb0dda69b3cc5612212170e5596456450184acfa627db8d5d1212`.
-
-From a clean checkout, initialize the top-level source submodules, build the
-Spike RT path, and run the fail-closed image gate with:
+The manifest-driven regression is the sole full-application correctness gate.
+It preserves every invocation under
+`artifacts/rtcore-regression/runs/<run-id>/<case>/<geometry>/software|spike|verilator`.
+The command prints the run directory before rendering. Older results in the
+previous `<case>/<geometry>` layout remain untouched:
 
 ```bash
-git submodule update --init
-bash build-ventus.sh --build "rt-toolchain;spike;driver-spike;mesa;rt-workload"
-tools/rtcore/verify_compat_p1_image.sh
+# Functional reference (default) and RTL/PMU execution use the same application.
+python3 tools/rtcore.py regression --hardware-runner spike --width 4 --height 4
+bash build-ventus.sh --build rtcore-rtl
+python3 tools/rtcore.py regression --hardware-runner verilator --width 1 --height 1
+# Capture both backends without overwriting either result.
+python3 tools/rtcore.py regression --hardware-runner all --width 1 --height 1
+# Include the callback, texture, recursion and SBT candidate cases explicitly.
+python3 tools/rtcore.py regression --include-candidates --case raytracingshadows \
+  --case raytracingsbtdata --case raytracingintersection --case raytracingreflections \
+  --case raytracingtextures --hardware-runner all --width 4 --height 4
+python3 tools/rtcore.py abi --check
 ```
+
+The Verilator run emits `verilator/perf.json` and its validated
+`verilator/perf-summary.json`; the ordinary `env.sh` default remains Spike.
+Each renderer writes `begin.json` before launch and `render.json` on exit or
+timeout, including the exit status and a bounded error excerpt. An image
+captured before a process crash is retained for comparison but cannot pass
+the regression. Comparisons include differing-pixel counts by row and column,
+their bounding rectangle, and up to 16 RGB samples. With `--hardware-runner
+all`, `comparison.spike-verilator.json` also directly compares the two hardware
+backends. `provenance.json` records source state and runtime-library hashes.
+
+For RTL image failures, first map the differing pixels to the scene and inspect
+the corresponding source semantics. Recompute existing ray/AABB inputs and
+turn the smallest failing case into a unit test before rebuilding the full
+model. A new trace should distinguish a concrete pair of hypotheses and have
+a bounded output size. Run normal regressions without detailed traces, and
+advance from 1x1 and 4x4 to multi-warp images only after the smaller gates pass.
 
 The implementation changes, build-target responsibilities, known build
 pitfalls, and review entry points are collected in the Chinese
 [`docs/rtcore-spike-p1.md`](docs/rtcore-spike-p1.md).
 
-The workload preparation step initializes its pinned GLM dependency and
-sparse-fetches only the required scene from the public Vulkan-Assets
-repository. It does not read any external Ventus checkout. Generated sources,
-ELFs, logs, and images remain below `build/` and `artifacts/`.
+The all-example runner uses the prepared workload under
+`testcases/RTcoreSpikeCase/SaschaWillems_Vulkan`; its manifest and maintained
+application/shader overrides are versioned in `testcases`. The surrounding
+SaschaWillems source, dependencies and configured build must already exist;
+this is not supplied by the regression runner. `--workload-dir` and
+`--build-dir` select another deliberately prepared tree. The older
+`workloads/rt/prepare.sh` prepares a shadows-only upstream overlay, not this
+all-example suite. Generated ELFs, logs, and images stay in `artifacts/`.
 
 Implementation details and environment variables are documented in
 [`mesa/src/ventus/README.md`](mesa/src/ventus/README.md), and workload
 provenance is documented in
 [`workloads/rt/README.md`](workloads/rt/README.md). This is a bounded functional
-path, not Vulkan RT conformance or RTL-rendering evidence.
+path, not Vulkan RT conformance. The current validated image baseline is
+documented in [`docs/rtcore-spike-p1.md`](docs/rtcore-spike-p1.md).
 
 ### Performance Attribution for PTX Backend
 

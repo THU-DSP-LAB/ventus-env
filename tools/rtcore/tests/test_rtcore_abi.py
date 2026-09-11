@@ -9,8 +9,8 @@ import sys
 import unittest
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-TOOL_PATH = ROOT / "tools/rtcore_abi.py"
+ROOT = pathlib.Path(__file__).resolve().parents[3]
+TOOL_PATH = ROOT / "tools/rtcore/rtcore_abi.py"
 
 
 def load_tool():
@@ -32,16 +32,16 @@ class RtCoreAbiGeneratorTests(unittest.TestCase):
         cls.function = cls.tool.parse_payload_base_function(source_text)
 
     def test_field_major_hit_record_layout(self) -> None:
-        self.assertEqual(self.constants["VT_RT_ABI_VERSION"], 11)
-        self.assertEqual(self.constants["VT_RT_LOCAL_CANDIDATE_HIT_RECORD_BASE_BYTES"], 76)
+        self.assertEqual(self.constants["VT_RT_ABI_VERSION"], 12)
+        self.assertEqual(self.constants["VT_RT_LOCAL_CANDIDATE_HIT_RECORD_BASE_BYTES"], 88)
         self.assertEqual(self.constants["VT_RT_LOCAL_CANDIDATE_HIT_RECORD_SIZE_BYTES"], 36)
-        self.assertEqual(self.constants["VT_RT_LOCAL_COMMITTED_HIT_RECORD_BASE_BYTES"], 112)
+        self.assertEqual(self.constants["VT_RT_LOCAL_COMMITTED_HIT_RECORD_BASE_BYTES"], 124)
         self.assertEqual(self.constants["VT_RT_LOCAL_COMMITTED_HIT_RECORD_SIZE_BYTES"], 36)
-        self.assertEqual(self.constants["VT_RT_LOCAL_HEADER_SIZE_BYTES"], 148)
+        self.assertEqual(self.constants["VT_RT_LOCAL_HEADER_SIZE_BYTES"], 160)
         self.assertEqual(self.constants["VT_RT_PDS_CANDIDATE_HIT_ATTRIB_BASE_BYTES"], 0)
         self.assertEqual(self.constants["VT_RT_HIT_RECORD_WORD_COUNT"], 9)
         self.assertEqual(
-            self.constants["VT_RT_LOCAL_FIELD_MAJOR_FIXED_HEADER_WORD_COUNT"], 37
+            self.constants["VT_RT_LOCAL_FIELD_MAJOR_FIXED_HEADER_WORD_COUNT"], 40
         )
         self.assertNotIn("VT_RT_ABI_PDS_LANE_MAJOR_HIT_RECORD_BODY_WORD_COUNT", self.constants)
         self.assertNotIn("VT_RT_ABI_PDS_CANDIDATE_HIT_KIND_BASE_WORD_COUNT", self.constants)
@@ -50,7 +50,10 @@ class RtCoreAbiGeneratorTests(unittest.TestCase):
     def test_compact_trace_meta_replaces_individual_trace_slots(self) -> None:
         self.assertEqual(self.constants["VT_RT_SLOT_TRACE_META0"], 3)
         self.assertEqual(self.constants["VT_RT_SLOT_TRACE_META1"], 4)
-        self.assertEqual(self.constants["VT_RT_SLOT_WORD_COUNT"], 18)
+        self.assertEqual(self.constants["VT_RT_SLOT_INV_X"], 13)
+        self.assertEqual(self.constants["VT_RT_SLOT_INV_Y"], 14)
+        self.assertEqual(self.constants["VT_RT_SLOT_INV_Z"], 15)
+        self.assertEqual(self.constants["VT_RT_SLOT_WORD_COUNT"], 21)
         self.assertNotIn("VT_RT_SLOT_SBT_INDEX", self.constants)
         self.assertNotIn("VT_RT_SLOT_RESERVED_19", self.constants)
 
@@ -71,10 +74,10 @@ class RtCoreAbiGeneratorTests(unittest.TestCase):
             if name not in self.tool.DYNAMIC_DEFAULTS
         }
         rendered = self.tool.render_scala(constants, self.function)
-        self.assertIn("final val LocalCandidateHitRecordBaseBytes: Int = 76", rendered)
-        self.assertIn("final val LocalCommittedHitRecordBaseBytes: Int = 112", rendered)
-        self.assertIn("final val LocalHeaderSizeBytes: Int = 148", rendered)
-        self.assertIn("final val LocalFieldMajorFixedHeaderWordCount: Int = 37", rendered)
+        self.assertIn("final val LocalCandidateHitRecordBaseBytes: Int = 88", rendered)
+        self.assertIn("final val LocalCommittedHitRecordBaseBytes: Int = 124", rendered)
+        self.assertIn("final val LocalHeaderSizeBytes: Int = 160", rendered)
+        self.assertIn("final val LocalFieldMajorFixedHeaderWordCount: Int = 40", rendered)
         self.assertIn("final val HitRecordMeta0: Int = 0", rendered)
         self.assertIn("final val HitRecordMeta1: Int = 1", rendered)
         self.assertIn("final val HitRecordWordCount: Int = 9", rendered)

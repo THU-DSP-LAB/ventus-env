@@ -93,35 +93,27 @@ bash build-ventus.sh \
 构建完成后执行：
 
 ```bash
-./tools/rtcore/verify_compat_p1_image.sh
+python3 tools/rtcore.py regression --hardware-runner spike --width 4 --height 4
 ```
 
 门禁会完成以下检查：
 
-- workload、GLM 和场景仓库仍处于固定提交；
-- closest-hit shader 仍发射 terminate-on-first-hit shadow ray；
-- driver 动态链接到当前仓库构建的 `libspike_main.so`；
-- 所有运行时工具和资源来自当前 `ventus-env`；
-- 160x96 PPM 与冻结基准逐字节一致。
+- 重新构建选中的应用，并记录实际源码与运行库信息；
+- renderer 正常结束、没有超时，且生成所需图片；
+- 同次运行的软件参考与硬件图片满足 manifest 的像素误差阈值；
+- Verilator 的 PMU schema 与所需计数器完整。
 
-成功输出包含：
+此入口使用已准备的 `testcases/RTcoreSpikeCase/SaschaWillems_Vulkan`，
+不是旧 shadows-only overlay 的冻结哈希门禁；不能用旧图像哈希代替当前比较。
 
-```text
-PASS exact-image dimensions=160x96 colors=136
-sha256=f43328945bdeb0dda69b3cc5612212170e5596456450184acfa627db8d5d1212
-```
-
-结果位于：
+结果位于每次运行独立的目录：
 
 ```text
-artifacts/rtcore-spike/compat_p1_exact_image/160x96/
+artifacts/rtcore-regression/runs/<run-id>/raytracingshadows/4x4/
 ```
 
-如果只想运行应用、不执行精确哈希门禁，可以使用：
-
-```bash
-./tools/rtcore/run_full_app_spike.sh
-```
+该入口同时检查 renderer 正常结束、图片存在和软件/硬件像素比较；不再保留绕过
+图片门禁的 RT full-app shell 脚本。
 
 ## 聚焦测试
 
@@ -150,6 +142,13 @@ deprecation warning 和 Spike 的 circular shared-library dependency warning 当
 
 ## 当前能力边界
 
+2026-09-11 稳定检查：ABI v12；shadows、sbtdata、intersection、reflections、
+textures 五例 4×4 软件／Spike／Verilator 比较通过（10/10 硬件结果）。RTL 与
+Spike 全部逐像素一致；textures 对软件最多相差 1，其余四例完全一致。
+RTL LocalState/SRAM 单测 7/7，Mesa Ventus 单测 7/7。此处不是大尺寸性能验收，
+basic 尚无软件截图钩子，不列入通过集合。`--include-candidates` 只允许候选用例，
+不会自动选中它们；完整五例命令见根 README。
+
 - 该结果证明当前 Spike 功能模型保持完整阴影场景和衍生 shadow ray 的出图能力。
 - 它不证明 RTL 调度、周期、backpressure、resident 容量或访存带宽。
 - 它不是 Vulkan RT conformance 结论，也不表示 callable、indirect、AS
@@ -164,9 +163,8 @@ deprecation warning 和 Spike 的 circular shared-library dependency warning 当
 | `build-ventus.sh` | RT 构建目标、独立 libclc 目录和最小 Spike driver 配置 |
 | `spike/riscv/ventus_rtcore_model.h` | warp 发射边界、lane 执行和 RTcore 私有状态 |
 | `spike/riscv/ventus_custom.cc` | `traverse/release` 与 SIMT active mask 接入 |
-| `mesa/src/ventus/compiler/vt_rt_abi.h` | Ventus ABI v2 的实现侧 bit layout |
+| `mesa/src/ventus/compiler/vt_rt_abi.h` | 当前 ABI v12 的实现侧 bit layout |
 | `mesa/src/ventus/vulkan/vtvk_driver_bridge.cpp` | CPS carrier 骨架、PDS 初始化和资源上传 |
 | `mesa/src/ventus/vulkan/vtvk_memory.c` | Vulkan buffer device address 映射 |
-| `docs/rt-scratch-abi-v1-v2-audit.md` | V1/V2 差异、验证结论和未闭合风险 |
 | `workloads/rt/` | 固定上游、overlay、来源和准备脚本 |
-| `tools/rtcore/` | 全应用 runner 与 fail-closed 精确出图门禁 |
+| `tools/rtcore.py` | 全应用图片回归与 ABI 入口；实现在 `tools/rtcore/` |

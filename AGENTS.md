@@ -14,6 +14,10 @@
 可以用 `cp -a --reflink=auto` 复制一份临时 `install-XXX` 并编译安装到这里，仿造 `env.sh` 来使用它
 说明：build-ventus.sh 包括编译与安装，因此需要先复制 `install-XXX` 并 `export VENTUS_INSTALL_PREFIX=install-XXX`
 
+Mesa/Vulkan RT full-app 测试必须使用 canonical build 目录 `mesa/build-ventus`。
+禁止使用 `mesa/build-ventus-local` 作为 full-app 或 Spike bridge 测试输入，避免 LLVM/Mesa 配置分叉导致误判。
+如果需要临时 Mesa build，必须显式说明用途，且不得接入 `tools/rtcore.py regression` 等 full-app 验证入口。
+
 ## Tools Script Rules
 
 - `tools/` 一级目录只放用户直接执行的入口脚本，避免把同一工具的实现文件散落在 `tools/` 根目录。

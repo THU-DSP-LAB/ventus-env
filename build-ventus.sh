@@ -14,7 +14,7 @@ BUILD_PARALLEL=$(( $(nproc) * 2 / 3 ))
 help() {
   cat <<END
 
-  Build [systemc, llvm, rt-toolchain, pocl, ocl-icd, libclc, driver, driver-spike, spike, rtlsim|gpgpu, cyclesim|simulator, gvm, sbt|sbtsim|ptx|ptxsim, mesa, rt-workload] programs.
+  Build [systemc, llvm, rt-toolchain, pocl, ocl-icd, libclc, driver, driver-spike, spike, rtlsim|gpgpu, rtcore-rtl, cyclesim|simulator, gvm, sbt|sbtsim|ptx|ptxsim, mesa, rt-workload] programs.
 Run the rodinia and test-pocl test suites.
 Read ${DIR}/llvm/README.md to get started.
 
@@ -339,6 +339,51 @@ build_gpgpu_rtlsim() {
   make -j${BUILD_PARALLEL} install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX}
 }
 
+# Build an RTL-only Vulkan RT backend without overwriting the normal install/
+# tree.  The regression runner loads this dedicated driver and runtime library
+# explicitly, so an uncommitted Chisel change can never be confused with a
+# previously installed generic Ventus backend.
+build_rtcore_rtlsim() {
+  local rtcore_prefix="${RTCORE_RTLSIM_INSTALL_PREFIX:-${DIR}/install-rtcore-rtl}"
+  local rtcore_driver_build="${RTCORE_RTLSIM_DRIVER_BUILD_DIR:-${DRIVER_DIR}/build-rtcore-rtl}"
+
+  echo "Building RTcore Verilator backend in ${rtcore_prefix}"
+  cd "${GPGPU_DIR}/sim-verilator"
+  # Verilator 5.041 can ICE in V3TSP for this large RTcore top with its
+  # multi-threaded model scheduler.  Keep C++ compilation parallel, but use a
+  # deterministic single generated-model thread unless explicitly overridden.
+  make -j"${BUILD_PARALLEL}" install RELEASE=1 PREFIX="${rtcore_prefix}" \
+    VLIB_NPROC_DUT="${RTCORE_VERILATOR_THREADS:-1}"
+
+  # The RT-only regression links this prefix's CRT0.  Build it beside the
+  # freshly elaborated model so the V32 private-memory bootstrap cannot come
+  # from an unrelated normal install/ build.
+  mkdir -p "${rtcore_prefix}/lib"
+  "${LLVM_BUILD_DIR}/bin/clang" \
+    -target riscv32 -mcpu=ventus-gpgpu \
+    -x assembler-with-cpp -nostdinc \
+    -I"${LIBCLC_DIR}/riscv32/lib" \
+    -c "${LIBCLC_DIR}/riscv32/lib/crt0.S" \
+    -o "${rtcore_prefix}/lib/crt0.o"
+  if [ "${RTCORE_RTLSIM_BUILD_NOCACHE:-0}" = "1" ]; then
+    cd "${GPGPU_DIR}/sim-verilator-nocache"
+    make -j"${BUILD_PARALLEL}" install RELEASE=1 PREFIX="${rtcore_prefix}" \
+      VLIB_NPROC_DUT="${RTCORE_VERILATOR_THREADS:-1}"
+  fi
+
+  cmake -G Ninja -B "${rtcore_driver_build}" -S "${DRIVER_DIR}" \
+    -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
+    -DCMAKE_INSTALL_PREFIX="${rtcore_prefix}" \
+    -DVENTUS_INSTALL_PREFIX="${rtcore_prefix}" \
+    -DSPIKE_SRC_DIR="${SPIKE_DIR}" \
+    -DDRIVER_ENABLE_AUTOSELECT=OFF \
+    -DDRIVER_ENABLE_RTLSIM=ON \
+    -DDRIVER_ENABLE_CYCLESIM=OFF \
+    -DDRIVER_ENABLE_GVM=OFF \
+    -DDRIVER_ENABLE_PTX=OFF
+  ninja -C "${rtcore_driver_build}" rtlsim_driver
+}
+
 build_gvm() {
   cd ${GPGPU_DIR}/sim-verilator
   make -f gvm.mk -j${BUILD_PARALLEL} RELEASE=1 GVM_TRACE=1 GVM_REF_DIR=${VENTUS_INSTALL_PREFIX}/lib
@@ -632,6 +677,8 @@ do
     else
       build_gpgpu_rtlsim
     fi
+  elif [ "${program}" == "rtcore-rtl" ]; then
+    build_rtcore_rtlsim
   elif [ "${program}" == "cyclesim" ] || [ "${program}" == "simulator" ]; then
     check_if_systemc_built
     build_gpgpu_cyclesim

@@ -86,30 +86,27 @@ pipeline，SPIR-V 经 NIR/LLVM 编译为 Ventus RISC-V ELF，driver 上传 trian
 instance TLAS、SBT、descriptor 和输出图像，Spike 执行后把 storage image 回读为
 PPM。
 
-仓库内的兼容门禁会生成 160x96、包含 136 种颜色的图像，并要求它与冻结基准
-逐字节一致；基准 SHA-256 为
-`f43328945bdeb0dda69b3cc5612212170e5596456450184acfa627db8d5d1212`。
-
-从干净 checkout 开始，初始化顶层源码子模块、构建 Spike RT 路径并运行封闭式
-出图门禁：
+当前门禁比较同次运行的软件参考与 Spike／Verilator 图片，不再使用旧冻结哈希。
+先准备 `testcases/RTcoreSpikeCase/SaschaWillems_Vulkan` 的上游源码、依赖和 build，
+保留 testcases 中维护的应用／GLSL 覆盖文件，然后执行：
 
 ```bash
-git submodule update --init
-bash build-ventus.sh --build "rt-toolchain;spike;driver-spike;mesa;rt-workload"
-tools/rtcore/verify_compat_p1_image.sh
+python3 tools/rtcore.py abi --check
+bash build-ventus.sh --build rtcore-rtl
+python3 tools/rtcore.py regression --hardware-runner all --width 4 --height 4
 ```
 
 本阶段的实现改动、各构建目标职责、已知构建问题和审阅入口统一记录在
 [`docs/rtcore-spike-p1.md`](docs/rtcore-spike-p1.md)。
 
-workload 准备脚本会初始化固定版本的 GLM，并从公开的 Vulkan-Assets 仓库稀疏
-获取唯一需要的场景；运行过程中不读取其他 Ventus checkout。生成的源码、ELF、
-日志和图像只会写到本仓库的 `build/` 与 `artifacts/`。
+全例子的候选用例需要用 `--case` 显式选择并传入 `--include-candidates`，命令见
+英文 README。旧 `workloads/rt/prepare.sh` 只准备 shadows overlay，不是全例子的
+准备入口。运行产生的 ELF、日志和图像留在 `artifacts/`，不加入源码提交。
 
 实现边界和环境变量见
 [`mesa/src/ventus/README.md`](mesa/src/ventus/README.md)，workload 来源见
 [`workloads/rt/README.md`](workloads/rt/README.md)。这仍是有界功能路径，不等于
-Vulkan RT conformance 或 RTL 出图证据。
+Vulkan RT conformance；当前五例 4×4 RTL 出图验收范围见上述检查文档。
 
 ### 测试
 

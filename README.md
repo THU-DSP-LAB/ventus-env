@@ -96,6 +96,30 @@ The following environment variables adjust simulation behavior:
 
 ### Vulkan Ray Tracing Baseline
 
+当前 RTCore 性能基线标签：`baseline/rtcore-embree4-2026-09-15`。
+该检查点固定顶层及子模块源码，采用 Embree 3.13.4 建树，保持 VTAS ABI
+和现有 RTL 不变；尚未加入 resident AS cache 或更宽的 Scheduler 发射。
+
+16×9、seed `544222971`、单帧、2 SM、32 lane、单 Verilator 线程、外部读延迟
+100 cycles：shadows 为 **94,299 cycles**，reflections 为 **160,499 cycles**。
+两例 basic/detailed 周期、共有 PMU 计数和 shader ELF 完全一致，图像与
+lavapipe 零差异；另外验证了五个例子的 1×1 图像。off 模式及更大分辨率
+不在本次基线验收范围内，不代表 Vulkan 全面兼容性验证。
+
+复现时应显式选择 `VENTUS_VK_BVH_BUILDER=embree4`，并在 canonical
+`mesa/build-ventus` 启用 `-Dventus_embree=enabled`。可用
+`-Dventus_embree_prefix=/absolute/embree-sdk` 指定 Embree 3 二进制 SDK；
+SDK 不包含在 Git 中。建树策略、栈预算和构建说明见
+[BVH.md](mesa/src/ventus/vulkan/BVH.md)。
+
+验收记录均在 `artifacts/rtcore-regression/runs/`：detailed 为
+`20260915T133151.467205Z-831583`，basic 为
+`20260915T135354.348742Z-1026213`，同二进制 Morton 对照为
+`20260915T133518.072949Z-867553`。测试在提交前执行，provenance 记录了
+当时的未提交源码指纹；未将已有、且测试中禁用的 callback 调试改动纳入提交。
+详细[中文报告](docs/rtcore/baselines/2026-09-15-embree4.md)和原始 artifacts
+按现有忽略策略仅保存在本地，不随 checkout 恢复；本节保留验收摘要。
+
 The pinned ray-tracing submodules can execute a real Vulkan RT vertical slice
 on the Ventus Spike backend or the cache-enabled Verilator RTL backend. The
 verified path runs the SaschaWillems

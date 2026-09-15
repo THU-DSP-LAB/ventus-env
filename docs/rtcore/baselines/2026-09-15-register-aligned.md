@@ -1,5 +1,11 @@
 # Register-aligned + detailed PMU baseline — 2026-09-15
 
+> 历史基线：已由 `baseline/rtcore-embree4-2026-09-15` 替代。
+> 后续优化使用新基线：shadows 94,299、reflections 160,499 cycles，
+> basic/detailed 均验证一致。本文保留旧 Morton 数据供历史比较，
+> 不再作为当前性能目标；新基线摘要见顶层 README，详细数据见
+> [Embree 中文报告](2026-09-15-embree4.md)。
+
 这是恢复 resident AS table 优化之前的源码与性能 checkpoint。
 寄存器对齐及既有正确性修复保留，新增 detailed PMU 已实现并验证；
 不再使用本文早期版本中“detailed 只有配置名称”的描述。

@@ -17,6 +17,25 @@ def snapshot(*sms):
 
 
 class PerfTest(unittest.TestCase):
+    def test_preserves_optional_extended_metrics(self):
+        document = snapshot({name: 0 for name in COUNTERS})
+        self.assertIsNone(summarize(document)["extended"])
+        document["extended"] = {"schema_version": 1, "mode": "basic", "sm": [{"id": 0}]}
+        self.assertEqual(summarize(document)["extended"], document["extended"])
+
+    def test_detailed_cross_checks_host_sampler(self):
+        document = snapshot({name: 0 for name in COUNTERS})
+        detail = {"statistics": {"counters": {}}, "units": [
+            {"kind": kind, "index": index, "statistics": {"counters": {}}}
+            for kind, count in (("box4", 8), ("triangle", 2), ("resolve", 1))
+            for index in range(count)]}
+        document["extended"] = {"schema_version": 1, "mode": "detailed",
+                                "sm": [{"id": 0, "rt_detailed": detail}]}
+        summarize(document)
+        detail["units"][0]["statistics"]["counters"]["issues"] = 1
+        with self.assertRaisesRegex(ValueError, "disagrees with RTL"):
+            summarize(document)
+
     def test_sums_all_sm_counters(self):
         first = {name: 1 for name in COUNTERS}
         second = {name: 2 for name in COUNTERS}

@@ -8,6 +8,7 @@ install-rt/
 install-rtcore-rtl/
 install-pdswarpbase/
 artifacts/
+/docs/
 regression-test-logs/
 out/
 nohup.out

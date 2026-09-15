@@ -42,6 +42,7 @@ def load_snapshot(path: Path) -> dict[str, Any]:
 
 
 def summarize(document: dict[str, Any]) -> dict[str, Any]:
+    validate_extended(document)
     total = dict.fromkeys(COUNTERS, 0)
     for sm in document["sm"]:
         rtcore = sm.get("rtcore") if isinstance(sm, dict) else None
@@ -63,6 +64,9 @@ def summarize(document: dict[str, Any]) -> dict[str, Any]:
             "external_memory_read_latency_cycles"),
         "sm_count": len(document["sm"]),
         "counters": total,
+        # Preserve per-SM detail and exact histogram bins for plotting. Do not
+        # turn absent instrumentation into zeros or sum ratios across SMs.
+        "extended": document.get("extended"),
         "derived": {
             "traverses_per_active_session_cycle": traverses / sessions if sessions else 0.0,
             "active_lanes_per_traverse": total["traverse_active_lanes"] / traverses
@@ -86,3 +90,56 @@ def summarize(document: dict[str, Any]) -> dict[str, Any]:
             ),
         },
     }
+
+
+def validate_extended(document: dict[str, Any]) -> None:
+    """Check transport and cross-check the host sampler against RTL counters.
+
+    Old runtimes have no optional API; absence stays unavailable, not zero.
+    """
+    extended = document.get("extended")
+    if extended is None:
+        return
+    if not isinstance(extended, dict) or extended.get("schema_version") != 1:
+        raise ValueError("expected extended PMU schema_version=1")
+    mode = extended.get("mode")
+    if mode not in ("off", "basic", "detailed"):
+        raise ValueError("invalid extended PMU mode")
+    sms = extended.get("sm")
+    if not isinstance(sms, list) or len(sms) != len(document["sm"]):
+        raise ValueError("extended PMU SM count mismatch")
+    for sm, original in zip(sms, document["sm"]):
+        if not isinstance(sm, dict) or sm.get("id") != original.get("id"):
+            raise ValueError("extended PMU SM identity mismatch")
+        if mode != "detailed":
+            continue
+        detail = sm.get("rt_detailed")
+        if not isinstance(detail, dict):
+            raise ValueError("detailed mode has no RT observer snapshot")
+        units = detail.get("units")
+        if not isinstance(units, list):
+            raise ValueError("detailed snapshot has no IU array")
+        rt = original["rtcore"]
+        for kind, prefix, expected_count in (("box4", "box4", 8), ("triangle", "triangle", 2),
+                                              ("resolve", "triangle_resolve", 1)):
+            group = [u for u in units if u.get("kind") == kind]
+            if len(group) != expected_count:
+                raise ValueError(f"detailed {kind} unit count mismatch")
+            for event, counter in (("issues", "issued"), ("results", "results")):
+                observed = sum(u["statistics"]["counters"].get(event, 0) for u in group)
+                if observed != rt[f"{prefix}_{counter}"]:
+                    raise ValueError(f"detailed {kind} {event} disagrees with RTL PMU")
+        counts = detail["statistics"]["counters"]
+        for error in ("unmatched_as_serves", "unmatched_injections", "invalid_lane_state",
+                      "unexpected_live_entry_allocation"):
+            if counts.get(error, 0):
+                raise ValueError(f"detailed observer reported {error}")
+        for unit in units:
+            if unit["statistics"]["counters"].get("unmatched_results", 0):
+                raise ValueError("detailed IU observer reported unmatched results")
+        if detail.get("lsu", {}).get("counters", {}).get("unmatched_results", 0):
+            raise ValueError("detailed LSU observer reported unmatched results")
+        for host, rtl in (("as_acquires", "as_line_acquires"), ("as_serves", "as_line_ready"),
+                          ("as_allocations", "as_cache_misses"), ("as_refills", "as_cache_refills")):
+            if counts.get(host, 0) != rt[rtl]:
+                raise ValueError(f"detailed {host} disagrees with RTL PMU")

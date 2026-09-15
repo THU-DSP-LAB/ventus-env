@@ -35,14 +35,14 @@ def source_state(root: Path) -> dict:
                                 capture_output=True, text=True)
         untracked = subprocess.run(
             ["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "--",
-             "ventus/src", "driver", "src", "riscv"], capture_output=True, text=True)
+             "ventus/src", "sim-verilator", "driver", "src", "riscv"], capture_output=True, text=True)
         result[name] = {"revision": revision.stdout.strip(),
                         "dirty": bool(status.stdout.strip()),
                         "diff_sha256": hashlib.sha256(diff.stdout).hexdigest(),
                         "status": status.stdout.splitlines(),
                         "untracked_sources": [fingerprint(repo / path) for path in
                                               untracked.stdout.splitlines()
-                                              if Path(path).suffix in (".scala", ".c", ".cc", ".cpp", ".h")]}
+                                              if Path(path).suffix in (".scala", ".c", ".cc", ".cpp", ".h", ".hpp")]}
     return result
 
 

@@ -104,7 +104,8 @@ class ReportingTest(unittest.TestCase):
         (software_dir / "image.ppm").write_bytes(image.read_bytes())
         cli.render_status(self.directory, -6)
         cli.render_status(software_dir, 0)
-        args = SimpleNamespace(timeout_seconds=5, max_abs_error=0, manifest=Path("unused"))
+        args = SimpleNamespace(timeout_seconds=5, max_abs_error=0, manifest=Path("unused"),
+                               pmu_mode="basic")
         with patch.object(cli, "verilator_render", return_value=(image, None)), \
              patch.object(cli, "record_case") as record:
             result = cli.run_hardware_case(
@@ -136,7 +137,7 @@ class ReportingTest(unittest.TestCase):
                 with patch.object(cli, "ROOT", root), patch.object(cli, "run_command", side_effect=capture), \
                      patch.object(cli, "summarize_verilator_pmu", side_effect=RegressionError("invalid PMU")):
                     image, summary = cli.verilator_render({"id": "test"}, runner, root, root / "app",
-                                                         1, 1, 1, root, 5)
+                                                             1, 1, 1, root, 5, "basic")
                 self.assertIsNone(summary)
                 self.assertTrue(image.exists())
                 self.assertIn("pmu_error", self.status())

@@ -344,16 +344,27 @@ build_gpgpu_rtlsim() {
 # explicitly, so an uncommitted Chisel change can never be confused with a
 # previously installed generic Ventus backend.
 build_rtcore_rtlsim() {
-  local rtcore_prefix="${RTCORE_RTLSIM_INSTALL_PREFIX:-${DIR}/install-rtcore-rtl}"
-  local rtcore_driver_build="${RTCORE_RTLSIM_DRIVER_BUILD_DIR:-${DRIVER_DIR}/build-rtcore-rtl}"
+  local pmu_mode="${VENTUS_PMU_MODE:-off}"
+  case "${pmu_mode}" in
+    off|basic|detailed) ;;
+    *) echo "VENTUS_PMU_MODE must be off, basic, or detailed (got '${pmu_mode}')" >&2; return 2 ;;
+  esac
+  local rtcore_prefix="${RTCORE_RTLSIM_INSTALL_PREFIX:-${DIR}/install-rtcore-rtl-${pmu_mode}}"
+  local rtcore_driver_build="${RTCORE_RTLSIM_DRIVER_BUILD_DIR:-${DRIVER_DIR}/build-rtcore-rtl-${pmu_mode}}"
 
-  echo "Building RTcore Verilator backend in ${rtcore_prefix}"
+  echo "Building RTcore Verilator backend (PMU=${pmu_mode}) in ${rtcore_prefix}"
   cd "${GPGPU_DIR}/sim-verilator"
   # Verilator 5.041 can ICE in V3TSP for this large RTcore top with its
   # multi-threaded model scheduler.  Keep C++ compilation parallel, but use a
   # deterministic single generated-model thread unless explicitly overridden.
-  make -j"${BUILD_PARALLEL}" install RELEASE=1 PREFIX="${rtcore_prefix}" \
-    VLIB_NPROC_DUT="${RTCORE_VERILATOR_THREADS:-1}"
+  make -f verilate.mk -j"${BUILD_PARALLEL}" install RELEASE=1 PREFIX="${rtcore_prefix}" \
+    VLIB_NPROC_DUT="${RTCORE_VERILATOR_THREADS:-1}" VLIB_PMU_MODE="${pmu_mode}" \
+    VLIB_TRACE="${RTCORE_VERILATOR_TRACE:-0}" \
+    VLIB_RTCORE_TRACE="${RTCORE_RTCORE_TRACE:-0}" \
+    VLIB_RTCORE_DEEP_TRACE="${RTCORE_RTCORE_DEEP_TRACE:-0}" \
+    VLIB_RTCORE_RECORD_TRACE="${RTCORE_RTCORE_RECORD_TRACE:-0}" \
+    VLIB_SFU_TRACE="${RTCORE_SFU_TRACE:-0}" \
+    VLIB_FPU_TRACE="${RTCORE_FPU_TRACE:-0}"
 
   # The RT-only regression links this prefix's CRT0.  Build it beside the
   # freshly elaborated model so the V32 private-memory bootstrap cannot come
@@ -368,7 +379,7 @@ build_rtcore_rtlsim() {
   if [ "${RTCORE_RTLSIM_BUILD_NOCACHE:-0}" = "1" ]; then
     cd "${GPGPU_DIR}/sim-verilator-nocache"
     make -j"${BUILD_PARALLEL}" install RELEASE=1 PREFIX="${rtcore_prefix}" \
-      VLIB_NPROC_DUT="${RTCORE_VERILATOR_THREADS:-1}"
+      VLIB_NPROC_DUT="${RTCORE_VERILATOR_THREADS:-1}" VLIB_PMU_MODE="${pmu_mode}"
   fi
 
   cmake -G Ninja -B "${rtcore_driver_build}" -S "${DRIVER_DIR}" \

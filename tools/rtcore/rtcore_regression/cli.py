@@ -33,8 +33,8 @@ BUILTIN_HARDWARE_RUNNERS: dict[str, dict[str, Any]] = {
         "kind": "ventus-verilator",
         "mesa_build": "mesa/build-ventus",
         "llvm_build": "llvm/build",
-        "driver_library": "driver/build-rtcore-rtl/driver/rtlsim_device/librtlsim_driver.so",
-        "runtime_library_dir": "install-rtcore-rtl/lib",
+        "driver_library": "driver/build-rtcore-rtl-{pmu_mode}/driver/rtlsim_device/librtlsim_driver.so",
+        "runtime_library_dir": "install-rtcore-rtl-{pmu_mode}/lib",
         "timeout_seconds": 600,
     },
 }
@@ -42,6 +42,25 @@ BUILTIN_HARDWARE_RUNNERS: dict[str, dict[str, Any]] = {
 
 class RegressionError(RuntimeError):
     pass
+
+
+def with_rtlsim_variant(runner: dict[str, Any], pmu_mode: str, variant: str) -> dict[str, Any]:
+    """Select an explicitly named isolated RTLSIM install, preserving default paths."""
+    if not variant:
+        return runner
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", variant):
+        raise RegressionError("--rtlsim-variant must contain only letters, digits, '_' or '-'")
+    if runner.get("kind") != "ventus-verilator":
+        return runner
+    selected = dict(runner)
+    marker = f"-{pmu_mode}/"
+    replacement = f"-{pmu_mode}-{variant}/"
+    for key in ("driver_library", "runtime_library_dir"):
+        path = str(selected[key]).format(pmu_mode=pmu_mode)
+        if marker not in path:
+            raise RegressionError(f"cannot apply RTLSIM variant to {key}: {path}")
+        selected[key] = path.replace(marker, replacement, 1)
+    return selected
 
 
 def sha256(path: Path) -> str:
@@ -450,13 +469,13 @@ def summarize_verilator_pmu(perf_json: Path, render_dir: Path) -> Path:
 
 def verilator_render(case: dict[str, Any], runner: dict[str, Any], workload: Path,
                      app: Path, width: int, height: int, frames: int, case_dir: Path,
-                     timeout_seconds: int) -> tuple[Path, Path | None]:
+                     timeout_seconds: int, pmu_mode: str) -> tuple[Path, Path | None]:
     if runner.get("kind") != "ventus-verilator":
         raise RegressionError(f"unsupported hardware runner kind: {runner.get('kind')}")
     mesa_build = ROOT / runner["mesa_build"]
     llvm_build = ROOT / runner["llvm_build"]
-    driver = ROOT / runner["driver_library"]
-    runtime_dir = ROOT / runner["runtime_library_dir"]
+    driver = ROOT / runner["driver_library"].format(pmu_mode=pmu_mode)
+    runtime_dir = ROOT / runner["runtime_library_dir"].format(pmu_mode=pmu_mode)
     require_file(driver, "dedicated Verilator RTcore driver")
     require_file(runtime_dir / "libVentusRTL-withcache.so", "cache-enabled Verilator RTL model")
     llc = first_existing([llvm_build / "bin/llc", ROOT / "install/bin/llc"], "Ventus llc", True)
@@ -487,29 +506,33 @@ def verilator_render(case: dict[str, Any], runner: dict[str, Any], workload: Pat
         "VENTUS_VK_LLC": str(llc), "VENTUS_VK_LD_LLD": str(lld),
         "VENTUS_VK_LLVM_NM": str(llvm_nm), "VENTUS_VK_CRT0": str(crt0),
         "VENTUS_VK_LLVM_TOOL_LIB_DIR": str(tool_lib), "MESA_SHADER_CACHE_DISABLE": "true",
-        "VENTUS_BACKEND": "rtl", "VENTUS_RTLSIM_PERF_JSON": str(perf_json),
+        "VENTUS_BACKEND": "rtl",
+        "VENTUS_PMU_MODE": pmu_mode,
         "VENTUS_SPIKE_LOG": "0",
         "LD_LIBRARY_PATH": ":".join([str(runtime_dir), str(driver.parent), str(tool_lib),
                                         env.get("LD_LIBRARY_PATH", "")]),
     })
+    if pmu_mode != "off":
+        env["VENTUS_RTLSIM_PERF_JSON"] = str(perf_json)
     exit_status = run_command(base_app_command(app, width, height, frames), workload, env,
                               render_dir / "render.log", allow_failure=True,
                               timeout_seconds=timeout_seconds)
     require_file(ppm, f"Verilator image for {case['id']}")
     write_png(ppm, render_dir / "image.png")
     write_render_status(render_dir, "verilator-rtl", exit_status)
-    try:
-        require_file(perf_json, f"Verilator PMU snapshot for {case['id']}")
-        summary = summarize_verilator_pmu(perf_json, render_dir)
-    except RegressionError as error:
-        status = json.loads((render_dir / "render.json").read_text())
-        status["pmu_error"] = str(error)
-        write_json(render_dir / "render.json", status)
-        summary = None
+    summary = None
+    if pmu_mode != "off":
+        try:
+            require_file(perf_json, f"Verilator PMU snapshot for {case['id']}")
+            summary = summarize_verilator_pmu(perf_json, render_dir)
+        except RegressionError as error:
+            status = json.loads((render_dir / "render.json").read_text())
+            status["pmu_error"] = str(error)
+            write_json(render_dir / "render.json", status)
     return ppm, summary
 
 
-def preflight_runner(runner_name: str, runner: dict[str, Any]) -> None:
+def preflight_runner(runner_name: str, runner: dict[str, Any], pmu_mode: str) -> None:
     """Fail before software rendering when an explicitly selected backend is absent."""
     if runner_name == "spike":
         if runner.get("kind") != "ventus-spike":
@@ -520,8 +543,9 @@ def preflight_runner(runner_name: str, runner: dict[str, Any]) -> None:
     if runner_name == "verilator":
         if runner.get("kind") != "ventus-verilator":
             raise RegressionError(f"unsupported hardware runner kind: {runner.get('kind')}")
-        require_file(ROOT / runner["driver_library"], "dedicated Verilator RTcore driver")
-        runtime_dir = ROOT / runner["runtime_library_dir"]
+        require_file(ROOT / runner["driver_library"].format(pmu_mode=pmu_mode),
+                     "dedicated Verilator RTcore driver")
+        runtime_dir = ROOT / runner["runtime_library_dir"].format(pmu_mode=pmu_mode)
         require_file(runtime_dir / "libVentusRTL-withcache.so",
                      "cache-enabled Verilator RTL model")
         require_file(ROOT / runner["mesa_build"] /
@@ -582,6 +606,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--include-candidates", action="store_true")
     parser.add_argument("--hardware-runner", default="spike",
                         help="spike, verilator, or all (default: spike)")
+    parser.add_argument("--pmu-mode", choices=("off", "basic", "detailed"), default="off",
+                        help="Verilator PMU elaboration mode; must match build-ventus.sh rtcore-rtl")
+    parser.add_argument("--rtlsim-variant", default="",
+                        help="use isolated install-rtcore-rtl-<pmu>-<variant> and matching driver build")
     parser.add_argument("--width", type=int)
     parser.add_argument("--height", type=int)
     parser.add_argument("--benchmark-frames", type=int)
@@ -623,12 +651,13 @@ def main(argv: list[str] | None = None) -> int:
         for runner_name in runner_names:
             runner = available_runners.get(runner_name)
             if runner is not None:
+                runner = with_rtlsim_variant(runner, args.pmu_mode, args.rtlsim_variant)
                 runners.append((runner_name, runner))
         if len(runners) != len(runner_names):
             available = ", ".join(sorted(available_runners))
             raise RegressionError(f"unknown hardware runner '{args.hardware_runner}' (available: {available})")
         for runner_name, runner in runners:
-            preflight_runner(runner_name, runner)
+            preflight_runner(runner_name, runner, args.pmu_mode)
         selected = select_cases(manifest, args.case, args.include_candidates)
         args.out_dir = args.out_dir / "runs" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
                                                 + f"-{os.getpid()}")
@@ -637,13 +666,16 @@ def main(argv: list[str] | None = None) -> int:
         write_json(args.out_dir / "provenance.json", {
             "sources": source_state(ROOT),
             "manifest": fingerprint(args.manifest),
+            "pmu_mode": args.pmu_mode,
             "runners": {name: config for name, config in runners},
-            "runtime_libraries": [fingerprint(ROOT / config["runtime_library_dir"] /
+            "runtime_libraries": [fingerprint(ROOT / config["runtime_library_dir"].format(
+                pmu_mode=args.pmu_mode) /
                                                "libVentusRTL-withcache.so")
                                   for _, config in runners if "runtime_library_dir" in config],
             "mesa_libraries": [fingerprint(p) for p in
                                (ROOT / "mesa/build-ventus/src/ventus/vulkan").glob("libvulkan_ventus.so*")],
-            "generated_rtl": fingerprint(ROOT / "gpgpu/sim-verilator/build/generated/rtl/dut.v"),
+            "generated_rtl": fingerprint(ROOT / "gpgpu/sim-verilator/build/generated" /
+                                         f"rtl-{args.pmu_mode}/dut.v"),
         })
         summary: list[dict[str, Any]] = []
         for case in selected:
@@ -695,7 +727,8 @@ def run_hardware_case(case: dict[str, Any], runner_name: str, runner: dict[str, 
         perf_summary = None
     elif runner_name == "verilator":
         hardware, perf_summary = verilator_render(
-            case, runner, workload, app, width, height, frames, case_dir, timeout)
+            case, runner, workload, app, width, height, frames, case_dir, timeout,
+            args.pmu_mode)
         release_verification = None
     else:
         raise RegressionError(f"unsupported hardware runner '{runner_name}'")

@@ -24,6 +24,7 @@ class PerfTest(unittest.TestCase):
         self.assertEqual(report["sm_count"], 2)
         self.assertEqual(report["counters"]["box4_issued"], 3)
         self.assertEqual(report["derived"]["active_lanes_per_traverse"], 1.0)
+        self.assertEqual(report["derived"]["as_cache_average_waiter_uses"], 1.0)
 
     def test_rejects_bad_schema_and_missing_counter(self):
         with tempfile.TemporaryDirectory() as directory:

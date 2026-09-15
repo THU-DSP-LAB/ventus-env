@@ -18,7 +18,9 @@ COUNTERS = (
     "release_backpressure_cycles", "local_sram_read_requests",
     "local_sram_write_requests", "local_sram_read_responses",
     "local_sram_backpressure_cycles", "ray_setup_outputs", "as_line_acquires",
-    "as_line_ready", "as_acquire_backpressure_cycles", "box4_issued",
+    "as_line_ready", "as_acquire_backpressure_cycles", "as_cache_resident_hits",
+    "as_cache_pending_merges", "as_cache_misses", "as_cache_refills",
+    "as_cache_evictions", "box4_issued",
     "box4_results", "triangle_issued", "triangle_results",
     "triangle_resolve_issued", "triangle_resolve_results", "stack_pushes",
     "stack_pops",
@@ -72,6 +74,8 @@ def summarize(document: dict[str, Any]) -> dict[str, Any]:
             ) / traverses if traverses else 0.0,
             "local_sram_backpressure_fraction": total["local_sram_backpressure_cycles"] /
             sessions if sessions else 0.0,
+            "as_cache_average_waiter_uses": total["as_line_ready"] /
+            total["as_cache_refills"] if total["as_cache_refills"] else 0.0,
             "box4_results_per_issue": total["box4_results"] / total["box4_issued"]
             if total["box4_issued"] else 0.0,
             "triangle_results_per_issue": total["triangle_results"] /

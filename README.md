@@ -96,6 +96,22 @@ The following environment variables adjust simulation behavior:
 
 ### Vulkan Ray Tracing Baseline
 
+2026-09-18 开发检查点（不是替换下述历史性能基线）：gpgpu `a17af22`、
+Mesa `549471cacd0`。包含 lane 独立栈、固定分组多 IU 派发，以及启动寄存器
+分配修复：按 `max(shader需求, crt0需求)` 再对齐，SGPR 下限32，VGPR
+覆盖v32，避免相邻 warp 覆盖启动临时寄存器。当前源码默认 **1 SM、
+8 LSU MSHR、外存延迟100 cycles**；1-cycle 仅是独立构建时的实验覆盖值。
+
+当前检查点的 shadows 单SM测试覆盖1×1、16×9、32×1/2/4/8/9/16/32，
+以及固定2:1的4×2至32×16曲线。固定比例曲线加1×1的九点中，100-cycle
+basic/detailed 周期及共有RT计数一致，两种延迟下18次detailed图像回归均与
+lavapipe零差异。测试在提交前运行，原始provenance与二进制哈希不回写。
+构建、安装及测试产物不纳入Git；本地报告见
+`artifacts/rtcore-regression/reports/2026-09-18-sm1-固定比例曲线/报告.md` 和
+`artifacts/rtcore-regression/reports/2026-09-18-sm1-外存延迟对照/报告.md`。
+旧的scheduler阻塞分类及按单路扣减的未选中计数尚未完全适配多发，不能用
+其中的零值断言无阻塞。尚未实施无candidate的traverse边界warp切换。
+
 当前 RTCore 性能基线标签：`baseline/rtcore-embree4-2026-09-15`。
 该检查点固定顶层及子模块源码，采用 Embree 3.13.4 建树，保持 VTAS ABI
 和现有 RTL 不变；尚未加入 resident AS cache 或更宽的 Scheduler 发射。

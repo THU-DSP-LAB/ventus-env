@@ -32,6 +32,16 @@ class PerfTest(unittest.TestCase):
         document["extended"] = {"schema_version": 1, "mode": "detailed",
                                 "sm": [{"id": 0, "rt_detailed": detail}]}
         summarize(document)
+        detail["as_policy"] = "retained_reverse_replace"
+        detail["statistics"]["counters"]["as_evictions"] = 1
+        with self.assertRaisesRegex(ValueError, "as_evictions disagrees"):
+            summarize(document)
+        document["sm"][0]["rtcore"]["as_cache_evictions"] = 1
+        summarize(document)
+        detail["statistics"]["counters"]["unmatched_evictions"] = 1
+        with self.assertRaisesRegex(ValueError, "unmatched_evictions"):
+            summarize(document)
+        detail["statistics"]["counters"]["unmatched_evictions"] = 0
         detail["units"][0]["statistics"]["counters"]["issues"] = 1
         with self.assertRaisesRegex(ValueError, "disagrees with RTL"):
             summarize(document)

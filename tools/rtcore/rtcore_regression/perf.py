@@ -131,7 +131,7 @@ def validate_extended(document: dict[str, Any]) -> None:
                     raise ValueError(f"detailed {kind} {event} disagrees with RTL PMU")
         counts = detail["statistics"]["counters"]
         for error in ("unmatched_as_serves", "unmatched_injections", "invalid_lane_state",
-                      "unexpected_live_entry_allocation"):
+                      "unexpected_live_entry_allocation", "unmatched_evictions"):
             if counts.get(error, 0):
                 raise ValueError(f"detailed observer reported {error}")
         for unit in units:
@@ -143,3 +143,6 @@ def validate_extended(document: dict[str, Any]) -> None:
                           ("as_allocations", "as_cache_misses"), ("as_refills", "as_cache_refills")):
             if counts.get(host, 0) != rt[rtl]:
                 raise ValueError(f"detailed {host} disagrees with RTL PMU")
+        if detail.get("as_policy") == "retained_reverse_replace":
+            if counts.get("as_evictions", 0) != rt["as_cache_evictions"]:
+                raise ValueError("detailed as_evictions disagrees with RTL PMU")

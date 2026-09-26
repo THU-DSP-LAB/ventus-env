@@ -8,6 +8,11 @@ export OCL_ICD_VENDORS=${VENTUS_INSTALL_PREFIX}/lib/libpocl.so
 export CL_ICD_FILENAMES=${VENTUS_INSTALL_PREFIX}/lib/libpocl.so
 export VENTUS_SPIKE_LOG=0
 
+# V5 final linked images must pass the matching completion-frontier checker
+# before Mesa exposes them to the driver. Missing tools fail closed.
+export VENTUS_VK_RT_COMPLETION_CHECKER="${VENTUS_VK_RT_COMPLETION_CHECKER:-${DIR}/tools/rtcore.py}"
+export VENTUS_VK_LLVM_OBJDUMP="${VENTUS_VK_LLVM_OBJDUMP:-${VENTUS_INSTALL_PREFIX}/bin/llvm-objdump}"
+
 # see https://pcn2po10nqam.feishu.cn/wiki/XHNXwIdRkiFtZDkCW6Mc58Uon3b
 export POCL_ENABLE_UNINIT=1
 

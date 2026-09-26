@@ -19,8 +19,9 @@ Audit mode accepts the first independently decoded read of ``vd`` and is
 intended only for inspecting pre-frontier baseline binaries; it is not a
 release gate.  Keep the numeric RT encoding constants synchronized with
 spike/riscv/encoding.h and keep the prefix whitelist deliberately small.
-Register-extension ELFs are rejected until their physical-register state is
-modeled; this checker is not a proof of arbitrary SIMT reconvergence behavior.
+REGEXT/REGEXTI are decoded numerically as one-instruction prefixes. The
+matched producer must establish the frontier before SIMT branch/JOIN; these
+are rejected rather than approximated as ordinary CFG fall-through.
 """
 
 from __future__ import annotations
@@ -46,8 +47,6 @@ _INSTRUCTION_RE = re.compile(
     r"((?:[0-9a-fA-F]{2}(?:\s+|$)){2,8})"
     r"\s*([^\s]+)(?:\s+(.*?))?\s*$"
 )
-_TARGET_RE = re.compile(r"0x([0-9a-fA-F]+)")
-_VECTOR_REGISTER_RE = re.compile(r"(?<![A-Za-z0-9_])v([0-9]|[12][0-9]|3[01])(?![A-Za-z0-9_])")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -58,6 +57,9 @@ class Instruction:
     mnemonic: str
     operands: str
     source_line: str
+    extension: int = 0
+    extension_immediate: bool = False
+    prefix_address: int | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -105,100 +107,137 @@ def is_rt_traverse_v5(inst: Instruction) -> bool:
     return inst.size == 4 and (inst.word & RT_TRAVERSE_V5_MASK) == RT_TRAVERSE_V5_MATCH
 
 
+def is_extension(inst: Instruction) -> bool:
+    return inst.size == 4 and (inst.word & 0x707F) in (0x200B, 0x300B)
+
+
+def _register(inst: Instruction, shift: int, role: int) -> int:
+    high = (inst.extension >> (role * 3)) & 7
+    if inst.extension_immediate:
+        high = ((inst.extension >> 3) & 7) if role == 2 else (
+            (inst.extension & 7) if role == 0 else 0)
+    return ((inst.word >> shift) & 31) | (high << 5)
+
+
 def destination_register(inst: Instruction) -> int:
-    return (inst.word >> 7) & 0x1F
+    return _register(inst, 7, 0)
 
 
-def _operand_vector_registers(inst: Instruction) -> tuple[list[int], list[int]]:
-    operands = [part.strip() for part in inst.operands.split(",") if part.strip()]
-    all_registers = [int(match.group(1)) for match in _VECTOR_REGISTER_RE.finditer(inst.operands)]
-    destination_registers: list[int] = []
-    vector_source_first = inst.mnemonic.startswith(("vb", "vs"))
-    if operands and not vector_source_first:
-        destination_registers = [
-            int(match.group(1))
-            for match in _VECTOR_REGISTER_RE.finditer(operands[0])
-        ]
-    return all_registers, destination_registers
+def _signed(value: int, bits: int) -> int:
+    return value - (1 << bits) if value & (1 << (bits - 1)) else value
+
+
+def _direct_target(inst: Instruction) -> int | None:
+    w = inst.word
+    opcode, funct3 = w & 127, (w >> 12) & 7
+    if opcode in (0x63, 0x5B) and funct3 in (0, 1, 4, 5, 6, 7):
+        immediate = ((w >> 31) << 12) | (((w >> 7) & 1) << 11)
+        immediate |= (((w >> 25) & 63) << 5) | (((w >> 8) & 15) << 1)
+        return inst.address + _signed(immediate, 13)
+    if opcode == 0x6F:
+        immediate = ((w >> 31) << 20) | (((w >> 12) & 255) << 12)
+        immediate |= (((w >> 20) & 1) << 11) | (((w >> 21) & 1023) << 1)
+        return inst.address + _signed(immediate, 21)
+    return None
+
+
+def _bind_extensions(instructions: list[Instruction], text: str) -> list[Instruction]:
+    # REGEXT/REGEXTI affect exactly the next instruction (Spike ext_set and
+    # execute.cc ext_clear; LLVM VentusRegextInsertion). Treat the pair as an
+    # indivisible compiler carrier, and reject direct or symbol entry into its
+    # second word. Arbitrary indirect mid-instruction entry is outside the
+    # matched-toolchain ELF contract, as with any compiler-generated code.
+    by_address = {inst.address: inst for inst in instructions}
+    for inst in instructions:
+        if inst.size != 4:
+            raise VerificationError("only the uncompressed RV32 Ventus profile is supported")
+        if not is_extension(inst):
+            continue
+        if inst.word & 0x000F8F80:
+            raise VerificationError(f"0x{inst.address:x}: noncanonical register-extension")
+        following = by_address.get(inst.address + 4)
+        if following is None or is_extension(following):
+            raise VerificationError(f"0x{inst.address:x}: orphan or consecutive register-extension")
+        by_address[following.address] = dataclasses.replace(
+            following, extension=inst.word >> 20,
+            extension_immediate=((inst.word >> 12) & 7) == 3,
+            prefix_address=inst.address)
+    protected = {inst.address for inst in by_address.values() if inst.prefix_address is not None}
+    for inst in instructions:
+        if _direct_target(inst) in protected:
+            raise VerificationError(f"0x{inst.address:x}: control flow bypasses register-extension")
+    symbols = {int(m.group(1), 16) for m in re.finditer(
+        r"^\s*([0-9a-fA-F]+)\s+<[^>]+>:\s*$", text, re.MULTILINE)}
+    if symbols & protected:
+        raise VerificationError("symbol entry bypasses register-extension")
+    return [by_address[inst.address] for inst in instructions]
+
+
+def _is_broadcast(inst: Instruction) -> bool:
+    # VMV.V.X or VMV.V.I: vs2 is a fixed zero field, not a source register.
+    return (inst.word & 0xFFF0707F) in (0x5E004057, 0x5E003057)
+
+
+def _vector_reads(inst: Instruction) -> set[int]:
+    w = inst.word
+    opcode, funct3 = w & 127, (w >> 12) & 7
+    if opcode == 0x57:
+        if _is_broadcast(inst) or funct3 == 7:
+            return set()
+        reads = {_register(inst, 20, 2)}
+        if funct3 in (0, 1, 2):
+            reads.add(_register(inst, 15, 1))
+        return reads
+    if opcode == 0x5B and funct3 in (0, 1, 4, 5, 6, 7):
+        return {_register(inst, 20, 2), _register(inst, 15, 1)}
+    return set()
 
 
 def reads_vector_register(inst: Instruction, register: int) -> bool:
-    all_registers, destination_registers = _operand_vector_registers(inst)
-    if register in all_registers[len(destination_registers):]:
-        return True
-
-    # Ventus vector arithmetic uses the standard vector opcode.  vs2 is always
-    # bits 24:20; bits 19:15 are a vector source only for vv forms.  This also
-    # recognizes result consumers that an older llvm-objdump prints unknown.
-    if inst.size == 4 and (inst.word & 0x7F) == 0x57:
-        if ((inst.word >> 20) & 0x1F) == register:
-            return True
-        funct3 = (inst.word >> 12) & 0x7
-        if funct3 in (0, 1, 2) and ((inst.word >> 15) & 0x1F) == register:
-            return True
-    return False
+    return register in _vector_reads(inst)
 
 
 def is_strict_frontier(inst: Instruction, traverse_destination: int) -> bool:
-    if inst.mnemonic != "vor.vi":
-        return False
-    operands = [part.strip() for part in inst.operands.split(",")]
-    if len(operands) != 3:
-        return False
+    # Numeric identity, independent of objdump's incomplete custom decoder.
+    # vm=1, immediate low5=0, and REGEXTI high6=0 are all required. REGEXT
+    # high rs1 bits do not extend immediates, whereas REGEXTI does.
     return (
-        inst.size == 4
-        and (inst.word & 0xFE0FF07F) == 0x2A003057
-        and ((inst.word >> 20) & 0x1F) == traverse_destination
-        and _VECTOR_REGISTER_RE.fullmatch(operands[0]) is not None
-        and operands[1] == f"v{traverse_destination}"
-        and operands[2] in ("0", "0x0")
+        (inst.word & 0xFE0FF07F) == 0x2A003057
+        and _register(inst, 20, 2) == traverse_destination
+        and (not inst.extension_immediate or (inst.extension >> 6) == 0)
     )
 
 
-_SCALAR_PREFIX_MNEMONICS = {
-    "add", "addi", "addiw", "and", "andi", "auipc", "li", "lui", "mv",
-    "or", "ori", "sext.w", "sll", "slli", "srl", "srli", "sub", "xor",
-    "xori", "zext.w",
-}
-_CONDITIONAL_BRANCHES = {
-    "beq", "bge", "bgeu", "blt", "bltu", "bne",
-    "vbeq", "vbge", "vbgeu", "vblt", "vbltu", "vbne",
-}
-
-
 def _is_prefix_whitelisted(inst: Instruction) -> bool:
-    mnemonic = inst.mnemonic
-    if mnemonic in {"join", "j", "nop", "vmv.v.x"}:
+    w = inst.word
+    opcode, funct3, funct7 = w & 127, (w >> 12) & 7, w >> 25
+    if is_extension(inst):
         return True
-    if mnemonic in _CONDITIONAL_BRANCHES:
+    if opcode in (0x17, 0x37):  # scalar AUIPC, LUI
         return True
-    if mnemonic in _SCALAR_PREFIX_MNEMONICS:
-        return not _VECTOR_REGISTER_RE.search(inst.operands)
-    if mnemonic in {"csrr", "csrr.v"}:
-        return True
-    return False
+    if opcode == 0x13:
+        return (funct7 == 0 if funct3 == 1 else
+                funct7 in (0, 0x20) if funct3 == 5 else True)
+    if opcode == 0x33:
+        return funct7 in (0, 1) or (funct7 == 0x20 and funct3 in (0, 5))
+    if opcode == 0x63:
+        return funct3 in (0, 1, 4, 5, 6, 7)
+    if opcode == 0x6F:  # direct jump, never a call
+        return destination_register(inst) == 0
+    if opcode == 0x73:  # read-only scalar CSRRS, no CSR write or mask change
+        return funct3 == 2 and _register(inst, 15, 1) == 0
+    return _is_broadcast(inst)
 
 
-def _branch_target(inst: Instruction) -> int | None:
-    match = _TARGET_RE.search(inst.operands)
-    if not match:
-        raise VerificationError(f"unresolved branch target at 0x{inst.address:x}")
-    return int(match.group(1), 16)
-
-
-def _successors(
-    inst: Instruction,
-    next_address: int | None,
-) -> tuple[int, ...]:
-    if inst.mnemonic == "j":
-        target = _branch_target(inst)
-        return (target,) if target is not None else ()
-    if inst.mnemonic in _CONDITIONAL_BRANCHES:
-        target = _branch_target(inst)
-        return tuple(address for address in (target, next_address) if address is not None)
-    if inst.mnemonic in {"ret", "jr", "jalr", "ecall", "ebreak", "unimp"}:
-        return ()
-    return (next_address,) if next_address is not None else ()
+def _successors(inst: Instruction) -> tuple[int, ...]:
+    target = _direct_target(inst)
+    if (inst.word & 127) == 0x6F:
+        assert target is not None
+        return (target,)
+    if (inst.word & 127) == 0x63:
+        assert target is not None
+        return (target, inst.address + inst.size)
+    return (inst.address + inst.size,)
 
 
 def verify_disassembly(
@@ -207,31 +246,16 @@ def verify_disassembly(
     strict: bool,
     max_prefix: int = 64,
 ) -> list[Frontier]:
-    instructions = parse_disassembly(text)
+    instructions = _bind_extensions(parse_disassembly(text), text)
     by_address = {inst.address: inst for inst in instructions}
-    next_by_address = {
-        inst.address: inst.address + inst.size
-        for inst in instructions
-    }
     traversals = [inst for inst in instructions if is_rt_traverse_v5(inst)]
     if not traversals:
         raise VerificationError("no numeric RT_TRAVERSE_V5 instruction found")
-    # Register-extension state is not yet modeled. Never interpret its low
-    # five register bits as a proof about a different physical VGPR. This
-    # conservative limitation is a release-gate gap, not an audit bypass.
-    if any(inst.mnemonic in {"regext", "regexti"} for inst in instructions):
-        raise VerificationError("register-extension ELF is not yet supported")
 
     verified: list[Frontier] = []
     for traversal in traversals:
         destination = destination_register(traversal)
-        first = next_by_address[traversal.address]
-        if first is None:
-            raise VerificationError(
-                f"0x{traversal.address:x}: traversal has no successor instruction"
-            )
-        work = deque([(first, 0, frozenset())])
-        path_frontiers: list[Frontier] = []
+        work = deque([(traversal.address + 4, 0, frozenset())])
         visits = 0
         while work:
             visits += 1
@@ -240,58 +264,45 @@ def verify_disassembly(
             address, prefix_length, path = work.popleft()
             if address in path:
                 raise VerificationError(
-                    f"0x{traversal.address:x}: CFG cycle reaches 0x{address:x} before a frontier"
-                )
+                    f"0x{traversal.address:x}: CFG cycle reaches 0x{address:x} before a frontier")
             if prefix_length > max_prefix:
                 raise VerificationError(
-                    f"0x{traversal.address:x}: no frontier within {max_prefix} instructions"
-                )
+                    f"0x{traversal.address:x}: no frontier within {max_prefix} instructions")
             inst = by_address.get(address)
             if inst is None:
                 raise VerificationError(
-                    f"0x{traversal.address:x}: CFG leaves disassembly at 0x{address:x} before a frontier"
-                )
-            if is_rt_traverse_v5(inst) or inst.mnemonic.startswith("vt.rt."):
+                    f"0x{traversal.address:x}: CFG leaves disassembly at 0x{address:x} before a frontier")
+            opcode = inst.word & 127
+            if opcode == 0x0A:
                 raise VerificationError(
-                    f"0x{traversal.address:x}: RT operation at 0x{address:x} precedes the frontier"
-                )
-            if reads_vector_register(inst, destination):
-                if strict and not is_strict_frontier(inst, destination):
-                    raise VerificationError(
-                        f"0x{traversal.address:x}: first v{destination} read at 0x{address:x} "
-                        f"is not 'vor.vi vout, v{destination}, 0'"
-                    )
-                path_frontiers.append(
-                    Frontier(
-                        traverse_address=traversal.address,
-                        destination=destination,
-                        frontier_address=address,
-                        frontier_mnemonic=inst.mnemonic,
-                        prefix_length=prefix_length,
-                    )
-                )
+                    f"0x{traversal.address:x}: RT operation at 0x{address:x} precedes the frontier")
+            if opcode == 0x5B:
+                # JOIN may execute a deferred else arm; SETRPC and vector
+                # branches mutate the SIMT stack/mask. The producer places the
+                # frontier before leaving the issuing block. Never approximate
+                # reconvergence by fall-through and silently omit an else arm.
+                raise VerificationError(
+                    f"0x{traversal.address:x}: SIMT control before frontier at 0x{address:x}")
+            is_marker = is_strict_frontier(inst, destination)
+            reads = reads_vector_register(inst, destination)
+            if is_marker or (reads and not strict):
+                verified.append(Frontier(
+                    traversal.address, destination, address,
+                    "vor.vi" if is_marker else inst.mnemonic, prefix_length))
                 continue
-            _, written = _operand_vector_registers(inst)
-            if destination in written:
+            if reads:
                 raise VerificationError(
-                    f"0x{traversal.address:x}: v{destination} overwritten before frontier"
-                )
+                    f"0x{traversal.address:x}: first v{destination} read at 0x{address:x} "
+                    "is not an unmasked zero-immediate completion frontier")
+            if opcode == 0x57 and destination_register(inst) == destination:
+                raise VerificationError(
+                    f"0x{traversal.address:x}: v{destination} overwritten before frontier")
             if not _is_prefix_whitelisted(inst):
                 raise VerificationError(
                     f"0x{traversal.address:x}: non-whitelisted instruction before frontier: "
-                    f"{inst.source_line.strip()}"
-                )
-            successors = _successors(inst, next_by_address[address])
-            if not successors:
-                raise VerificationError(
-                    f"0x{traversal.address:x}: path terminates at 0x{address:x} before a frontier"
-                )
-            next_path = path | {address}
-            for successor in successors:
-                work.append((successor, prefix_length + 1, next_path))
-        if not path_frontiers:
-            raise VerificationError(f"0x{traversal.address:x}: no reachable frontier")
-        verified.extend(path_frontiers)
+                    f"{inst.source_line.strip()}")
+            for successor in _successors(inst):
+                work.append((successor, prefix_length + 1, path | {address}))
     return verified
 
 

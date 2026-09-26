@@ -113,6 +113,11 @@ run_case() {
   local ppm="${case_dir}/${APP_NAME}_spike.ppm"
   local png="${case_dir}/${APP_NAME}_spike.png"
   local log="${case_dir}/${APP_NAME}.log"
+  local retain_artifacts="${VENTUS_VK_RETAIN_SHADER_ARTIFACTS-1}"
+  case "${retain_artifacts}" in
+    ''|0|false|FALSE|off|OFF) retain_artifacts=0 ;;
+    *) retain_artifacts=1 ;;
+  esac
   local -a app_command=(
     "${APP}"
     --benchmark
@@ -134,10 +139,12 @@ run_case() {
     export VENTUS_VK_DRIVER_LIB="${DRIVER_LIB}"
     export VENTUS_VK_DUMP_IMAGE="${ppm}"
     export VENTUS_VK_SHADER_ARTIFACT_DIR="${elf_dir}"
-    export VENTUS_VK_RETAIN_SHADER_ARTIFACTS=1
+    export VENTUS_VK_RETAIN_SHADER_ARTIFACTS="${retain_artifacts}"
     export VENTUS_VK_LLC="${LLC}"
     export VENTUS_VK_LD_LLD="${LD_LLD}"
     export VENTUS_VK_LLVM_NM="${LLVM_NM}"
+    export VENTUS_VK_LLVM_OBJDUMP="${LLVM_OBJDUMP}"
+    export VENTUS_VK_RT_COMPLETION_CHECKER="${VENTUS_VK_RT_COMPLETION_CHECKER:-${ROOT_DIR}/tools/rtcore.py}"
     export VENTUS_VK_CRT0="${CRT0}"
     export VENTUS_VK_LLVM_TOOL_LIB_DIR="${LLVM_TOOL_LIB_DIR}"
     # Execution policy is selected only by the per-pipeline private pNext.
@@ -151,19 +158,25 @@ run_case() {
     "${app_command[@]}"
   ) >"${log}" 2>&1
 
-  # This is a post-run validation gate on the actual linked artifacts, not a
-  # runtime loader guard. Image success alone must never produce a gate PASS.
+  # V5 pipeline creation must have checked the final ELF before launch. Keep
+  # this evidence even when pipeline destruction removes compiler artifacts.
+  rg 'V5 final ELF completion frontier passed:' "${log}" \
+    >"${case_dir}/completion-frontier.log" ||
+    die "no pre-launch V5 completion-frontier evidence for ${label}"
+  # Retained images additionally receive an independent post-run check.
   local -a rt_elfs
   shopt -s nullglob
   rt_elfs=("${elf_dir}"/*.riscv)
   shopt -u nullglob
-  [[ "${#rt_elfs[@]}" -gt 0 ]] || die "no retained final RT ELF in ${elf_dir}"
-  python3 "${ROOT_DIR}/tools/rtcore.py" --mode strict \
-    --objdump "${LLVM_OBJDUMP}" "${rt_elfs[@]}" \
-    >"${case_dir}/completion-frontier.log" 2>&1 || {
+  if [[ "${retain_artifacts}" == 1 ]]; then
+    [[ "${#rt_elfs[@]}" -gt 0 ]] || die "no retained final RT ELF in ${elf_dir}"
+    python3 "${ROOT_DIR}/tools/rtcore.py" --mode strict \
+      --objdump "${LLVM_OBJDUMP}" "${rt_elfs[@]}" \
+      >>"${case_dir}/completion-frontier.log" 2>&1 || {
       cat "${case_dir}/completion-frontier.log" >&2
       die "final ELF completion-frontier gate failed for ${label}"
     }
+  fi
 
   require_file "${ppm}"
   python3 - "${ppm}" "${width}" "${height}" <<'PY'

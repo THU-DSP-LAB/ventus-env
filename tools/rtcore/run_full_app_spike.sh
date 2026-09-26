@@ -54,6 +54,8 @@ LD_LLD="${VENTUS_VK_LD_LLD:-$(first_executable \
   "${LLVM_BUILD}/bin/ld.lld" "${VENTUS_INSTALL_PREFIX}/bin/ld.lld" || true)}"
 LLVM_NM="${VENTUS_VK_LLVM_NM:-$(first_executable \
   "${LLVM_BUILD}/bin/llvm-nm" "${VENTUS_INSTALL_PREFIX}/bin/llvm-nm" || true)}"
+LLVM_OBJDUMP="${LLVM_OBJDUMP:-$(first_executable \
+  "${LLVM_BUILD}/bin/llvm-objdump" "${VENTUS_INSTALL_PREFIX}/bin/llvm-objdump" || true)}"
 CRT0="${VENTUS_VK_CRT0:-$(first_file \
   "${ROOT_DIR}/llvm/build-rt-libclc/lib/crt0.o" \
   "${ROOT_DIR}/llvm/build-rt-libclc/riscv32/lib/CMakeFiles/ctr0_obj.dir/crt0.S.o" \
@@ -92,6 +94,7 @@ require_file "${DRIVER_LIB}"
 require_executable "${LLC}"
 require_executable "${LD_LLD}"
 require_executable "${LLVM_NM}"
+require_executable "${LLVM_OBJDUMP}"
 require_file "${CRT0}"
 if [[ -n "${REQUIRED_ASSET}" ]]; then
   require_file "${REQUIRED_ASSET}"
@@ -131,6 +134,7 @@ run_case() {
     export VENTUS_VK_DRIVER_LIB="${DRIVER_LIB}"
     export VENTUS_VK_DUMP_IMAGE="${ppm}"
     export VENTUS_VK_SHADER_ARTIFACT_DIR="${elf_dir}"
+    export VENTUS_VK_RETAIN_SHADER_ARTIFACTS=1
     export VENTUS_VK_LLC="${LLC}"
     export VENTUS_VK_LD_LLD="${LD_LLD}"
     export VENTUS_VK_LLVM_NM="${LLVM_NM}"
@@ -146,6 +150,20 @@ run_case() {
     export LD_LIBRARY_PATH="${SPIKE_BUILD}:$(dirname "${DRIVER_LIB}"):${LLVM_TOOL_LIB_DIR}:${LD_LIBRARY_PATH:-}"
     "${app_command[@]}"
   ) >"${log}" 2>&1
+
+  # This is a post-run validation gate on the actual linked artifacts, not a
+  # runtime loader guard. Image success alone must never produce a gate PASS.
+  local -a rt_elfs
+  shopt -s nullglob
+  rt_elfs=("${elf_dir}"/*.riscv)
+  shopt -u nullglob
+  [[ "${#rt_elfs[@]}" -gt 0 ]] || die "no retained final RT ELF in ${elf_dir}"
+  python3 "${ROOT_DIR}/tools/rtcore.py" --mode strict \
+    --objdump "${LLVM_OBJDUMP}" "${rt_elfs[@]}" \
+    >"${case_dir}/completion-frontier.log" 2>&1 || {
+      cat "${case_dir}/completion-frontier.log" >&2
+      die "final ELF completion-frontier gate failed for ${label}"
+    }
 
   require_file "${ppm}"
   python3 - "${ppm}" "${width}" "${height}" <<'PY'
@@ -180,6 +198,8 @@ PY
     echo "sha256=$(sha256sum "${ppm}" | awk '{print $1}')"
     echo "log=${log}"
     echo "elf_dir=${elf_dir}"
+    echo "completion_frontier=strict-pass"
+    echo "completion_frontier_log=${case_dir}/completion-frontier.log"
     echo
   } >>"${MANIFEST}"
 

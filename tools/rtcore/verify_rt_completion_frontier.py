@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify the machine-code completion frontier after RT_TRAVERSE_V5.
 
-Background: ADR-0017 permits completion-independent instructions to execute
+Background: ADR-0024 permits completion-independent instructions to execute
 after a traversal is issued, but every dynamic path must read the traverse
 destination VGPR before it can access RT-published state or issue another RT
 operation.  This final-ELF check runs llvm-objdump, finds RT_TRAVERSE_V5 by its
@@ -19,6 +19,8 @@ Audit mode accepts the first independently decoded read of ``vd`` and is
 intended only for inspecting pre-frontier baseline binaries; it is not a
 release gate.  Keep the numeric RT encoding constants synchronized with
 spike/riscv/encoding.h and keep the prefix whitelist deliberately small.
+Register-extension ELFs are rejected until their physical-register state is
+modeled; this checker is not a proof of arbitrary SIMT reconvergence behavior.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import dataclasses
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 from collections import deque
@@ -45,7 +48,6 @@ _INSTRUCTION_RE = re.compile(
 )
 _TARGET_RE = re.compile(r"0x([0-9a-fA-F]+)")
 _VECTOR_REGISTER_RE = re.compile(r"(?<![A-Za-z0-9_])v([0-9]|[12][0-9]|3[01])(?![A-Za-z0-9_])")
-_STACK_STORE_RE = re.compile(r"^[^,]+,\s*-?(?:0x[0-9a-fA-F]+|[0-9]+)\((?:sp|x2)\)$")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -76,6 +78,8 @@ def parse_disassembly(text: str) -> list[Instruction]:
     for line in text.splitlines():
         match = _INSTRUCTION_RE.match(line)
         if not match:
+            if re.match(r"^\s*[0-9a-fA-F]+:", line):
+                raise VerificationError(f"unparsed instruction: {line.strip()}")
             continue
         raw = bytes(int(byte, 16) for byte in match.group(2).split())
         if len(raw) not in (2, 4, 6, 8):
@@ -92,6 +96,8 @@ def parse_disassembly(text: str) -> list[Instruction]:
         )
     if not instructions:
         raise VerificationError("llvm-objdump output contains no instructions")
+    if len({inst.address for inst in instructions}) != len(instructions):
+        raise VerificationError("overlapping disassembly addresses")
     return instructions
 
 
@@ -137,10 +143,13 @@ def is_strict_frontier(inst: Instruction, traverse_destination: int) -> bool:
     if inst.mnemonic != "vor.vi":
         return False
     operands = [part.strip() for part in inst.operands.split(",")]
-    if len(operands) < 3:
+    if len(operands) != 3:
         return False
     return (
-        _VECTOR_REGISTER_RE.fullmatch(operands[0]) is not None
+        inst.size == 4
+        and (inst.word & 0xFE0FF07F) == 0x2A003057
+        and ((inst.word >> 20) & 0x1F) == traverse_destination
+        and _VECTOR_REGISTER_RE.fullmatch(operands[0]) is not None
         and operands[1] == f"v{traverse_destination}"
         and operands[2] in ("0", "0x0")
     )
@@ -159,22 +168,22 @@ _CONDITIONAL_BRANCHES = {
 
 def _is_prefix_whitelisted(inst: Instruction) -> bool:
     mnemonic = inst.mnemonic
-    if mnemonic in {"join", "j", "nop", "regext", "regexti", "vmv.v.x"}:
+    if mnemonic in {"join", "j", "nop", "vmv.v.x"}:
         return True
     if mnemonic in _CONDITIONAL_BRANCHES:
         return True
     if mnemonic in _SCALAR_PREFIX_MNEMONICS:
         return not _VECTOR_REGISTER_RE.search(inst.operands)
-    if mnemonic in {"csrr", "csrrs", "csrr.v"}:
-        return True
-    if mnemonic == "sw" and _STACK_STORE_RE.match(inst.operands):
+    if mnemonic in {"csrr", "csrr.v"}:
         return True
     return False
 
 
 def _branch_target(inst: Instruction) -> int | None:
     match = _TARGET_RE.search(inst.operands)
-    return int(match.group(1), 16) if match else None
+    if not match:
+        raise VerificationError(f"unresolved branch target at 0x{inst.address:x}")
+    return int(match.group(1), 16)
 
 
 def _successors(
@@ -200,14 +209,18 @@ def verify_disassembly(
 ) -> list[Frontier]:
     instructions = parse_disassembly(text)
     by_address = {inst.address: inst for inst in instructions}
-    sorted_addresses = sorted(by_address)
     next_by_address = {
-        address: sorted_addresses[index + 1] if index + 1 < len(sorted_addresses) else None
-        for index, address in enumerate(sorted_addresses)
+        inst.address: inst.address + inst.size
+        for inst in instructions
     }
     traversals = [inst for inst in instructions if is_rt_traverse_v5(inst)]
     if not traversals:
         raise VerificationError("no numeric RT_TRAVERSE_V5 instruction found")
+    # Register-extension state is not yet modeled. Never interpret its low
+    # five register bits as a proof about a different physical VGPR. This
+    # conservative limitation is a release-gate gap, not an audit bypass.
+    if any(inst.mnemonic in {"regext", "regexti"} for inst in instructions):
+        raise VerificationError("register-extension ELF is not yet supported")
 
     verified: list[Frontier] = []
     for traversal in traversals:
@@ -219,7 +232,11 @@ def verify_disassembly(
             )
         work = deque([(first, 0, frozenset())])
         path_frontiers: list[Frontier] = []
+        visits = 0
         while work:
+            visits += 1
+            if visits > 10000:
+                raise VerificationError("CFG path budget exceeded before proof completed")
             address, prefix_length, path = work.popleft()
             if address in path:
                 raise VerificationError(
@@ -254,6 +271,11 @@ def verify_disassembly(
                     )
                 )
                 continue
+            _, written = _operand_vector_registers(inst)
+            if destination in written:
+                raise VerificationError(
+                    f"0x{traversal.address:x}: v{destination} overwritten before frontier"
+                )
             if not _is_prefix_whitelisted(inst):
                 raise VerificationError(
                     f"0x{traversal.address:x}: non-whitelisted instruction before frontier: "
@@ -280,6 +302,16 @@ def _run_objdump(objdump: str, elf: Path) -> str:
         detail = result.stderr.strip() or result.stdout.strip()
         raise VerificationError(f"{' '.join(command)} failed: {detail}")
     return result.stdout
+
+
+def verify_elf_header(elf: Path) -> None:
+    with elf.open("rb") as stream:
+        header = stream.read(52)
+    if len(header) != 52 or header[:7] != b"\x7fELF\x01\x01\x01":
+        raise VerificationError("expected a little-endian ELF32 final image")
+    elf_type, machine = struct.unpack_from("<HH", header, 16)
+    if elf_type not in (2, 3) or machine != 243:
+        raise VerificationError("expected linked RISC-V ET_EXEC/ET_DYN, not an object file")
 
 
 def _find_objdump(explicit: str | None) -> str:
@@ -315,6 +347,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for elf in args.elf:
             if not elf.is_file():
                 raise VerificationError(f"ELF does not exist: {elf}")
+            verify_elf_header(elf)
             frontiers = verify_disassembly(
                 _run_objdump(objdump, elf),
                 strict=args.mode == "strict",
@@ -322,11 +355,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             for frontier in frontiers:
                 print(
-                    f"PASS {elf}: traverse=0x{frontier.traverse_address:x} "
+                    f"{'PASS' if args.mode == 'strict' else 'AUDIT'} {elf}: "
+                    f"traverse=0x{frontier.traverse_address:x} "
                     f"vd=v{frontier.destination} frontier=0x{frontier.frontier_address:x} "
                     f"({frontier.frontier_mnemonic}) prefix={frontier.prefix_length}"
                 )
-    except VerificationError as error:
+    except (VerificationError, OSError) as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return 1
     return 0

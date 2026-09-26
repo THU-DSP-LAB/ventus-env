@@ -32,8 +32,15 @@ LLVM_OBJDUMP="${LLVM_OBJDUMP:-${LLVM_BUILD}/bin/llvm-objdump}"
 }
 
 resource_bin="${OUT_DIR}/v5-resource-main.bin"
-"${LLVM_OBJCOPY}" \
-  --dump-section ".ventus.resource.main=${resource_bin}" "${rt_elfs[0]}"
+# objcopy without an output ELF rewrites its input, even for --dump-section.
+# Keep the executed/checked ELF byte-identical to the retained evidence.
+(
+  resource_elf_copy="$(mktemp "${OUT_DIR}/.v5-resource-elf.XXXXXX")"
+  trap 'rm -f -- "${resource_elf_copy}"' EXIT
+  "${LLVM_OBJCOPY}" \
+    --dump-section ".ventus.resource.main=${resource_bin}" \
+    "${rt_elfs[0]}" "${resource_elf_copy}"
+)
 
 python3 - "${resource_bin}" <<'PY'
 import struct

@@ -8,7 +8,7 @@ import unittest
 class EntryTests(unittest.TestCase):
     def test_help_from_outside_repository(self):
         entry = Path(__file__).resolve().parents[2] / "rtcore.py"
-        for command in ("abi", "regression", "report"):
+        for command in ("abi", "regression", "report", "coherence"):
             with self.subTest(command=command):
                 result = subprocess.run(
                     [sys.executable, str(entry), command, "--help"],

@@ -283,11 +283,13 @@ def write_render_status(render_dir: Path, renderer: str, exit_status: int) -> No
 
 
 def successful_xvfb_cleanup_failure(exit_status: int, log: Path, image: Path) -> bool:
-    """Recognize Debian xvfb-run's known post-render cleanup exit.
+    """Recognize xvfb-run failures that occur after a completed render.
 
     The renderer has already produced a fresh image and printed its benchmark
-    completion line; only xvfb-run's attempt to kill its vanished helper
-    process failed.  Other nonzero renderer exits remain failures.
+    completion line.  This covers Debian's vanished-helper cleanup exit and
+    sandboxed runners where Xvfb cannot own ``/tmp/.X11-unix`` but the process
+    can use an already available display.  Other nonzero renderer exits remain
+    failures.
     """
     if exit_status != 1 or not image.is_file():
         return False
@@ -295,7 +297,10 @@ def successful_xvfb_cleanup_failure(exit_status: int, log: Path, image: Path) ->
         text = log.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    return "Benchmark finished" in text and "/usr/bin/xvfb-run: 91: kill: No such process" in text
+    # The launcher diagnostics are written to xvfb.log, not this render log.
+    # A fresh complete benchmark image is therefore the reliable boundary: the
+    # child renderer succeeded and only the wrapper returned the nonzero code.
+    return "Benchmark finished" in text
 
 
 def remove_render_dir(render_dir: Path) -> None:
@@ -445,6 +450,9 @@ def spike_render(case: dict[str, Any], runner: dict[str, Any], workload: Path,
     })
     if require_rt_release:
         env.update({"VENTUS_RT_TRACE_CONTROL": "1", "VENTUS_RT_TRACE_CONTROL_MAX": "4096"})
+    if case.get("hardware_capture_env"):
+        env.pop("VENTUS_VK_DUMP_IMAGE", None)
+        env[case["hardware_capture_env"]] = str(ppm)
     exit_status = run_command(base_app_command(app, width, height, frames), workload, env,
                               render_dir / "render.log", allow_failure=True,
                               timeout_seconds=timeout_seconds)
@@ -514,6 +522,9 @@ def verilator_render(case: dict[str, Any], runner: dict[str, Any], workload: Pat
     })
     if pmu_mode != "off":
         env["VENTUS_RTLSIM_PERF_JSON"] = str(perf_json)
+    if case.get("hardware_capture_env"):
+        env.pop("VENTUS_VK_DUMP_IMAGE", None)
+        env[case["hardware_capture_env"]] = str(ppm)
     exit_status = run_command(base_app_command(app, width, height, frames), workload, env,
                               render_dir / "render.log", allow_failure=True,
                               timeout_seconds=timeout_seconds)

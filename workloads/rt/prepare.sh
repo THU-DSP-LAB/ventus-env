@@ -86,6 +86,7 @@ PATCH_FILES=(
   "${OVERLAY_DIR}/raytracingbasic-ray-flags.patch"
   "${OVERLAY_DIR}/raytracingbasic-instance-custom-index.patch"
   "${OVERLAY_DIR}/raytracingintersection-ray-flags.patch"
+  "${OVERLAY_DIR}/raytracingintersection-anyhit.patch"
   "${OVERLAY_DIR}/raytracingcallable-record-data.patch"
   "${OVERLAY_DIR}/raytracingcallable-stack-size.patch"
 )
@@ -132,6 +133,10 @@ done
 "${GLSLANG_VALIDATOR}" -V \
   "${TEMP_SOURCE}/shaders/glsl/raytracingintersection/raygen.rgen" \
   -o "${TEMP_SOURCE}/shaders/glsl/raytracingintersection/raygen.rgen.spv" \
+  --target-env vulkan1.2
+"${GLSLANG_VALIDATOR}" -V \
+  "${TEMP_SOURCE}/shaders/glsl/raytracingintersection/anyhit.rahit" \
+  -o "${TEMP_SOURCE}/shaders/glsl/raytracingintersection/anyhit.rahit.spv" \
   --target-env vulkan1.2
 "${GLSLANG_VALIDATOR}" -V \
   "${TEMP_SOURCE}/shaders/glsl/raytracingcallable/callable_record_data.rcall" \

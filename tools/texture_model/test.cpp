@@ -1,0 +1,367 @@
+#include "model.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <functional>
+#include <iostream>
+#include <random>
+#include <stdexcept>
+#include <string>
+
+using namespace ventus::texture;
+namespace {
+
+std::size_t checks = 0;
+using Bytes = std::array<std::uint8_t, 4>;
+constexpr Color red{1, 0, 0, 1};
+constexpr Color green{0, 1, 0, 1};
+constexpr Color blue{0, 0, 1, 1};
+constexpr Color white{1, 1, 1, 1};
+
+void expect(bool good, const std::string &message) {
+  ++checks;
+  if (!good)
+    throw std::runtime_error(message);
+}
+
+void expect_color(const Color &actual, const Color &expected,
+                  const std::string &message, double tolerance = 2e-7) {
+  for (unsigned c = 0; c < 4; ++c)
+    expect(std::isfinite(actual[c]) && std::abs(actual[c] - expected[c]) <= tolerance,
+           message + " channel " + std::to_string(c));
+}
+
+void rejected(const std::function<void()> &action, const std::string &message) {
+  try {
+    action();
+  } catch (const std::invalid_argument &) {
+    expect(true, message);
+    return;
+  }
+  expect(false, "input was not rejected: " + message);
+}
+
+void put(Image &image, const Level &level, unsigned x, unsigned y, Bytes rgba) {
+  if (image.format == Format::BGRA8_UNORM)
+    std::swap(rgba[0], rgba[2]);
+  const auto offset = level.offset + y * level.row_pitch + x * 4;
+  std::copy(rgba.begin(), rgba.end(), image.data.begin() + offset);
+}
+
+Image make_image(unsigned w, unsigned h, Format format = Format::RGBA8_UNORM,
+                 unsigned padding = 0, unsigned offset = 0) {
+  const Level level{w, h, offset, w * 4ULL + padding};
+  Image image{format, {}, {level}};
+  image.data.resize(offset + (h - 1) * level.row_pitch + w * 4, 0xcd);
+  for (unsigned y = 0; y < h; ++y)
+    for (unsigned x = 0; x < w; ++x)
+      put(image, level, x, y,
+          {static_cast<std::uint8_t>((x * 37 + y * 71 + 5) % 256),
+           static_cast<std::uint8_t>((x * 89 + y * 11 + 23) % 256),
+           static_cast<std::uint8_t>((x * 13 + y * 53 + 251) % 256),
+           static_cast<std::uint8_t>((x * 31 + y * 29 + 19) % 256)});
+  return image;
+}
+
+Image four_colors(Format format = Format::RGBA8_UNORM) {
+  auto image = make_image(2, 2, format, 3, 5);
+  const auto &level = image.levels[0];
+  put(image, level, 0, 0, {255, 0, 0, 255});
+  put(image, level, 1, 0, {0, 255, 0, 255});
+  put(image, level, 0, 1, {0, 0, 255, 255});
+  put(image, level, 1, 1, {255, 255, 255, 255});
+  return image;
+}
+
+// Independent oracle: enumerate a virtual extended image and accumulate
+// nearest-cell or tent-kernel contributions. Unlike the model, this does not
+// reduce UV, select four taps, or use modular mirrored addressing.
+std::vector<long double> axis_weights(unsigned n, long double u,
+                                      AddressMode mode, Filter filter) {
+  std::vector<long double> weights(n);
+  const long double position = u * n;
+  // Randomized inputs stay within [-3,3]; leave ample room for their kernels.
+  for (int cell = -5 * static_cast<int>(n); cell <= 5 * static_cast<int>(n); ++cell) {
+    long double weight;
+    if (filter == Filter::Nearest)
+      weight = position >= cell && position < cell + 1 ? 1 : 0;
+    else
+      weight = std::max(0.0L, 1 - std::abs(position - (cell + 0.5L)));
+    if (weight == 0)
+      continue;
+    int index = cell;
+    if (mode == AddressMode::Repeat) {
+      while (index < 0)
+        index += n;
+      while (index >= static_cast<int>(n))
+        index -= n;
+    } else if (mode == AddressMode::MirroredRepeat) {
+      while (index < 0 || index >= static_cast<int>(n)) {
+        if (index < 0)
+          index = -1 - index;
+        else
+          index = 2 * static_cast<int>(n) - 1 - index;
+      }
+    } else {
+      index = std::clamp(index, 0, static_cast<int>(n) - 1);
+    }
+    weights[index] += weight;
+  }
+  return weights;
+}
+
+Color oracle(const Image &image, unsigned mip, Sampling sampling, double u, double v) {
+  const auto &level = image.levels[mip];
+  const auto wx = axis_weights(level.width, u, sampling.address_u, sampling.filter);
+  const auto wy = axis_weights(level.height, v, sampling.address_v, sampling.filter);
+  std::array<long double, 4> total{};
+  for (unsigned y = 0; y < level.height; ++y)
+    for (unsigned x = 0; x < level.width; ++x) {
+      const auto p = level.offset + y * level.row_pitch + x * 4;
+      for (unsigned c = 0; c < 4; ++c) {
+        const auto channel = image.format == Format::BGRA8_UNORM && (c == 0 || c == 2)
+                                 ? 2 - c : c;
+        total[c] += wx[x] * wy[y] * image.data[p + channel] / 255.0L;
+      }
+    }
+  return {static_cast<float>(total[0]), static_cast<float>(total[1]),
+          static_cast<float>(total[2]), static_cast<float>(total[3])};
+}
+
+void hand_calculated() {
+  for (Format format : {Format::RGBA8_UNORM, Format::BGRA8_UNORM}) {
+    const auto image = four_colors(format);
+    Sampling nearest;
+    Sampling linear{AddressMode::Repeat, AddressMode::Repeat, Filter::Bilinear};
+    expect_color(sample_level(image, 0, nearest, 0.25, 0.25).rgba, red, "top-left center");
+    expect_color(sample_level(image, 0, nearest, 0.75, 0.25).rgba, green, "top-right center");
+    expect_color(sample_level(image, 0, nearest, 0.25, 0.75).rgba, blue, "bottom-left center");
+    expect_color(sample_level(image, 0, nearest, 0.75, 0.75).rgba, white, "bottom-right center");
+    expect_color(sample_level(image, 0, linear, 0.5, 0.5).rgba,
+                 {0.5, 0.5, 0.5, 1}, "four-point average");
+    expect_color(sample_level(image, 0, linear, 0.375, 0.25).rgba,
+                 {0.75, 0.25, 0, 1}, "one-quarter horizontal interpolation");
+    expect_color(sample_level(image, 0, linear, 0.375, 0.375).rgba,
+                 {0.625, 0.25, 0.25, 1}, "asymmetric 2D interpolation");
+    expect_color(sample_level(image, 0, linear, 0.0, 0.25).rgba,
+                 {0.5, 0.5, 0, 1}, "repeat seam blends opposite edges");
+    linear.address_u = AddressMode::MirroredRepeat;
+    expect_color(sample_level(image, 0, linear, 0.0, 0.25).rgba, red, "mirror seam left");
+    expect_color(sample_level(image, 0, linear, 1.0, 0.25).rgba, green, "mirror seam right");
+    linear.address_u = AddressMode::ClampToEdge;
+    expect_color(sample_level(image, 0, linear, -2.0, 0.25).rgba, red, "clamp left");
+    expect_color(sample_level(image, 0, linear, 3.0, 0.25).rgba, green, "clamp right");
+    nearest.address_u = AddressMode::MirroredRepeat;
+    nearest.address_v = AddressMode::Repeat;
+    expect_color(sample_level(image, 0, nearest, 1.25, -0.25).rgba, white,
+                 "independent U/V modes");
+  }
+}
+
+void negative_and_boundary_coordinates() {
+  const auto image = make_image(4, 1);
+  Sampling sampling;
+  const std::array<double, 9> coordinates{-1.125, -0.875, -0.625, -0.375,
+                                         -0.125, 0.125, 1.125, 1.875, 2.125};
+  const std::array<unsigned, 9> repeat{3, 0, 1, 2, 3, 0, 0, 3, 0};
+  const std::array<unsigned, 9> mirrored{3, 3, 2, 1, 0, 0, 3, 0, 0};
+  for (std::size_t i = 0; i < coordinates.size(); ++i) {
+    sampling.address_u = AddressMode::Repeat;
+    expect(sample_level(image, 0, sampling, coordinates[i], 0.5).taps[0].x == repeat[i],
+           "repeat sequence at " + std::to_string(coordinates[i]));
+    sampling.address_u = AddressMode::MirroredRepeat;
+    expect(sample_level(image, 0, sampling, coordinates[i], 0.5).taps[0].x == mirrored[i],
+           "mirror sequence at " + std::to_string(coordinates[i]));
+  }
+  sampling.address_u = AddressMode::Repeat;
+  expect(sample_level(image, 0, sampling, std::nextafter(0.25, 0.0), 0.5).taps[0].x == 0,
+         "nearest immediately before texel boundary");
+  expect(sample_level(image, 0, sampling, 0.25, 0.5).taps[0].x == 1,
+         "nearest exact texel boundary chooses upper");
+  expect(sample_level(image, 0, sampling, std::nextafter(0.25, 1.0), 0.5).taps[0].x == 1,
+         "nearest immediately after texel boundary");
+  expect(sample_level(image, 0, sampling, -0.0, 0.5).taps[0].x == 0, "negative zero");
+  expect(sample_level(image, 0, sampling, 1e300, 0.5).taps[0].x == 0, "huge repeat UV");
+  expect(sample_level(image, 0, sampling, -1e300, 0.5).taps[0].x == 0, "huge negative UV");
+  sampling.address_u = AddressMode::ClampToEdge;
+  expect(sample_level(image, 0, sampling, 1e300, 0.5).taps[0].x == 3, "huge clamp UV");
+  expect(sample_level(image, 0, sampling, -1e300, 0.5).taps[0].x == 0, "negative clamp UV");
+}
+
+void all_unorm_values() {
+  for (auto format : {Format::RGBA8_UNORM, Format::BGRA8_UNORM}) {
+    auto image = make_image(1, 1, format);
+    for (unsigned value = 0; value <= 255; ++value) {
+      put(image, image.levels[0], 0, 0,
+          {static_cast<std::uint8_t>(value), static_cast<std::uint8_t>(255 - value),
+           static_cast<std::uint8_t>(value), static_cast<std::uint8_t>(255 - value)});
+      const Color expected{value / 255.0f, (255 - value) / 255.0f,
+                           value / 255.0f, (255 - value) / 255.0f};
+      expect_color(sample_level(image, 0, {}, 0.5, 0.5).rgba, expected, "UNORM decode", 0);
+    }
+  }
+}
+
+void randomized_oracle() {
+  std::mt19937 generator(20261005);
+  std::uniform_real_distribution<double> coordinates(-3, 3);
+  const std::array<AddressMode, 3> modes{AddressMode::Repeat, AddressMode::MirroredRepeat,
+                                       AddressMode::ClampToEdge};
+  const std::array<std::array<unsigned, 2>, 5> sizes{{{1, 1}, {1, 5}, {5, 1},
+                                                    {3, 5}, {4, 4}}};
+  for (auto size : sizes)
+    for (auto format : {Format::RGBA8_UNORM, Format::BGRA8_UNORM}) {
+      const auto image = make_image(size[0], size[1], format, 7, 3);
+      for (auto u_mode : modes)
+        for (auto v_mode : modes)
+          for (auto filter : {Filter::Nearest, Filter::Bilinear}) {
+            Sampling sampling{u_mode, v_mode, filter};
+            for (int trial = 0; trial < 20; ++trial) {
+              const double u = coordinates(generator);
+              const double v = coordinates(generator);
+              const auto result = sample_level(image, 0, sampling, u, v);
+              expect_color(result.rgba, oracle(image, 0, sampling, u, v),
+                           "independent virtual-image oracle");
+              double weight = 0;
+              for (const auto &tap : result.taps) {
+                weight += tap.weight;
+                expect(tap.weight >= 0 && tap.weight <= 1, "valid trace weight");
+                expect(tap.byte_offset + 4 <= image.data.size(), "trace within backing bytes");
+              }
+              expect(std::abs(weight - 1) < 1e-14, "trace weights sum to one");
+              // Periodicity/mirror symmetry are independent of the oracle.
+              if (u_mode == AddressMode::Repeat)
+                expect_color(sample_level(image, 0, sampling, u + 2, v).rgba,
+                             result.rgba, "repeat periodicity");
+              if (u_mode == AddressMode::MirroredRepeat)
+                expect_color(sample_level(image, 0, sampling, -u, v).rgba,
+                             result.rgba, "mirror symmetry");
+            }
+          }
+    }
+}
+
+Image mip_image() {
+  Image image{Format::RGBA8_UNORM, std::vector<std::uint8_t>(128, 0xcd),
+              {{5, 3, 3, 23}, {2, 1, 91, 11}, {1, 1, 115, 4}}};
+  const std::array<Bytes, 3> colors{{{255, 0, 0, 255}, {0, 255, 0, 255},
+                                   {0, 0, 255, 255}}};
+  for (unsigned m = 0; m < image.levels.size(); ++m)
+    for (unsigned y = 0; y < image.levels[m].height; ++y)
+      for (unsigned x = 0; x < image.levels[m].width; ++x)
+        put(image, image.levels[m], x, y, colors[m]);
+  return image;
+}
+
+void lod_and_views() {
+  const auto image = mip_image();
+  const std::array<double, 9> lods{-100, 0, 0.5, std::nextafter(0.5, 1.0),
+                                1, 1.5, std::nextafter(1.5, 2.0), 2, 1e300};
+  const std::array<unsigned, 9> mips{0, 0, 0, 1, 1, 1, 2, 2, 2};
+  const std::array<Color, 3> colors{red, green, blue};
+  for (std::size_t i = 0; i < lods.size(); ++i) {
+    const auto result = sample_lod(image, {0, 3}, {}, 0.3, 0.7, lods[i]);
+    expect(result.mip == mips[i], "mip-nearest selection including exact ties");
+    expect_color(result.rgba, colors[mips[i]], "selected mip data");
+  }
+  auto result = sample_lod(image, {1, 2}, {}, 0.3, 0.7, 0);
+  expect(result.mip == 1, "LOD is relative to view");
+  expect_color(result.rgba, green, "view base mip data");
+  expect(sample_lod(image, {1, 1}, {}, 0.3, 0.7, 100).mip == 1, "single-mip view");
+  expect(sample_lod(image, {0, 3}, {}, 0.3, 0.7, 0, {0.75, 2}).mip == 1,
+         "sampler lower clamp");
+  expect(sample_lod(image, {0, 3}, {}, 0.3, 0.7, 2, {0, 0.5}).mip == 0,
+         "sampler upper clamp before preferred nearest selection");
+  expect(sample_lod(image, {0, 3}, {}, 0.3, 0.7, -100, {10, 20}).mip == 2,
+         "view availability clamps sampler range");
+  // A separate image/sampler pair can be interleaved without hidden global state.
+  const auto other = four_colors(Format::BGRA8_UNORM);
+  expect_color(sample_level(other, 0, {}, 0.25, 0.25).rgba, red, "second image");
+  expect_color(sample_lod(image, {1, 2}, {}, 0.3, 0.7, 0).rgba, green,
+               "first image still unchanged");
+  Sampling linear{AddressMode::Repeat, AddressMode::ClampToEdge, Filter::Bilinear};
+  auto patterned = mip_image();
+  put(patterned, patterned.levels[1], 0, 0, {255, 0, 0, 255});
+  put(patterned, patterned.levels[1], 1, 0, {0, 0, 255, 255});
+  const auto filtered = sample_lod(patterned, {1, 2}, linear, 0.5, 0.5, 0);
+  expect_color(filtered.rgba, {0.5, 0, 0.5, 1}, "bilinear on nonzero view mip");
+  expect(filtered.taps[0].byte_offset == 91 && filtered.taps[1].byte_offset == 95,
+         "view mip uses its own byte offset and dimensions");
+  expect_color(sample_lod(patterned, {1, 2}, linear, 0.5, 0.5, 1).rgba, blue,
+               "next view mip has independent backing data");
+  const auto partial = make_image(7, 3); // A mip chain need not reach 1x1.
+  expect_color(sample_lod(partial, {0, 1}, linear, -0.1, 0.1, 20).rgba,
+               sample_level(partial, 0, linear, -0.1, 0.1).rgba, "partial chain");
+}
+
+void invalid_inputs() {
+  const auto image = four_colors();
+  for (double invalid : {std::numeric_limits<double>::infinity(),
+                         -std::numeric_limits<double>::infinity(),
+                         std::numeric_limits<double>::quiet_NaN()}) {
+    rejected([&] { sample_level(image, 0, {}, invalid, 0); }, "invalid U");
+    rejected([&] { sample_level(image, 0, {}, 0, invalid); }, "invalid V");
+    rejected([&] { sample_lod(image, {0, 1}, {}, 0, 0, invalid); }, "invalid LOD");
+    rejected([&] { sample_lod(image, {0, 1}, {}, 0, 0, 0, {0, invalid}); },
+             "invalid LOD clamp");
+  }
+  for (View view : {View{0, 0}, View{1, 1}, View{0, 2},
+                    View{0xffffffffU, 0xffffffffU}})
+    rejected([&] { sample_lod(image, view, {}, 0, 0, 0); }, "invalid view");
+  for (LodRange range : {LodRange{-1, 1}, LodRange{2, 1}})
+    rejected([&] { sample_lod(image, {0, 1}, {}, 0, 0, 0, range); }, "invalid clamp range");
+  rejected([&] { sample_level(image, 1, {}, 0, 0); }, "invalid mip index");
+  auto malformed = image;
+  malformed.format = static_cast<Format>(99);
+  rejected([&] { validate(malformed); }, "unknown format");
+  malformed = image;
+  malformed.levels.clear();
+  rejected([&] { validate(malformed); }, "no mip");
+  for (Level bad : {Level{0, 2, 0, 8}, Level{2, 0, 0, 8}, Level{2, 2, 0, 7},
+                    Level{2, 2, 100, 8},
+                    Level{2, 2, 0, std::numeric_limits<std::uint64_t>::max()}}) {
+    malformed = image;
+    malformed.levels[0] = bad;
+    rejected([&] { validate(malformed); }, "invalid storage layout");
+  }
+  malformed = image;
+  malformed.data.pop_back();
+  rejected([&] { validate(malformed); }, "truncated backing data");
+  malformed = mip_image();
+  malformed.levels[1].width = 3;
+  rejected([&] { validate(malformed); }, "malformed mip dimensions");
+  malformed = make_image(1, 1);
+  malformed.levels.push_back(malformed.levels[0]);
+  rejected([&] { validate(malformed); }, "mip after 1x1");
+  rejected([&] { sample_level(image, 0, {static_cast<AddressMode>(99),
+                                        AddressMode::Repeat, Filter::Nearest}, 0, 0); },
+           "unknown U address mode");
+  rejected([&] { sample_level(image, 0, {AddressMode::Repeat,
+                                        static_cast<AddressMode>(99), Filter::Nearest}, 0, 0); },
+           "unknown V address mode");
+  rejected([&] { sample_level(image, 0, {AddressMode::Repeat, AddressMode::Repeat,
+                                        static_cast<Filter>(99)}, 0, 0); }, "unknown filter");
+}
+
+} // namespace
+
+int main() {
+  const std::array<std::pair<const char *, void (*)()>, 6> suites{{
+      {"hand-calculated filtering and seams", hand_calculated},
+      {"negative UV, boundaries and huge finite UV", negative_and_boundary_coordinates},
+      {"all 256 UNORM values in both formats", all_unorm_values},
+      {"3600 independent-oracle samples and properties", randomized_oracle},
+      {"explicit LOD, view ranges and multiple images", lod_and_views},
+      {"invalid inputs and storage arithmetic", invalid_inputs}}};
+  try {
+    for (const auto &suite : suites) {
+      suite.second();
+      std::cout << "PASS " << suite.first << '\n';
+    }
+    std::cout << "PASS texture model: " << suites.size() << " suites, " << checks
+              << " checks\n";
+  } catch (const std::exception &error) {
+    std::cerr << "FAIL " << error.what() << '\n';
+    return 1;
+  }
+}

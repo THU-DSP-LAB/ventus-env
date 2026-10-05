@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # Background: exercise the standalone texture functional model before Spike/TMU integration.
-# Flow: build its C++ tests or trace demo in a temporary directory, then execute.
+# Flow: run temporary host builds, or compare actual Vulkan/Spike samples with retained evidence.
 # Usage: python3 tools/texture_model.py test [--sanitize]
 #        python3 tools/texture_model.py demo
+#        python3 tools/texture_model.py gpu [--case-limit 1]
 # Maintenance: keep model and test code under tools/texture_model/; no device ABI is defined.
 
 from __future__ import annotations
@@ -16,13 +17,26 @@ import tempfile
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Standalone C++ texture functional model")
-    parser.add_argument("action", choices=("test", "demo"))
+    parser.add_argument("action", choices=("test", "demo", "gpu"))
     parser.add_argument("--sanitize", action="store_true", help="enable address/UB sanitizers")
     parser.add_argument("--cxx", default="c++", help="host C++17 compiler executable")
+    parser.add_argument("--mesa-build", type=Path, help="local Mesa build directory for gpu")
+    parser.add_argument("--out-dir", type=Path, help="empty artifact directory for gpu")
+    parser.add_argument("--case-limit", type=int, default=180, help="gpu sampler cases (1..180)")
+    parser.add_argument("--timeout", type=float, default=900, help="gpu runtime timeout in seconds")
+    parser.add_argument("--inject-mismatch", action="store_true", help="gpu checker negative control; must fail")
     args = parser.parse_args()
     compiler = shutil.which(args.cxx)
     if compiler is None:
         parser.error(f"host compiler not found: {args.cxx}")
+    if args.case_limit < 1 or args.case_limit > 180 or args.timeout <= 0:
+        parser.error("case-limit must be 1..180 and timeout must be positive")
+    if args.action == "gpu":
+        if args.sanitize:
+            parser.error("--sanitize applies to standalone host test/demo only")
+        from texture_model.gpu import run
+
+        return run(args, compiler)
     sources = Path(__file__).resolve().parent / "texture_model"
     with tempfile.TemporaryDirectory(prefix="ventus-texture-model-") as directory:
         executable = Path(directory) / args.action

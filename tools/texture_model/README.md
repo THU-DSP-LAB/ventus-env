@@ -60,13 +60,51 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 `demo` 使用一张红/蓝双色图，在 `u=0` 处 bilinear 采样：repeat 返回紫色，mirrored repeat 和 clamp-to-edge 返回红色，并打印 tap 的坐标、偏移和权重。
 
-这些测试证明独立模型的已覆盖规则；尚未证明 Vulkan→Spike 采样、指令执行、缓存、同步、RTL 或性能正确。后续可将同一输入交给 GPU 软件路径、Spike 模型和 RTL，分别记录对照结果。
+这些 host 测试证明独立模型的已覆盖规则。下面的 GPU 对照补充了现有软件采样在 Spike 上的执行证据；缓存、完整同步、RTL 或性能不在这两类测试的证明范围内。
+
+## Vulkan→Spike 数值对照
+
+```sh
+python3 tools/texture_model.py gpu
+python3 tools/texture_model.py gpu --case-limit 1
+python3 tools/texture_model.py gpu --case-limit 1 --inject-mismatch
+```
+
+第三条是比较器负向校验：故意修改读回的一个颜色分量，**必须返回 1**，不应作为普通成功测试执行。`--case-limit` 可限定前 1..180 种配置；`--timeout` 限制运行时间；`--out-dir` 指向空目录，以避免旧结果混入证据。默认输出位于 `artifacts/texture_model/gpu-<UTC>-<id>/`。
+
+此动作需要已构建的本地 Mesa `mesa/build-ventus`、driver `driver/build/driver/spike_device`、Spike `spike/build`、LLVM `llvm/build`、`llvm/build-rt-libclc/lib/crt0.o`，以及 PATH 上的 `glslangValidator`、host C++ 编译器、Vulkan headers/loader 和 `pkg-config vulkan`。`--mesa-build` 可选择另一份已有 Mesa build。它不构建或安装上述组件。
+
+运行器清除继承的 `VENTUS_VK_*` 实验选项，指定本地 ICD、driver 和工具，编译 shader 并通过默认 V5 ELF completion frontier 检查，再实际提交到 Spike。shader 在空 TLAS 上执行一次 miss，payload=73 用作完成标记；随后执行 `textureLod(..., 0)`。CPU 模型只生成期望值，实际值来自 shader。运行后核对进程实际加载的三份库路径，并记录 SHA256。
+
+| 对照维度 | 已覆盖范围 |
+| --- | --- |
+| 尺寸 | 1×1、1×5、5×1、3×5、4×4 |
+| 格式 | RGBA8_UNORM、BGRA8_UNORM；四通道均比较 |
+| 寻址与过滤 | U/V 各三种寻址，共九种组合；nearest、bilinear |
+| 坐标 | 每配置 64 组 float32 dyadic UV，含负数、0/1、周期边界、负零、约 ±65536 的坐标 |
+| 上传 | 非零 bufferOffset=16、源行 padding；目标 image 由驱动保存 |
+| 采样状态 | 单 sampled binding、LOD0、单 mip、min/mag 相同、零 bias |
+
+dyadic UV 能在本组尺寸下精确表示相关坐标计算，减少 nearest 边界附近由参考 double 与 shader float 舍入差异引入的歧义。这不是任意 UV 精度或巨大 float32 坐标范围的穷尽验证。每分量绝对误差上限预先设为 `1e-6`，没有根据失败结果放宽。
+
+当前编译器会忽略外部 buffer 的 `store_deref`：直接 SSBO 写回和 GLSL buffer-reference 写回探针均未写入结果，保留输出在 `artifacts/texture_model/first-spike-probe/` 和 `bda-spike-probe/`。问题位于 `mesa/src/ventus/llvm/ventus_nir_to_llvm.cpp` 的 `nir_intrinsic_store_deref` 分支：只处理 LLVM pointer，地址值不会产生 store；本次未修改生产编译器。
+
+因此正式比较使用现有 RGBA8 storage image 的 **RGB 字节传输**：把每个采样分量的 IEEE binary32 原始位模式分为两个像素传回，再在 host 重组为 float。carrier 的 alpha 不参与传输，采样结果的 alpha 仍完整比较。每次 dispatch 验证全部 256 个字节值的 RGB 编码、每个 word 的冗余字节，以及每个请求的完成标记；初始化为 `0xcd` 防止未写入被当成成功。它使用 Ventus 当前 coherent、线性的 image backing 读回，是本地实验方案，不是应用可依赖的 optimal image 布局约定或未来 TMU 接口。
+
+2026-10-05 的最终运行证据：
+
+- `artifacts/texture_model/lod0-spike-verified/manifest.json`：180 配置、11,520 samples、46,080 分量，零 mismatch，零 marker/transport failure，最大绝对误差 `5.960464478e-8`。
+- `artifacts/texture_model/lod0-spike-negative/manifest.json`：人工修改一分量，报告恰好 1 个 mismatch、返回 1；marker 和 transport 仍通过。
+- 每次运行包含 `run.log`、逐分量 `numeric.csv`、保留的 SPIR-V/LLVM/ELF 和构建日志；manifest 记录实际加载库、源码与二进制哈希、运行命令、profile 和结果。
+
+现有软件 lowering 在这些 LOD0 样例上与参考模型一致。参考模型的 mip/view 功能仍只有 host 验证；GPU mip、view 范围、不同 min/mag、descriptor array、独立 sampler、动态索引、未知状态拒绝、更新后的同步和原 textured any-hit 场景均未在本次专项运行中验证。模型尚未成为 Spike 的纹理指令处理程序，也未接入 RTL。
 
 ## 代码组织与规范来源
 
 - `model.hpp` / `model.cpp`：功能模型，只使用 C++ 标准库。
 - `test.cpp`：独立 oracle、手算例子和回归。
 - `demo.cpp`：采样过程示例。
+- `gpu.cpp` / `gpu.py` / `sample.rgen` / `sample.rmiss`：真实 Vulkan→Spike 数值比较与运行证据。
 - 一级入口 `../texture_model.py`：host 构建与运行。
 
 模型语义依据 [Vulkan Sampling](https://docs.vulkan.org/spec/latest/chapters/textures.html)，特别是 Image Level(s) Selection、Texel Filtering 和 Texel Addressing。2026-10-05 核查了 [官方规范源文件](https://github.com/KhronosGroup/Vulkan-Docs/blob/main/chapters/textures.adoc) 的 preferred/alternative mip nearest 规则。没有将该文档的全部功能纳入本模型。

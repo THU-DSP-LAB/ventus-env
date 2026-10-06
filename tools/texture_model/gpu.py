@@ -114,16 +114,16 @@ def run(args, compiler: str) -> int:
         errors.append("checked, retained V5 ELF evidence is missing")
     if summary.get("cases") != str(min(args.case_limit, 180)):
         errors.append("not all requested sampler cases completed")
-    if summary.get("samples") != str(args.case_limit * 64) or summary.get("components") != str(args.case_limit * 256):
+    if summary.get("samples") != str(args.case_limit * 128) or summary.get("components") != str(args.case_limit * 512):
         errors.append("numeric coverage counts are incomplete")
-    if any(summary.get(name) != "0" for name in ("mismatches", "markers_failed", "transport_failed")):
-        errors.append("numeric comparison, completion marker, or byte transport failed")
+    if any(summary.get(name) != "0" for name in ("mismatches", "markers_failed", "buffer_failed")):
+        errors.append("numeric comparison, completion marker, or buffer writeback failed")
     if returncode:
         errors.append(f"comparison process returned {returncode}")
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
         "profile": "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag; no GPU mip support claim",
-        "readback": "float bits in calibrated RGB image bytes; Ventus coherent linear backing; external buffer writes unsupported",
+        "readback": "direct SSBO and GLSL buffer-reference stores to coherent host-visible buffers",
         "summary": summary, "errors": errors, "timeout": timeout,
         "injected_mismatch": args.inject_mismatch, "checked_frontier": checked_frontier,
         "command": command,

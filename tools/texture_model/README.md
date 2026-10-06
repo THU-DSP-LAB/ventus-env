@@ -87,17 +87,18 @@ python3 tools/texture_model.py gpu --case-limit 1 --inject-mismatch
 
 dyadic UV 能在本组尺寸下精确表示相关坐标计算，减少 nearest 边界附近由参考 double 与 shader float 舍入差异引入的歧义。这不是任意 UV 精度或巨大 float32 坐标范围的穷尽验证。每分量绝对误差上限预先设为 `1e-6`，没有根据失败结果放宽。
 
-当前编译器会忽略外部 buffer 的 `store_deref`：直接 SSBO 写回和 GLSL buffer-reference 写回探针均未写入结果，保留输出在 `artifacts/texture_model/first-spike-probe/` 和 `bda-spike-probe/`。问题位于 `mesa/src/ventus/llvm/ventus_nir_to_llvm.cpp` 的 `nir_intrinsic_store_deref` 分支：只处理 LLVM pointer，地址值不会产生 store；本次未修改生产编译器。
+2026-10-05 的初始 SSBO 和 buffer-reference 写回均失败，定位为整数地址形式的 `store_deref` 被忽略。2026-10-06 已修复该分支，保留写入掩码、volatile 和 32/64 位宽；其他未支持位宽明确拒绝。原始失败证据仍保留在 `artifacts/texture_model/first-spike-probe/` 和 `bda-spike-probe/`。
 
-因此正式比较使用现有 RGBA8 storage image 的 **RGB 字节传输**：把每个采样分量的 IEEE binary32 原始位模式分为两个像素传回，再在 host 重组为 float。carrier 的 alpha 不参与传输，采样结果的 alpha 仍完整比较。每次 dispatch 验证全部 256 个字节值的 RGB 编码、每个 word 的冗余字节，以及每个请求的完成标记；初始化为 `0xcd` 防止未写入被当成成功。它使用 Ventus 当前 coherent、线性的 image backing 读回，是本地实验方案，不是应用可依赖的 optimal image 布局约定或未来 TMU 接口。
+正式比较现在直接从 host-visible coherent buffers 读回 SSBO 与 buffer-reference 两份结果，各自与模型比较，并检查两份结果位模式一致。每次 dispatch 先初始化为 NaN，检查每请求的完成标记，已移除旧 RGB image 字节传输及对内部 image backing 的读回依赖。
 
-2026-10-05 的最终运行证据：
+2026-10-06 写回修复的运行证据：
 
-- `artifacts/texture_model/lod0-spike-verified/manifest.json`：180 配置、11,520 samples、46,080 分量，零 mismatch，零 marker/transport failure，最大绝对误差 `5.960464478e-8`。
-- `artifacts/texture_model/lod0-spike-negative/manifest.json`：人工修改一分量，报告恰好 1 个 mismatch、返回 1；marker 和 transport 仍通过。
-- 每次运行包含 `run.log`、逐分量 `numeric.csv`、保留的 SPIR-V/LLVM/ELF 和构建日志；manifest 记录实际加载库、源码与二进制哈希、运行命令、profile 和结果。
+- `artifacts/texture_model/buffer-fixed-full/manifest.json`：180 配置、两条路径共 23,040 samples、92,160 分量，零 mismatch，零 marker/buffer failure，最大绝对误差 `5.960464478e-8`。
+- `artifacts/texture_model/buffer-fixed-any-hit/textured-any-hit-validation.txt`：原 160×96 场景保持 SHA256 `88b724540dc17b23161c638ebcbb71e9acaf73ff098b43764f9edf17cd5bebb0`。
+- Mesa `vt_nir_to_llvm_phi_test` 验证外部 masked vec4、volatile、64-bit store 和未支持位宽拒绝。
+- 2026-10-05 的 `lod0-spike-verified/`、`lod0-spike-negative/` 是旧图像传输方案的历史证据，不能当作当前 buffer 版本的运行记录。
 
-现有软件 lowering 在这些 LOD0 样例上与参考模型一致。参考模型的 mip/view 功能仍只有 host 验证；GPU mip、view 范围、不同 min/mag、descriptor array、独立 sampler、动态索引、未知状态拒绝、更新后的同步和原 textured any-hit 场景均未在本次专项运行中验证。模型尚未成为 Spike 的纹理指令处理程序，也未接入 RTL。
+每次运行包含 `run.log`、逐路径逐分量 `numeric.csv`、保留的 SPIR-V/LLVM/ELF 和构建日志；manifest 记录实际加载库、源码与二进制哈希、运行命令、profile 和结果。GPU mip/view、不同 min/mag、descriptor array、独立 sampler、动态索引和一般同步仍不在当前 LOD0 数值 gate 的证明范围。模型尚未成为 Spike 的纹理指令处理程序，也未接入 RTL。
 
 ## 代码组织与规范来源
 

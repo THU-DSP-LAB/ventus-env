@@ -1,5 +1,5 @@
 // Numeric Vulkan -> SPIR-V -> Ventus ELF -> Spike regression. The CPU model
-// supplies expectations only; actual float bits are decoded from the shader's RGB image transport.
+// supplies expectations only; actual floats come from SSBO and buffer-reference stores.
 #include "model.hpp"
 
 #include <vulkan/vulkan.h>
@@ -21,7 +21,7 @@ namespace {
 
 constexpr double tolerance = 1e-6; // Declared before running: float shader arithmetic.
 static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559,
-              "RGB transport requires IEEE 754 binary32");
+              "numeric readback requires IEEE 754 binary32");
 
 void check(VkResult result, const char *operation) {
   if (result != VK_SUCCESS)
@@ -42,7 +42,6 @@ struct Texture {
   VkImage handle;
   VkImageView view;
   VkDeviceMemory memory;
-  void *map; // Ventus-specific linear coherent image backing, not portable optimal tiling.
 };
 
 class Experiment {
@@ -85,7 +84,6 @@ public:
       for (auto module : modules) vkDestroyShaderModule(device, module, nullptr);
       for (auto sampler : samplers) vkDestroySampler(device, sampler, nullptr);
       for (auto texture : textures) {
-        vkUnmapMemory(device, texture.memory);
         vkDestroyImageView(device, texture.view, nullptr);
         vkDestroyImage(device, texture.handle, nullptr);
         vkFreeMemory(device, texture.memory, nullptr);
@@ -150,6 +148,9 @@ public:
                              VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
                              VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME};
     VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    VkPhysicalDeviceFeatures core_features{};
+    core_features.shaderInt64 = VK_TRUE;
+    device_info.pEnabledFeatures = &core_features;
     device_info.pNext = &rt;
     device_info.queueCreateInfoCount = 1;
     device_info.pQueueCreateInfos = &queue_info;
@@ -236,7 +237,6 @@ public:
     vkGetImageMemoryRequirements(device, texture.handle, &requirements);
     texture.memory = allocate(requirements, false);
     check(vkBindImageMemory(device, texture.handle, texture.memory, 0), "bind image");
-    check(vkMapMemory(device, texture.memory, 0, VK_WHOLE_SIZE, 0, &texture.map), "map Ventus image backing");
     VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     view.image = texture.handle;
     view.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -337,17 +337,18 @@ public:
   }
 
   void setup_pipeline(const char *rgen, const char *rmiss) {
-    const std::array<VkDescriptorType, 4> types{
+    const std::array<VkDescriptorType, 6> types{
         VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
-    std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
+    std::array<VkDescriptorSetLayoutBinding, 6> bindings{};
     for (unsigned i = 0; i < bindings.size(); ++i)
       bindings[i] = {i, types[i], 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr};
     VkDescriptorSetLayoutCreateInfo layout{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     layout.bindingCount = bindings.size();
     layout.pBindings = bindings.data();
     check(vkCreateDescriptorSetLayout(device, &layout, nullptr, &set_layout), "create descriptor layout");
-    const VkDescriptorPoolSize sizes[]{{types[0], 1}, {types[1], 1}, {types[2], 1}, {types[3], 1}};
+    const VkDescriptorPoolSize sizes[]{{types[0], 1}, {types[1], 1}, {types[2], 1}, {types[3], 3}};
     VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool.maxSets = 1;
     pool.poolSizeCount = 4;
@@ -419,7 +420,7 @@ public:
     return result;
   }
 
-  void descriptors(Texture sampled, VkSampler sampler, Texture carrier, Buffer uv,
+  void descriptors(Texture sampled, VkSampler sampler, Texture carrier, Buffer uv, Buffer direct, Buffer output_address,
                    std::uint64_t request_count) {
     VkWriteDescriptorSetAccelerationStructureKHR acceleration{
         VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
@@ -427,13 +428,16 @@ public:
     acceleration.pAccelerationStructures = &tlas;
     const VkDescriptorImageInfo images[]{{VK_NULL_HANDLE, carrier.view, VK_IMAGE_LAYOUT_GENERAL},
                                          {sampler, sampled.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
-    const VkDescriptorBufferInfo data{uv.handle, 0, request_count * 8};
+    const VkDescriptorBufferInfo data[]{{uv.handle, 0, request_count * 8},
+                                      {direct.handle, 0, request_count * 32},
+                                      {output_address.handle, 0, 8}};
     const VkDescriptorType types[]{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
                                     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                                     VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
-    VkWriteDescriptorSet writes[4]{};
-    for (unsigned i = 0; i < 4; ++i) {
+    VkWriteDescriptorSet writes[6]{};
+    for (unsigned i = 0; i < 6; ++i) {
       writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
       writes[i].dstSet = descriptor_set;
       writes[i].dstBinding = i;
@@ -443,8 +447,10 @@ public:
     writes[0].pNext = &acceleration;
     writes[1].pImageInfo = &images[0];
     writes[2].pImageInfo = &images[1];
-    writes[3].pBufferInfo = &data;
-    vkUpdateDescriptorSets(device, 4, writes, 0, nullptr);
+    writes[3].pBufferInfo = &data[0];
+    writes[4].pBufferInfo = &data[1];
+    writes[5].pBufferInfo = &data[2];
+    vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
   }
 };
 
@@ -503,8 +509,12 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   const auto uv = requests();
   auto inputs = experiment.buffer(uv.size() * 8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   std::memcpy(inputs.map, uv.data(), uv.size() * 8);
-  const unsigned carrier_width = 256 + uv.size() * 16;
-  auto carrier = experiment.texture(carrier_width, 1, VK_FORMAT_R8G8B8A8_UNORM,
+  auto direct = experiment.buffer(uv.size() * 32, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  auto indirect = experiment.buffer(uv.size() * 32, VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+  auto output_address = experiment.buffer(8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  const auto indirect_address = experiment.address(indirect);
+  std::memcpy(output_address.map, &indirect_address, sizeof(indirect_address));
+  auto carrier = experiment.texture(uv.size(), 1, VK_FORMAT_R8G8B8A8_UNORM,
                                     VK_IMAGE_USAGE_STORAGE_BIT);
   experiment.begin();
   experiment.transition(carrier, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
@@ -513,10 +523,10 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   experiment.submit();
   std::ofstream csv(csv_path);
   if (!csv) throw std::runtime_error("cannot open numeric result CSV");
-  csv << "case,width,height,format,address_u,address_v,filter,request,u,v,channel,reference,gpu,abs_error\n";
+  csv << "case,path,width,height,format,address_u,address_v,filter,request,u,v,channel,reference,gpu,abs_error\n";
   csv << std::setprecision(10);
   unsigned cases = 0;
-  std::uint64_t samples = 0, components = 0, mismatches = 0, markers_failed = 0, transport_failed = 0;
+  std::uint64_t samples = 0, components = 0, mismatches = 0, markers_failed = 0, buffer_failed = 0;
   double max_error = 0;
   const std::array<std::array<unsigned, 2>, 5> sizes{{{1, 1}, {1, 5}, {5, 1}, {3, 5}, {4, 4}}};
   for (auto size : sizes)
@@ -550,10 +560,11 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
             if (cases == limit) goto finished;
             const Sampling sampling{u_mode, v_mode, filter};
             auto sampler = experiment.sampler(sampling);
-            experiment.descriptors(texture, sampler, carrier, inputs, uv.size());
-            auto *bytes = static_cast<std::uint8_t *>(carrier.map);
-            std::memset(bytes, 0xcd, carrier_width * 4);
-            std::vector<float> actual(uv.size() * 8);
+            experiment.descriptors(texture, sampler, carrier, inputs, direct, output_address, uv.size());
+            auto *actual = static_cast<float *>(direct.map);
+            auto *indirect_values = static_cast<float *>(indirect.map);
+            std::fill(actual, actual + uv.size() * 8, std::numeric_limits<float>::quiet_NaN());
+            std::fill(indirect_values, indirect_values + uv.size() * 8, std::numeric_limits<float>::quiet_NaN());
             experiment.begin();
             vkCmdBindPipeline(experiment.command, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, experiment.pipeline);
             vkCmdBindDescriptorSets(experiment.command, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
@@ -566,24 +577,16 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
             vkCmdPipelineBarrier(experiment.command, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
                                  VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &visibility, 0, nullptr, 0, nullptr);
             experiment.submit();
-            for (unsigned b = 0; b < 256; ++b)
-              for (unsigned c = 0; c < 3; ++c)
-                if (bytes[b * 4 + c] != b) ++transport_failed;
-            for (unsigned word = 0; word < actual.size(); ++word) {
-              const auto *low = bytes + (256 + word * 2) * 4;
-              const auto *high = low + 4;
-              if (high[1] != (low[0] ^ 255) || high[2] != (high[0] ^ 255)) ++transport_failed;
-              const std::uint32_t bits = low[0] | (std::uint32_t(low[1]) << 8) |
-                                          (std::uint32_t(low[2]) << 16) | (std::uint32_t(high[0]) << 24);
-              std::memcpy(&actual[word], &bits, sizeof(bits));
-            }
+            if (std::memcmp(actual, indirect_values, uv.size() * 32)) ++buffer_failed;
             if (inject_mismatch && cases == 0) actual[0] = 0.75f;
-            for (unsigned i = 0; i < uv.size(); ++i) {
+            for (unsigned path = 0; path < 2; ++path) {
+              auto *values = path ? indirect_values : actual;
+              for (unsigned i = 0; i < uv.size(); ++i) {
               const auto reference = sample_level(image, 0, sampling, uv[i][0], uv[i][1]);
               const std::array<float, 4> marker{73, 123, 456, 789};
-              if (!std::equal(marker.begin(), marker.end(), actual.data() + i * 8 + 4)) ++markers_failed;
+              if (!std::equal(marker.begin(), marker.end(), values + i * 8 + 4)) ++markers_failed;
               for (unsigned c = 0; c < 4; ++c) {
-                const float value = actual[i * 8 + c];
+                const float value = values[i * 8 + c];
                 const double error = std::abs(static_cast<double>(value) - reference.rgba[c]);
                 const bool good = std::isfinite(value) && error <= tolerance;
                 if (std::isfinite(value)) max_error = std::max(max_error, error);
@@ -598,18 +601,19 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                                 << tap.byte_offset << " weight=" << tap.weight << '\n';
                   }
                 }
-                csv << cases << ',' << size[0] << ',' << size[1] << ',' << static_cast<int>(format)
+                csv << cases << ',' << (path ? "bda" : "ssbo") << ',' << size[0] << ',' << size[1] << ',' << static_cast<int>(format)
                     << ',' << static_cast<int>(u_mode) << ',' << static_cast<int>(v_mode)
                     << ',' << static_cast<int>(filter) << ',' << i << ',' << uv[i][0] << ',' << uv[i][1]
                     << ',' << c << ',' << reference.rgba[c] << ',' << value << ',' << error << '\n';
                 ++components;
               }
               ++samples;
+              }
             }
             ++cases;
             std::cout << "CASE " << cases << "/" << std::min(limit, 180U)
                       << " samples=" << samples << " mismatches=" << mismatches
-                      << " markers_failed=" << markers_failed << " transport_failed=" << transport_failed << std::endl;
+                      << " markers_failed=" << markers_failed << " buffer_failed=" << buffer_failed << std::endl;
           }
     }
 finished:
@@ -618,9 +622,9 @@ finished:
   loaded_libraries();
   std::cout << std::setprecision(10) << "SUMMARY cases=" << cases << " samples=" << samples
             << " components=" << components << " mismatches=" << mismatches
-            << " markers_failed=" << markers_failed << " transport_failed=" << transport_failed << " max_abs_error=" << max_error
+            << " markers_failed=" << markers_failed << " buffer_failed=" << buffer_failed << " max_abs_error=" << max_error
             << " tolerance=" << tolerance << " injected=" << inject_mismatch << std::endl;
-  return cases && !mismatches && !markers_failed && !transport_failed ? 0 : 1;
+  return cases && !mismatches && !markers_failed && !buffer_failed ? 0 : 1;
 }
 
 } // namespace

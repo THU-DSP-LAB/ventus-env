@@ -67,10 +67,13 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 ```sh
 python3 tools/texture_model.py gpu
 python3 tools/texture_model.py gpu --case-limit 1
+python3 tools/texture_model.py gpu-mips
+python3 tools/texture_model.py gpu-checks
+python3 tools/texture_model.py gpu-mip-linear-check
 python3 tools/texture_model.py gpu --case-limit 1 --inject-mismatch
 ```
 
-第三条是比较器负向校验：故意修改读回的一个颜色分量，**必须返回 1**，不应作为普通成功测试执行。`--case-limit` 可限定前 1..180 种配置；`--timeout` 限制运行时间；`--out-dir` 指向空目录，以避免旧结果混入证据。默认输出位于 `artifacts/texture_model/gpu-<UTC>-<id>/`。
+`gpu --case-limit 1 --inject-mismatch` 是比较器负向校验：故意修改读回的一个颜色分量，**必须返回 1**，不应作为普通成功测试执行。`--case-limit` 可限定前 1..180 种 LOD0 配置或 1..360 种 mip 配置；`--timeout` 限制运行时间；`--out-dir` 指向空目录，以避免旧结果混入证据。默认输出位于 `artifacts/texture_model/gpu-<UTC>-<id>/`。
 
 此动作需要已构建的本地 Mesa `mesa/build-ventus`、driver `driver/build/driver/spike_device`、Spike `spike/build`、LLVM `llvm/build`、`llvm/build-rt-libclc/lib/crt0.o`，以及 PATH 上的 `glslangValidator`、host C++ 编译器、Vulkan headers/loader 和 `pkg-config vulkan`。`--mesa-build` 可选择另一份已有 Mesa build。它不构建或安装上述组件。
 
@@ -98,14 +101,47 @@ dyadic UV 能在本组尺寸下精确表示相关坐标计算，减少 nearest �
 - Mesa `vt_nir_to_llvm_phi_test` 验证外部 masked vec4、volatile、64-bit store 和未支持位宽拒绝。
 - 2026-10-05 的 `lod0-spike-verified/`、`lod0-spike-negative/` 是旧图像传输方案的历史证据，不能当作当前 buffer 版本的运行记录。
 
-每次运行包含 `run.log`、逐路径逐分量 `numeric.csv`、保留的 SPIR-V/LLVM/ELF 和构建日志；manifest 记录实际加载库、源码与二进制哈希、运行命令、profile 和结果。GPU mip/view、不同 min/mag、descriptor array、独立 sampler、动态索引和一般同步仍不在当前 LOD0 数值 gate 的证明范围。模型尚未成为 Spike 的纹理指令处理程序，也未接入 RTL。
+每次数值运行包含 `run.log`、逐路径逐分量 `numeric.csv`、保留的 SPIR-V/LLVM/ELF 和构建日志；manifest 记录实际加载库、源码与二进制哈希、运行命令、profile 和结果。拒绝检查不产生数值 CSV。
+
+### 软件 mip/view/显式 LOD（2026-10-06）
+
+`gpu-mips` 使用独立 shader `sample_mip.rgen`，从 SSBO 读取每个请求的 float32 UV 和 LOD，实际执行动态 `textureLod`。与模型 `sample_lod` 比较两条 buffer 写回路径，容差仍为 `1e-6`。
+
+- 360 配置覆盖两种格式、九种寻址组合和两种过滤；尺寸含 5×3、8×4、1×8、1×1、3×5 和 16384×1。
+- 完整/不完整 mip 链；最高 15 级；非零 view base、有限 count 和 `VK_REMAINING_MIP_LEVELS`。
+- 32 种 LOD 含负值、整数、精确半整数及相邻 binary32 值、很大有限值；sampler 范围含 0..1000、0.75..1.75、2..2、0..0.5。每级内容不同。
+- 非零上传偏移、行 padding、逐 mip region；记录 copy 后更新 coherent staging；同一命令缓冲内局部更新 mip 后采样。
+- 单级 view 使用 mipmap-linear 验证它不会改变结果；多级动态 LOD 使用 mip-nearest。
+
+当前 Mesa 的 image 私有存储为每级紧密行、顺序拼接，全部 mip 计入内存需求；view 保存相对可见范围。每次 dispatch 上传一个 view-relative mip 表，元素记录设备地址、宽高与 row pitch；它由已有 dispatch transient allocation 生命周期管理。软件 descriptor 现为 80 字节，mip 表元素为 24 字节，producer/consumer 有 layout static assertions。这是 Mesa 软件实现编码，**不是 TMU/Spike 纹理指令 ABI**；没有新增 ISA。
+
+`gpu-checks` 覆盖 13 项 sampler、8 项 image、10 项 view 和 7 类 shader 拒绝检查。Sampler API 不支持的状态返回 `VK_ERROR_FEATURE_NOT_PRESENT`；当前不支持的 shader 编译经 pipeline 返回初始化失败；多级 mipmap-linear 与动态 LOD 的不支持组合在提交时拒绝，当前实验驱动返回 `VK_ERROR_DEVICE_LOST`，由 `gpu-mip-linear-check` 单独验证。合法而无效的 compareOp/maxAnisotropy 默认字段不会被一概拒绝。
+
+兼容例外：单级 view 的 mipmap-linear 没有跨级效果；另外，已证明所有采样均为 LOD0 的普通 RT pipeline、sampler minLod=0 时，多级 mipmap-linear 仍只读取 view 的第 0 级。原 any-hit workload 属于后者。此例外保守地不开放给独立 global callback/resume ELF profile。
+
+最终运行证据：
+
+| 门禁 | 结果 | 本地证据 |
+| --- | --- | --- |
+| LOD0 | 180 配置、92,160 分量，零差异 | `artifacts/texture_model/lod0-final-v2/manifest.json` |
+| Mip/view/LOD | 360 配置、184,320 分量，零差异 | `artifacts/texture_model/mip-final-v2/manifest.json` |
+| 范围检查 | 13 sampler + 8 image + 10 view + 7 shader | `artifacts/texture_model/profile-final-v2/manifest.json` |
+| 多级 mip-linear 拒绝 | 预期提交失败，检查器通过 | `artifacts/texture_model/mip-linear-rejected/manifest.json` |
+| 比较器负向校验 | 故意改一个分量，mismatch=1、返回 1 | `artifacts/texture_model/mip-checker-negative/manifest.json` |
+| 原 any-hit 场景 | 160×96，原 SHA256 不变 | `artifacts/texture_model/any-hit-final-v2/textured-any-hit-validation.txt` |
+
+两组数值门禁的最大绝对误差均为 `5.960464478e-8`。Mesa `vt_nir_to_llvm_phi_test` 与 host 模型 47,885 项检查（普通/ASan/UBSan）通过。软件执行证据对应 Mesa 本地提交 `7f5b850`。
+
+仍要求 min/mag 相同、零 bias、有限 UV/LOD、二维单 layer/sample、RGBA8/BGRA8 UNORM 和 identity swizzle。不支持跨 mip 线性混合、导数选级、独立 sampler、数组/非一致 descriptor 索引、comparison、anisotropy、offset、projector、gather、texelFetch、sRGB 或压缩。host 模型的 NaN/Inf 异常诊断不是 GPU 运行时异常能力。不同 Image 在同一 binding 顺序替换已验证，多 binding 同时采样尚未作为本次门禁覆盖。
+
+上传和执行顺序的证据限定在当前 coherent backing、串行提交的 Spike 实验路径；不证明一般 Vulkan barrier/layout、跨队列或缓存一致性。模型尚未成为 Spike 的纹理指令处理程序，也未接入 RTL。
 
 ## 代码组织与规范来源
 
 - `model.hpp` / `model.cpp`：功能模型，只使用 C++ 标准库。
 - `test.cpp`：独立 oracle、手算例子和回归。
 - `demo.cpp`：采样过程示例。
-- `gpu.cpp` / `gpu.py` / `sample.rgen` / `sample.rmiss`：真实 Vulkan→Spike 数值比较与运行证据。
+- `gpu.cpp` / `gpu.py` / `sample.rgen` / `sample_mip.rgen` / `sample.rmiss`：真实 Vulkan→Spike 数值比较与运行证据。
 - 一级入口 `../texture_model.py`：host 构建与运行。
 
 模型语义依据 [Vulkan Sampling](https://docs.vulkan.org/spec/latest/chapters/textures.html)，特别是 Image Level(s) Selection、Texel Filtering 和 Texel Addressing。2026-10-05 核查了 [官方规范源文件](https://github.com/KhronosGroup/Vulkan-Docs/blob/main/chapters/textures.adoc) 的 preferred/alternative mip nearest 规则。没有将该文档的全部功能纳入本模型。

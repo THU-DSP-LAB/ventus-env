@@ -52,10 +52,13 @@ def run(args, compiler: str) -> int:
         raise RuntimeError(f"output directory must be empty to exclude stale evidence: {output}")
     elf_dir = output / "elf"
     elf_dir.mkdir()
+    linear_check = args.action == "gpu-mip-linear-check"
+    mips = args.action == "gpu-mips" or linear_check
+    rgen_name = "sample_mip.rgen" if mips else "sample.rgen"
     for stage in ("rgen", "rmiss"):
         with (output / f"compile-{stage}.log").open("w") as log:
             subprocess.run([glslang, "-V", "--target-env", "vulkan1.2",
-                            str(source / f"sample.{stage}"), "-o", str(output / f"sample.{stage}.spv")],
+                            str(source / (rgen_name if stage == "rgen" else "sample.rmiss")), "-o", str(output / f"sample.{stage}.spv")],
                            stdout=log, stderr=subprocess.STDOUT, check=True)
     flags = shlex.split(subprocess.check_output(["pkg-config", "--cflags", "--libs", "vulkan"], text=True))
     executable = output / "compare"
@@ -86,14 +89,14 @@ def run(args, compiler: str) -> int:
     })
     command = [str(executable), str(output / "sample.rgen.spv"), str(output / "sample.rmiss.spv"),
                str(output / "numeric.csv"), str(args.case_limit), str(int(args.inject_mismatch))]
+    if mips:
+        command.append("reject-mip-linear" if linear_check else "mips")
     checks_only = args.action == "gpu-checks"
     bad_paths = []
     if checks_only:
         shader_source = (source / "sample.rgen").read_text()
         original = "textureLod(source, requests.uv[i], 0.0)"
         variants = {
-            "nonzero-lod": "textureLod(source, requests.uv[i], 1.0)",
-            "dynamic-lod": "textureLod(source, requests.uv[i], requests.uv[i].x)",
             "offset": "textureLodOffset(source, requests.uv[i], 0.0, ivec2(1, 0))",
             "gradients": "textureGrad(source, requests.uv[i], vec2(1), vec2(1))",
             "gather": "textureGather(source, requests.uv[i])",
@@ -122,7 +125,7 @@ def run(args, compiler: str) -> int:
             timeout = True
             returncode = 124
     text = (output / "run.log").read_text(errors="replace")
-    match = re.search(r"^" + ("CHECKS" if checks_only else "SUMMARY") + r" (.+)$", text, re.MULTILINE)
+    match = re.search(r"^" + ("REJECT" if linear_check else "CHECKS" if checks_only else "SUMMARY") + r" (.+)$", text, re.MULTILINE)
     summary = dict(item.split("=", 1) for item in match[1].split()) if match else {}
     libraries = [Path(line[8:]).resolve() for line in text.splitlines() if line.startswith("LIBRARY ")]
     expected_libraries = {paths[name].resolve() for name in ("mesa", "driver", "spike")}
@@ -139,11 +142,14 @@ def run(args, compiler: str) -> int:
         errors.append("loaded ICD/driver/Spike libraries do not match the selected local builds")
     if not checked_frontier or not elf_paths:
         errors.append("checked, retained V5 ELF evidence is missing")
-    if checks_only:
-        if summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "13" or summary.get("errors") != "0":
+    if linear_check:
+        if summary.get("mip_linear") != "1" or summary.get("errors") != "0" or "unsupported RT 2D mip sampler binding=2" not in text:
+            errors.append("mip-linear rejection evidence missing")
+    elif checks_only:
+        if summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "13" or summary.get("errors") != "0" or summary.get("images") != "8" or summary.get("views") != "10":
             errors.append("profile rejection checks incomplete")
     else:
-        if summary.get("cases") != str(min(args.case_limit, 180)):
+        if summary.get("cases") != str(args.case_limit):
             errors.append("not all requested sampler cases completed")
         if summary.get("samples") != str(args.case_limit * 128) or summary.get("components") != str(args.case_limit * 512):
             errors.append("numeric coverage counts are incomplete")
@@ -153,7 +159,7 @@ def run(args, compiler: str) -> int:
         errors.append(f"comparison process returned {returncode}")
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
-        "profile": "API/compiler rejection checks (no execution)" if checks_only else "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag; no GPU mip support claim",
+        "profile": "multi-mip linear sampler rejected at queue submission" if linear_check else "API/compiler rejection checks (no execution)" if checks_only else ("Vulkan V5 megakernel to Spike; 2D mip views, dynamic explicit LOD, mip-nearest" if mips else "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag"),
         "readback": "direct SSBO and GLSL buffer-reference stores to coherent host-visible buffers",
         "summary": summary, "errors": errors, "timeout": timeout,
         "injected_mismatch": args.inject_mismatch, "checked_frontier": checked_frontier,
@@ -163,8 +169,9 @@ def run(args, compiler: str) -> int:
         "loaded_libraries": [str(path) for path in libraries],
         "binary_sha256": {name: digest(path) for name, path in paths.items()},
         "source_sha256": {name: digest(source / name) for name in
-                          ("model.hpp", "model.cpp", "gpu.cpp", "gpu.py", "sample.rgen", "sample.rmiss")},
+                          ("model.hpp", "model.cpp", "gpu.cpp", "gpu.py", "sample.rgen", "sample_mip.rgen", "sample.rmiss")},
         "entrypoint_sha256": digest(root / "tools/texture_model.py"),
+        "rejection_shader_sha256": {path.name: digest(path) for path in bad_paths},
         "elf_sha256": {path.name: digest(path) for path in elf_paths},
         "numeric_csv_sha256": digest(output / "numeric.csv") if (output / "numeric.csv").exists() else None,
     }

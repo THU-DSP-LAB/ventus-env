@@ -17,21 +17,24 @@ import tempfile
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Standalone C++ texture functional model")
-    parser.add_argument("action", choices=("test", "demo", "gpu", "gpu-checks"))
+    parser.add_argument("action", choices=("test", "demo", "gpu", "gpu-checks", "gpu-mips", "gpu-mip-linear-check"))
     parser.add_argument("--sanitize", action="store_true", help="enable address/UB sanitizers")
     parser.add_argument("--cxx", default="c++", help="host C++17 compiler executable")
     parser.add_argument("--mesa-build", type=Path, help="local Mesa build directory for gpu")
     parser.add_argument("--out-dir", type=Path, help="empty artifact directory for gpu")
-    parser.add_argument("--case-limit", type=int, default=180, help="gpu sampler cases (1..180)")
+    parser.add_argument("--case-limit", type=int, default=None, help="sampler cases (default: 180 LOD0 / 360 mip)")
     parser.add_argument("--timeout", type=float, default=900, help="gpu runtime timeout in seconds")
     parser.add_argument("--inject-mismatch", action="store_true", help="gpu checker negative control; must fail")
     args = parser.parse_args()
     compiler = shutil.which(args.cxx)
     if compiler is None:
         parser.error(f"host compiler not found: {args.cxx}")
-    if args.case_limit < 1 or args.case_limit > 180 or args.timeout <= 0:
-        parser.error("case-limit must be 1..180 and timeout must be positive")
-    if args.action in ("gpu", "gpu-checks"):
+    maximum = 360 if args.action == "gpu-mips" else 180
+    if args.case_limit is None:
+        args.case_limit = maximum
+    if args.case_limit < 1 or args.case_limit > maximum or args.timeout <= 0:
+        parser.error("case-limit exceeds selected profile and timeout must be positive")
+    if args.action in ("gpu", "gpu-checks", "gpu-mips", "gpu-mip-linear-check"):
         if args.sanitize:
             parser.error("--sanitize applies to standalone host test/demo only")
         from texture_model.gpu import run

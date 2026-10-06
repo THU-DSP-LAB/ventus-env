@@ -220,12 +220,13 @@ public:
     return result;
   }
 
-  Texture texture(unsigned width, unsigned height, VkFormat format, VkImageUsageFlags usage) {
+  Texture texture(unsigned width, unsigned height, VkFormat format, VkImageUsageFlags usage,
+                  unsigned levels = 1, unsigned base = 0, unsigned count = 1) {
     VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     info.imageType = VK_IMAGE_TYPE_2D;
     info.format = format;
     info.extent = {width, height, 1};
-    info.mipLevels = 1;
+    info.mipLevels = levels;
     info.arrayLayers = 1;
     info.samples = VK_SAMPLE_COUNT_1_BIT;
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -241,7 +242,7 @@ public:
     view.image = texture.handle;
     view.viewType = VK_IMAGE_VIEW_TYPE_2D;
     view.format = format;
-    view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, base, count, 0, 1};
     check(vkCreateImageView(device, &view, nullptr, &texture.view), "create image view");
     textures.push_back(texture);
     return texture;
@@ -274,7 +275,7 @@ public:
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image.handle;
-    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, 1};
     vkCmdPipelineBarrier(command, src, dst, 0, 0, nullptr, 0, nullptr, 1, &barrier);
   }
 
@@ -403,17 +404,19 @@ public:
     miss = {base + stride, stride, stride};
   }
 
-  VkSampler sampler(Sampling sampling) {
+  VkSampler sampler(Sampling sampling, LodRange range = {0, 0},
+                    VkSamplerMipmapMode mode = VK_SAMPLER_MIPMAP_MODE_NEAREST) {
     const VkSamplerAddressMode modes[]{VK_SAMPLER_ADDRESS_MODE_REPEAT,
                                       VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT,
                                       VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
     VkSamplerCreateInfo info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     info.magFilter = info.minFilter = sampling.filter == Filter::Nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
-    info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    info.mipmapMode = mode;
     info.addressModeU = modes[static_cast<unsigned>(sampling.address_u)];
     info.addressModeV = modes[static_cast<unsigned>(sampling.address_v)];
     info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    info.maxLod = 0;
+    info.minLod = range.min;
+    info.maxLod = range.max;
     VkSampler result;
     check(vkCreateSampler(device, &info, nullptr, &result), "create sampler");
     samplers.push_back(result);
@@ -421,14 +424,14 @@ public:
   }
 
   void descriptors(Texture sampled, VkSampler sampler, Texture carrier, Buffer uv, Buffer direct, Buffer output_address,
-                   std::uint64_t request_count) {
+                   std::uint64_t request_count, unsigned input_stride = 8) {
     VkWriteDescriptorSetAccelerationStructureKHR acceleration{
         VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
     acceleration.accelerationStructureCount = 1;
     acceleration.pAccelerationStructures = &tlas;
     const VkDescriptorImageInfo images[]{{VK_NULL_HANDLE, carrier.view, VK_IMAGE_LAYOUT_GENERAL},
                                          {sampler, sampled.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
-    const VkDescriptorBufferInfo data[]{{uv.handle, 0, request_count * 8},
+    const VkDescriptorBufferInfo data[]{{uv.handle, 0, request_count * input_stride},
                                       {direct.handle, 0, request_count * 32},
                                       {output_address.handle, 0, 8}};
     const VkDescriptorType types[]{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
@@ -468,6 +471,28 @@ Image fixture(unsigned width, unsigned height, Format format) {
       if (format == Format::BGRA8_UNORM) std::swap(color[0], color[2]);
       std::copy(color.begin(), color.end(), image.data.begin() + level.offset + y * level.row_pitch + x * 4);
     }
+  return image;
+}
+
+Image mip_fixture(unsigned width, unsigned height, unsigned levels, Format format) {
+  Image image{format, {}, {}};
+  for (unsigned level = 0; level < levels; ++level) {
+    auto part = fixture(width, height, format);
+    const auto start = image.data.size();
+    // Distinct mip content and poisoned padding make incorrect level selection visible.
+    for (unsigned y = 0; y < height; ++y)
+      for (unsigned x = 0; x < width; ++x)
+        for (unsigned c = 0; c < 4; ++c) {
+          auto &byte = part.data[part.levels[0].offset + y * part.levels[0].row_pitch + x * 4 + c];
+          byte = static_cast<std::uint8_t>(byte + level * (47 + c * 19));
+        }
+    image.data.insert(image.data.end(), part.data.begin(), part.data.end());
+    auto mip = part.levels[0];
+    mip.offset += start;
+    image.levels.push_back(mip);
+    width = std::max(1U, width / 2); height = std::max(1U, height / 2);
+  }
+  validate(image);
   return image;
 }
 
@@ -533,11 +558,65 @@ void sampler_checks(Experiment &experiment, unsigned &count) {
   changed = base; changed.maxLod = std::numeric_limits<float>::infinity(); verify("infinite-lod", changed, false);
 }
 
+void image_view_checks(Experiment &experiment, unsigned &images, unsigned &views) {
+  VkImageFormatProperties properties{};
+  check(vkGetPhysicalDeviceImageFormatProperties(experiment.physical, VK_FORMAT_R8G8B8A8_UNORM,
+      VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT, 0, &properties), "query mip limits");
+  if (properties.maxMipLevels != 15 || properties.maxArrayLayers != 1)
+    throw std::runtime_error("inconsistent advertised 2D mip limits");
+  VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+  info.imageType = VK_IMAGE_TYPE_2D; info.format = VK_FORMAT_R8G8B8A8_UNORM;
+  info.extent = {8,4,1}; info.mipLevels = 4; info.arrayLayers = 1;
+  info.samples = VK_SAMPLE_COUNT_1_BIT; info.tiling = VK_IMAGE_TILING_OPTIMAL;
+  info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+  auto image_check = [&](const char *name, VkImageCreateInfo value, bool supported) {
+    VkImage image = VK_NULL_HANDLE;
+    const auto result = vkCreateImage(experiment.device, &value, nullptr, &image);
+    if (image) vkDestroyImage(experiment.device, image, nullptr);
+    if (result != (supported ? VK_SUCCESS : VK_ERROR_FEATURE_NOT_PRESENT))
+      throw std::runtime_error(std::string("image profile check failed: ") + name);
+    ++images;
+    std::cout << "CHECK image=" << name << " result=" << result << std::endl;
+  };
+  image_check("complete-mips", info, true);
+  auto changed = info; changed.mipLevels = 2; image_check("partial-mips", changed, true);
+  changed = info; changed.mipLevels = 5; image_check("too-many-mips", changed, false);
+  changed = info; changed.arrayLayers = 2; image_check("array-layers", changed, false);
+  changed = info; changed.imageType = VK_IMAGE_TYPE_1D; image_check("1d", changed, false);
+  changed = info; changed.imageType = VK_IMAGE_TYPE_3D; changed.extent.depth = 2; image_check("3d", changed, false);
+  changed = info; changed.samples = VK_SAMPLE_COUNT_4_BIT; image_check("multisample", changed, false);
+  changed = info; changed.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT; image_check("cube", changed, false);
+  auto texture = experiment.texture(8,4,info.format,info.usage,4,0,4);
+  VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+  view.image = texture.handle; view.viewType = VK_IMAGE_VIEW_TYPE_2D; view.format = info.format;
+  view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT,1,VK_REMAINING_MIP_LEVELS,0,VK_REMAINING_ARRAY_LAYERS};
+  auto view_check = [&](const char *name, VkImageViewCreateInfo value, bool supported) {
+    VkImageView handle = VK_NULL_HANDLE;
+    const auto result = vkCreateImageView(experiment.device, &value, nullptr, &handle);
+    if (handle) vkDestroyImageView(experiment.device, handle, nullptr);
+    if (result != (supported ? VK_SUCCESS : VK_ERROR_FEATURE_NOT_PRESENT))
+      throw std::runtime_error(std::string("view profile check failed: ") + name);
+    ++views;
+    std::cout << "CHECK view=" << name << " result=" << result << std::endl;
+  };
+  view_check("remaining-levels-layers", view, true);
+  auto other = view; other.subresourceRange.levelCount = 1; view_check("single-level", other, true);
+  other = view; other.components = {VK_COMPONENT_SWIZZLE_R,VK_COMPONENT_SWIZZLE_G,VK_COMPONENT_SWIZZLE_B,VK_COMPONENT_SWIZZLE_A}; view_check("explicit-identity", other, true);
+  other = view; other.subresourceRange.baseMipLevel = 4; view_check("base-outside-image", other, false);
+  other = view; other.subresourceRange.levelCount = 4; view_check("range-outside-image", other, false);
+  other = view; other.subresourceRange.baseArrayLayer = 1; view_check("layer", other, false);
+  other = view; other.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY; view_check("array-view", other, false);
+  other = view; other.format = VK_FORMAT_B8G8R8A8_UNORM; view_check("format-reinterpretation", other, false);
+  other = view; other.components.r = VK_COMPONENT_SWIZZLE_B; view_check("swizzle", other, false);
+  other = view; other.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT; view_check("depth-aspect", other, false);
+}
+
 int profile_checks(const char *rgen, const char *rmiss, int bad_count, char **bad_shaders) {
-  unsigned samplers = 0, shaders = 0;
+  unsigned samplers = 0, shaders = 0, images = 0, views = 0;
   Experiment baseline;
   baseline.initialize();
   sampler_checks(baseline, samplers);
+  image_view_checks(baseline, images, views);
   baseline.setup_pipeline(rgen, rmiss);
   for (int i = 0; i < bad_count; ++i) {
     Experiment experiment;
@@ -556,19 +635,30 @@ int profile_checks(const char *rgen, const char *rmiss, int bad_count, char **ba
     std::cout << "CHECK shader=" << bad_shaders[i] << " result=rejected" << std::endl;
   }
   loaded_libraries();
-  std::cout << "CHECKS samplers=" << samplers << " shaders=" << shaders << " baseline=pass errors=0" << std::endl;
+  std::cout << "CHECKS samplers=" << samplers << " shaders=" << shaders << " images=" << images << " views=" << views << " baseline=pass errors=0" << std::endl;
   return 0;
 }
 
 int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limit,
-        bool inject_mismatch) {
+        bool inject_mismatch, bool mips = false, bool reject_linear = false) {
   Experiment experiment;
   experiment.initialize();
   experiment.empty_tlas();
   experiment.setup_pipeline(rgen, rmiss);
-  const auto uv = requests();
-  auto inputs = experiment.buffer(uv.size() * 8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-  std::memcpy(inputs.map, uv.data(), uv.size() * 8);
+  auto uv = requests();
+  if (mips) {
+    uv[18] = {std::numeric_limits<float>::max(), -std::numeric_limits<float>::max()};
+    uv[19] = {-8388608.f, 16777216.f};
+  }
+  const std::array<float, 32> lods{-100, 0, 0.49f, 0.5f, std::nextafter(0.5f, 1.f),
+      0.51f, 1, 1.49f, 1.5f, std::nextafter(1.5f, 2.f), 1.51f, 2, 2.5f, 3, 10,
+      std::numeric_limits<float>::max(), 4,4.5f,5,6,7,8,9,10,11,12,13,13.49f,13.5f,
+      std::nextafter(13.5f,14.f),13.51f,14};
+  std::vector<std::array<float, 4>> mip_inputs;
+  for (unsigned i = 0; i < uv.size(); ++i)
+    mip_inputs.push_back({uv[i][0], uv[i][1], lods[i % lods.size()], 0});
+  auto inputs = experiment.buffer(uv.size() * (mips ? 16 : 8), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  std::memcpy(inputs.map, mips ? static_cast<const void *>(mip_inputs.data()) : static_cast<const void *>(uv.data()), uv.size() * (mips ? 16 : 8));
   auto direct = experiment.buffer(uv.size() * 32, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   auto indirect = experiment.buffer(uv.size() * 32, VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
   auto output_address = experiment.buffer(8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -583,32 +673,54 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   experiment.submit();
   std::ofstream csv(csv_path);
   if (!csv) throw std::runtime_error("cannot open numeric result CSV");
-  csv << "case,path,width,height,format,address_u,address_v,filter,request,u,v,channel,reference,gpu,abs_error\n";
+  csv << "case,path,width,height,format,address_u,address_v,filter,request,u,v,input_lod,view_base,view_count,selected_mip,channel,reference,gpu,abs_error\n";
   csv << std::setprecision(10);
   unsigned cases = 0;
   std::uint64_t samples = 0, components = 0, mismatches = 0, markers_failed = 0, buffer_failed = 0;
   double max_error = 0;
-  const std::array<std::array<unsigned, 2>, 5> sizes{{{1, 1}, {1, 5}, {5, 1}, {3, 5}, {4, 4}}};
-  for (auto size : sizes)
+  struct Config { unsigned width, height, levels, base, count; LodRange range; };
+  const std::vector<Config> configurations = mips ? std::vector<Config>{
+      {5,3,3,0,3,{0,1000}}, {5,3,3,1,VK_REMAINING_MIP_LEVELS,{0,1000}},
+      {8,4,4,0,4,{0.75,1.75}}, {8,4,4,1,2,{2,2}},
+      {1,8,3,0,3,{0,0.5}}, {1,8,3,2,1,{0,1000}},
+      {1,1,1,0,1,{2,2}}, {3,5,2,1,1,{0,1000}},
+      {16384,1,15,0,15,{0,1000}}, {16384,1,15,13,VK_REMAINING_MIP_LEVELS,{0,1000}}} : std::vector<Config>{
+      {1,1,1,0,1,{0,0}}, {1,5,1,0,1,{0,0}}, {5,1,1,0,1,{0,0}},
+      {3,5,1,0,1,{0,0}}, {4,4,1,0,1,{0,0}}};
+  const unsigned total_cases = configurations.size() * 36;
+  for (auto config : configurations)
     for (auto format : {Format::RGBA8_UNORM, Format::BGRA8_UNORM}) {
-      const auto image = fixture(size[0], size[1], format);
+      const std::array<unsigned, 2> size{config.width, config.height};
+      const View view{config.base, config.count == VK_REMAINING_MIP_LEVELS ? config.levels - config.base : config.count};
+      auto image = mip_fixture(size[0], size[1], config.levels, format);
       const auto vk_format = format == Format::RGBA8_UNORM ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_B8G8R8A8_UNORM;
       auto texture = experiment.texture(size[0], size[1], vk_format,
-                                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+                                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, config.levels, config.base, config.count);
       auto staging = experiment.buffer(image.data.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-      std::memcpy(staging.map, image.data.data(), image.data.size());
+      if (mips) std::memset(staging.map, 0xee, image.data.size());
+      else std::memcpy(staging.map, image.data.data(), image.data.size());
       experiment.begin();
       experiment.transition(texture, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                             0, VK_ACCESS_TRANSFER_WRITE_BIT);
-      VkBufferImageCopy copy{};
-      copy.bufferOffset = image.levels[0].offset;
-      copy.bufferRowLength = image.levels[0].row_pitch / 4;
-      copy.bufferImageHeight = size[1];
-      copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-      copy.imageExtent = {size[0], size[1], 1};
+      std::vector<VkBufferImageCopy> copies;
+      for (unsigned level = 0; level < image.levels.size(); ++level) {
+        const auto &mip = image.levels[level];
+        VkBufferImageCopy copy{};
+        copy.bufferOffset = mip.offset;
+        copy.bufferRowLength = mip.row_pitch / 4;
+        copy.bufferImageHeight = mip.height + 2;
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
+        copy.imageExtent = {mip.width, mip.height, 1};
+        copies.push_back(copy);
+      }
       vkCmdCopyBufferToImage(experiment.command, staging.handle, texture.handle,
-                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, copies.size(), copies.data());
+      // Legal coherent host update after recording and before submission: copies
+      // must consume the latest staging bytes, rather than memcpy at record time.
+      if (mips) {
+        std::memcpy(staging.map, image.data.data(), image.data.size());
+      }
       experiment.transition(texture, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
                             VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
@@ -619,13 +731,31 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
           for (auto filter : {Filter::Nearest, Filter::Bilinear}) {
             if (cases == limit) goto finished;
             const Sampling sampling{u_mode, v_mode, filter};
-            auto sampler = experiment.sampler(sampling);
-            experiment.descriptors(texture, sampler, carrier, inputs, direct, output_address, uv.size());
+            auto sampler = experiment.sampler(sampling, config.range, reject_linear || (mips && view.level_count == 1) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
+            experiment.descriptors(texture, sampler, carrier, inputs, direct, output_address, uv.size(), mips ? 16 : 8);
             auto *actual = static_cast<float *>(direct.map);
             auto *indirect_values = static_cast<float *>(indirect.map);
             std::fill(actual, actual + uv.size() * 8, std::numeric_limits<float>::quiet_NaN());
             std::fill(indirect_values, indirect_values + uv.size() * 8, std::numeric_limits<float>::quiet_NaN());
             experiment.begin();
+            if (mips && u_mode == AddressMode::Repeat && v_mode == AddressMode::Repeat && filter == Filter::Nearest) {
+              // Update a mip subrectangle immediately before tracing in the same
+              // command buffer. This also catches stale device texture uploads.
+              auto &mip = image.levels.back();
+              const auto offset = mip.offset + (mip.height - 1) * mip.row_pitch + (mip.width - 1) * 4;
+              for (unsigned c = 0; c < 4; ++c) image.data[offset + c] ^= 0xa5;
+              std::memcpy(static_cast<std::uint8_t *>(staging.map) + offset, image.data.data() + offset, 4);
+              VkBufferImageCopy patch{};
+              patch.bufferOffset = offset;
+              patch.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, config.levels - 1, 0, 1};
+              patch.imageOffset = {static_cast<int>(mip.width - 1), static_cast<int>(mip.height - 1), 0};
+              patch.imageExtent = {1, 1, 1};
+              experiment.transition(texture, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                  VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+              vkCmdCopyBufferToImage(experiment.command, staging.handle, texture.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &patch);
+              experiment.transition(texture, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+            }
             vkCmdBindPipeline(experiment.command, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, experiment.pipeline);
             vkCmdBindDescriptorSets(experiment.command, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
                                     experiment.pipeline_layout, 0, 1, &experiment.descriptor_set, 0, nullptr);
@@ -636,13 +766,20 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
             visibility.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
             vkCmdPipelineBarrier(experiment.command, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
                                  VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &visibility, 0, nullptr, 0, nullptr);
-            experiment.submit();
+            try { experiment.submit(); }
+            catch (const std::runtime_error &error) {
+              if (!reject_linear || std::string(error.what()) != "queue submit: VkResult=-4") throw;
+              loaded_libraries();
+              std::cout << "REJECT mip_linear=1 errors=0" << std::endl;
+              return 0;
+            }
+            if (reject_linear) throw std::runtime_error("multi-mip linear sampler silently accepted");
             if (std::memcmp(actual, indirect_values, uv.size() * 32)) ++buffer_failed;
             if (inject_mismatch && cases == 0) actual[0] = 0.75f;
             for (unsigned path = 0; path < 2; ++path) {
               auto *values = path ? indirect_values : actual;
               for (unsigned i = 0; i < uv.size(); ++i) {
-              const auto reference = sample_level(image, 0, sampling, uv[i][0], uv[i][1]);
+              const auto reference = sample_lod(image, view, sampling, uv[i][0], uv[i][1], mips ? mip_inputs[i][2] : 0, config.range);
               const std::array<float, 4> marker{73, 123, 456, 789};
               if (!std::equal(marker.begin(), marker.end(), values + i * 8 + 4)) ++markers_failed;
               for (unsigned c = 0; c < 4; ++c) {
@@ -664,6 +801,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                 csv << cases << ',' << (path ? "bda" : "ssbo") << ',' << size[0] << ',' << size[1] << ',' << static_cast<int>(format)
                     << ',' << static_cast<int>(u_mode) << ',' << static_cast<int>(v_mode)
                     << ',' << static_cast<int>(filter) << ',' << i << ',' << uv[i][0] << ',' << uv[i][1]
+                    << ',' << (mips ? mip_inputs[i][2] : 0) << ',' << view.base_mip << ',' << view.level_count << ',' << reference.mip
                     << ',' << c << ',' << reference.rgba[c] << ',' << value << ',' << error << '\n';
                 ++components;
               }
@@ -671,7 +809,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
               }
             }
             ++cases;
-            std::cout << "CASE " << cases << "/" << std::min(limit, 180U)
+            std::cout << "CASE " << cases << "/" << std::min(limit, total_cases)
                       << " samples=" << samples << " mismatches=" << mismatches
                       << " markers_failed=" << markers_failed << " buffer_failed=" << buffer_failed << std::endl;
           }
@@ -693,8 +831,10 @@ int main(int argc, char **argv) {
   try {
     if (argc > 6 && std::string(argv[6]) == "checks")
       return profile_checks(argv[1], argv[2], argc - 7, argv + 7);
-    if (argc != 6) throw std::runtime_error("expected rgen.spv rmiss.spv numeric.csv case-limit inject-mismatch");
-    return run(argv[1], argv[2], argv[3], std::stoul(argv[4]), std::string(argv[5]) == "1");
+    const bool reject_linear = argc == 7 && std::string(argv[6]) == "reject-mip-linear";
+    const bool mips = argc == 7 && (std::string(argv[6]) == "mips" || reject_linear);
+    if (argc != 6 && !mips) throw std::runtime_error("expected rgen.spv rmiss.spv numeric.csv case-limit inject-mismatch");
+    return run(argv[1], argv[2], argv[3], std::stoul(argv[4]), std::string(argv[5]) == "1", mips, reject_linear);
   } catch (const std::exception &error) {
     std::cerr << "FAIL " << error.what() << std::endl;
     return 1;

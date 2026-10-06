@@ -4,6 +4,7 @@
 # Usage: python3 tools/texture_model.py test [--sanitize]
 #        python3 tools/texture_model.py demo
 #        python3 tools/texture_model.py gpu [--case-limit 1]
+#        python3 tools/texture_model.py gpu-multi
 # Maintenance: keep model and test code under tools/texture_model/; no device ABI is defined.
 
 from __future__ import annotations
@@ -17,24 +18,24 @@ import tempfile
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Standalone C++ texture functional model")
-    parser.add_argument("action", choices=("test", "demo", "gpu", "gpu-checks", "gpu-mips", "gpu-mip-linear-check"))
+    parser.add_argument("action", choices=("test", "demo", "gpu", "gpu-checks", "gpu-mips", "gpu-mip-linear-check", "gpu-multi"))
     parser.add_argument("--sanitize", action="store_true", help="enable address/UB sanitizers")
     parser.add_argument("--cxx", default="c++", help="host C++17 compiler executable")
     parser.add_argument("--mesa-build", type=Path, help="local Mesa build directory for gpu")
     parser.add_argument("--out-dir", type=Path, help="empty artifact directory for gpu")
-    parser.add_argument("--case-limit", type=int, default=None, help="sampler cases (default: 180 LOD0 / 360 mip)")
+    parser.add_argument("--case-limit", type=int, default=None, help="cases (default: 180 LOD0 / 360 mip / 432 multi-binding)")
     parser.add_argument("--timeout", type=float, default=900, help="gpu runtime timeout in seconds")
     parser.add_argument("--inject-mismatch", action="store_true", help="gpu checker negative control; must fail")
     args = parser.parse_args()
     compiler = shutil.which(args.cxx)
     if compiler is None:
         parser.error(f"host compiler not found: {args.cxx}")
-    maximum = 360 if args.action == "gpu-mips" else 180
+    maximum = 432 if args.action == "gpu-multi" else 360 if args.action == "gpu-mips" else 180
     if args.case_limit is None:
         args.case_limit = maximum
     if args.case_limit < 1 or args.case_limit > maximum or args.timeout <= 0:
         parser.error("case-limit exceeds selected profile and timeout must be positive")
-    if args.action in ("gpu", "gpu-checks", "gpu-mips", "gpu-mip-linear-check"):
+    if args.action in ("gpu", "gpu-checks", "gpu-mips", "gpu-mip-linear-check", "gpu-multi"):
         if args.sanitize:
             parser.error("--sanitize applies to standalone host test/demo only")
         from texture_model.gpu import run

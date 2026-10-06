@@ -53,8 +53,9 @@ def run(args, compiler: str) -> int:
     elf_dir = output / "elf"
     elf_dir.mkdir()
     linear_check = args.action == "gpu-mip-linear-check"
+    multi = args.action == "gpu-multi"
     mips = args.action == "gpu-mips" or linear_check
-    rgen_name = "sample_mip.rgen" if mips else "sample.rgen"
+    rgen_name = "sample_multi.rgen" if multi else "sample_mip.rgen" if mips else "sample.rgen"
     for stage in ("rgen", "rmiss"):
         with (output / f"compile-{stage}.log").open("w") as log:
             subprocess.run([glslang, "-V", "--target-env", "vulkan1.2",
@@ -91,6 +92,8 @@ def run(args, compiler: str) -> int:
                str(output / "numeric.csv"), str(args.case_limit), str(int(args.inject_mismatch))]
     if mips:
         command.append("reject-mip-linear" if linear_check else "mips")
+    if multi:
+        command.append("multi")
     checks_only = args.action == "gpu-checks"
     bad_paths = []
     if checks_only:
@@ -151,15 +154,27 @@ def run(args, compiler: str) -> int:
     else:
         if summary.get("cases") != str(args.case_limit):
             errors.append("not all requested sampler cases completed")
-        if summary.get("samples") != str(args.case_limit * 128) or summary.get("components") != str(args.case_limit * 512):
+        outputs = 2 if multi else 1
+        if summary.get("samples") != str(args.case_limit * 128 * outputs) or summary.get("components") != str(args.case_limit * (1536 if multi else 512)):
             errors.append("numeric coverage counts are incomplete")
+        if multi:
+            if summary.get("mixed_results") != str(args.case_limit * 128):
+                errors.append("mixed-result coverage incomplete")
+            for phase in range(8):
+                expected = max(0, (args.case_limit + 7 - phase) // 8)
+                if summary.get(f"phase{phase}") != str(expected):
+                    errors.append(f"phase {phase} coverage incomplete")
+            for pair in range(3):
+                expected = max(0, min(144, args.case_limit - pair * 144))
+                if summary.get(f"pair{pair}") != str(expected):
+                    errors.append(f"resource pair {pair} coverage incomplete")
         if any(summary.get(name) != "0" for name in ("mismatches", "markers_failed", "buffer_failed")):
             errors.append("numeric comparison, completion marker, or buffer writeback failed")
     if returncode:
         errors.append(f"comparison process returned {returncode}")
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
-        "profile": "multi-mip linear sampler rejected at queue submission" if linear_check else "API/compiler rejection checks (no execution)" if checks_only else ("Vulkan V5 megakernel to Spike; 2D mip views, dynamic explicit LOD, mip-nearest" if mips else "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag"),
+        "profile": "two fixed combined bindings (set0:2,13), simultaneous samples and mix, view/sampler swaps and updates" if multi else "multi-mip linear sampler rejected at queue submission" if linear_check else "API/compiler rejection checks (no execution)" if checks_only else ("Vulkan V5 megakernel to Spike; 2D mip views, dynamic explicit LOD, mip-nearest" if mips else "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag"),
         "readback": "direct SSBO and GLSL buffer-reference stores to coherent host-visible buffers",
         "summary": summary, "errors": errors, "timeout": timeout,
         "injected_mismatch": args.inject_mismatch, "checked_frontier": checked_frontier,
@@ -169,7 +184,7 @@ def run(args, compiler: str) -> int:
         "loaded_libraries": [str(path) for path in libraries],
         "binary_sha256": {name: digest(path) for name, path in paths.items()},
         "source_sha256": {name: digest(source / name) for name in
-                          ("model.hpp", "model.cpp", "gpu.cpp", "gpu.py", "sample.rgen", "sample_mip.rgen", "sample.rmiss")},
+                          ("model.hpp", "model.cpp", "gpu.cpp", "gpu.py", "sample.rgen", "sample_mip.rgen", "sample_multi.rgen", "sample.rmiss")},
         "entrypoint_sha256": digest(root / "tools/texture_model.py"),
         "rejection_shader_sha256": {path.name: digest(path) for path in bad_paths},
         "elf_sha256": {path.name: digest(path) for path in elf_paths},

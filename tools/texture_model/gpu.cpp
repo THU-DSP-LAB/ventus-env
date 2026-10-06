@@ -69,6 +69,7 @@ public:
   PFN_vkCmdTraceRaysKHR trace = nullptr;
   std::vector<Buffer> buffers;
   std::vector<Texture> textures;
+  std::vector<VkImageView> extra_views;
   std::vector<VkSampler> samplers;
   std::vector<VkShaderModule> modules;
 
@@ -83,6 +84,7 @@ public:
       if (tlas && destroy_as) destroy_as(device, tlas, nullptr);
       for (auto module : modules) vkDestroyShaderModule(device, module, nullptr);
       for (auto sampler : samplers) vkDestroySampler(device, sampler, nullptr);
+      for (auto view : extra_views) vkDestroyImageView(device, view, nullptr);
       for (auto texture : textures) {
         vkDestroyImageView(device, texture.view, nullptr);
         vkDestroyImage(device, texture.handle, nullptr);
@@ -248,6 +250,17 @@ public:
     return texture;
   }
 
+  Texture additional_view(Texture image, VkFormat format, View range) {
+    VkImageViewCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    info.image = image.handle;
+    info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    info.format = format;
+    info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, range.base_mip, range.level_count, 0, 1};
+    check(vkCreateImageView(device, &info, nullptr, &image.view), "create additional image view");
+    extra_views.push_back(image.view);
+    return image;
+  }
+
   void begin() {
     check(vkResetCommandBuffer(command, 0), "reset command");
     VkCommandBufferBeginInfo info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -337,19 +350,21 @@ public:
     return module;
   }
 
-  void setup_pipeline(const char *rgen, const char *rmiss) {
-    const std::array<VkDescriptorType, 6> types{
+  void setup_pipeline(const char *rgen, const char *rmiss, bool multiple_bindings = false) {
+    std::vector<VkDescriptorType> types{
         VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
-    std::array<VkDescriptorSetLayoutBinding, 6> bindings{};
+    if (multiple_bindings) types.push_back(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    std::vector<VkDescriptorSetLayoutBinding> bindings(types.size());
     for (unsigned i = 0; i < bindings.size(); ++i)
-      bindings[i] = {i, types[i], 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr};
+      bindings[i] = {i == 6 ? 13 : i, types[i], 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr};
     VkDescriptorSetLayoutCreateInfo layout{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     layout.bindingCount = bindings.size();
     layout.pBindings = bindings.data();
     check(vkCreateDescriptorSetLayout(device, &layout, nullptr, &set_layout), "create descriptor layout");
-    const VkDescriptorPoolSize sizes[]{{types[0], 1}, {types[1], 1}, {types[2], 1}, {types[3], 3}};
+    const VkDescriptorPoolSize sizes[]{{types[0], 1}, {types[1], 1},
+                                     {types[2], multiple_bindings ? 2U : 1U}, {types[3], 3}};
     VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool.maxSets = 1;
     pool.poolSizeCount = 4;
@@ -424,7 +439,7 @@ public:
   }
 
   void descriptors(Texture sampled, VkSampler sampler, Texture carrier, Buffer uv, Buffer direct, Buffer output_address,
-                   std::uint64_t request_count, unsigned input_stride = 8) {
+                   std::uint64_t request_count, unsigned input_stride = 8, unsigned output_stride = 32) {
     VkWriteDescriptorSetAccelerationStructureKHR acceleration{
         VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
     acceleration.accelerationStructureCount = 1;
@@ -432,7 +447,7 @@ public:
     const VkDescriptorImageInfo images[]{{VK_NULL_HANDLE, carrier.view, VK_IMAGE_LAYOUT_GENERAL},
                                          {sampler, sampled.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
     const VkDescriptorBufferInfo data[]{{uv.handle, 0, request_count * input_stride},
-                                      {direct.handle, 0, request_count * 32},
+                                      {direct.handle, 0, request_count * output_stride},
                                       {output_address.handle, 0, 8}};
     const VkDescriptorType types[]{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
                                     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
@@ -454,6 +469,17 @@ public:
     writes[4].pBufferInfo = &data[1];
     writes[5].pBufferInfo = &data[2];
     vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
+  }
+
+  void secondary_descriptor(Texture sampled, VkSampler sampler) {
+    VkDescriptorImageInfo image{sampler, sampled.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = descriptor_set;
+    write.dstBinding = 13;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &image;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
   }
 };
 
@@ -825,12 +851,220 @@ finished:
   return cases && !mismatches && !markers_failed && !buffer_failed ? 0 : 1;
 }
 
+// Each resource has its own model/view; shared-image fixtures deliberately
+// point both views at the same model and upload buffer.
+struct MultiResource {
+  Image *image;
+  Texture texture;
+  Buffer staging;
+  View view;
+};
+
+void record_upload(Experiment &experiment, const MultiResource &resource, bool initial) {
+  const auto &image = *resource.image;
+  std::memcpy(resource.staging.map, image.data.data(), image.data.size());
+  experiment.transition(resource.texture,
+      initial ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      initial ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, initial ? 0 : VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+  std::vector<VkBufferImageCopy> copies;
+  for (unsigned level = 0; level < image.levels.size(); ++level) {
+    const auto &mip = image.levels[level];
+    VkBufferImageCopy copy{};
+    copy.bufferOffset = mip.offset;
+    copy.bufferRowLength = mip.row_pitch / 4;
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
+    copy.imageExtent = {mip.width, mip.height, 1};
+    copies.push_back(copy);
+  }
+  vkCmdCopyBufferToImage(experiment.command, resource.staging.handle, resource.texture.handle,
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, copies.size(), copies.data());
+  experiment.transition(resource.texture, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+}
+
+int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
+              unsigned limit, bool inject_mismatch) {
+  Experiment experiment;
+  experiment.initialize();
+  experiment.empty_tlas();
+  experiment.setup_pipeline(rgen, rmiss, true);
+  const auto uv = requests();
+  const std::array<float, 16> lods{-10,0,0.49f,0.5f,std::nextafter(0.5f,1.f),0.51f,
+      1,1.49f,1.5f,std::nextafter(1.5f,2.f),1.51f,2,2.5f,3,10,1000};
+  std::vector<std::array<float, 4>> request_data;
+  for (unsigned i = 0; i < uv.size(); ++i)
+    request_data.push_back({uv[i][0],uv[i][1],lods[i % lods.size()],lods[(i * 7 + 3) % lods.size()]});
+  auto inputs = experiment.buffer(request_data.size() * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  std::memcpy(inputs.map, request_data.data(), request_data.size() * 16);
+  auto direct = experiment.buffer(uv.size() * 64, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  auto indirect = experiment.buffer(uv.size() * 64, VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+  auto output_address = experiment.buffer(8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  const auto bda = experiment.address(indirect);
+  std::memcpy(output_address.map, &bda, 8);
+  auto carrier = experiment.texture(uv.size(), 1, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT);
+  experiment.begin();
+  experiment.transition(carrier, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, VK_ACCESS_SHADER_WRITE_BIT);
+  experiment.submit();
+  std::ofstream csv(csv_path);
+  if (!csv) throw std::runtime_error("cannot open multi-binding CSV");
+  csv << "case,pair,phase,path,output,resource_a,resource_b,view_a_base,view_b_base,mip_a,mip_b,request,u,v,lod_a,lod_b,address_a_u,address_a_v,filter_a,min_lod_a,max_lod_a,address_b_u,address_b_v,filter_b,min_lod_b,max_lod_b,channel,reference,gpu,abs_error\n";
+  csv << std::setprecision(10);
+  unsigned cases = 0;
+  std::array<unsigned, 8> phase_counts{};
+  std::array<unsigned, 3> pair_counts{};
+  std::uint64_t samples = 0, mixed_results = 0, components = 0, mismatches = 0, markers_failed = 0, buffer_failed = 0;
+  double max_error = 0;
+  const std::array<const char *, 8> phases{"baseline","swap-images","swap-images-and-samplers",
+      "swap-samplers","shared-sampler","update-a","redispatch","restore-a"};
+  for (unsigned pair = 0; pair < 3; ++pair) {
+    auto image_a = mip_fixture(pair == 1 ? 1 : 8, pair == 1 ? 8 : 4,
+                              pair == 1 ? 3 : 4, Format::RGBA8_UNORM);
+    auto image_b = mip_fixture(pair == 1 ? 5 : 3, pair == 1 ? 1 : 5, 3, Format::BGRA8_UNORM);
+    const auto original_a = image_a.data;
+    const View view_a{pair == 2 ? 0U : 1U, pair == 1 ? 2U : pair == 2 ? 4U : 3U};
+    const View view_b{pair == 2 ? 2U : 0U, pair == 2 ? 2U : pair == 1 ? 3U : 2U};
+    auto texture_a = experiment.texture(image_a.levels[0].width, image_a.levels[0].height,
+        VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        image_a.levels.size(), view_a.base_mip, view_a.level_count);
+    auto staging_a = experiment.buffer(image_a.data.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    MultiResource resource_a{&image_a,texture_a,staging_a,view_a};
+    MultiResource resource_b{};
+    if (pair == 2) {
+      resource_b = {&image_a,experiment.additional_view(texture_a,VK_FORMAT_R8G8B8A8_UNORM,view_b),staging_a,view_b};
+    } else {
+      auto texture_b = experiment.texture(image_b.levels[0].width,image_b.levels[0].height,
+          VK_FORMAT_B8G8R8A8_UNORM,VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+          image_b.levels.size(),view_b.base_mip,view_b.level_count);
+      resource_b = {&image_b,texture_b,experiment.buffer(image_b.data.size(),VK_BUFFER_USAGE_TRANSFER_SRC_BIT),view_b};
+    }
+    experiment.begin();
+    record_upload(experiment,resource_a,true);
+    if (pair != 2) record_upload(experiment,resource_b,true);
+    experiment.submit();
+    for (unsigned u = 0; u < 3; ++u)
+      for (unsigned v = 0; v < 3; ++v)
+        for (unsigned filter = 0; filter < 2; ++filter) {
+          const Sampling sampling_a{static_cast<AddressMode>(u),static_cast<AddressMode>(v),static_cast<Filter>(filter)};
+          const Sampling sampling_b{static_cast<AddressMode>((v + 1) % 3),static_cast<AddressMode>((u + 2) % 3),static_cast<Filter>(1 - filter)};
+          const LodRange range_a{0,1000}, range_b{0.75,1.75};
+          const auto sampler_a = experiment.sampler(sampling_a,range_a);
+          const auto sampler_b = experiment.sampler(sampling_b,range_b);
+          for (unsigned phase = 0; phase < phases.size(); ++phase) {
+            if (cases == limit) goto multi_finished;
+            const bool swap_images = phase == 1 || phase == 2;
+            const bool swap_samplers = phase == 2 || phase == 3;
+            const bool shared_sampler = phase == 4;
+            const MultiResource &a = swap_images ? resource_b : resource_a;
+            const MultiResource &b = swap_images ? resource_a : resource_b;
+            const Sampling state_a = swap_samplers ? sampling_b : sampling_a;
+            const Sampling state_b = shared_sampler ? sampling_a : swap_samplers ? sampling_a : sampling_b;
+            const LodRange clamp_a = swap_samplers ? range_b : range_a;
+            const LodRange clamp_b = shared_sampler || swap_samplers ? range_a : range_b;
+            if (phase != 6) {
+              experiment.descriptors(a.texture,swap_samplers ? sampler_b : sampler_a,
+                  carrier,inputs,direct,output_address,uv.size(),16,64);
+              experiment.secondary_descriptor(b.texture,shared_sampler || swap_samplers ? sampler_a : sampler_b);
+            }
+            auto *actual = static_cast<float *>(direct.map);
+            auto *indirect_values = static_cast<float *>(indirect.map);
+            std::fill(actual,actual + uv.size() * 16,std::numeric_limits<float>::quiet_NaN());
+            std::fill(indirect_values,indirect_values + uv.size() * 16,std::numeric_limits<float>::quiet_NaN());
+            experiment.begin();
+            if (phase == 5 || phase == 7) {
+              image_a.data = original_a;
+              if (phase == 5)
+                for (const auto &mip : image_a.levels)
+                  for (unsigned y = 0; y < mip.height; ++y)
+                    for (unsigned x = 0; x < mip.width; ++x)
+                      for (unsigned c = 0; c < 4; ++c)
+                        image_a.data[mip.offset + y * mip.row_pitch + x * 4 + c] ^= 0x5a;
+              record_upload(experiment,resource_a,false);
+            }
+            vkCmdBindPipeline(experiment.command,VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,experiment.pipeline);
+            vkCmdBindDescriptorSets(experiment.command,VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+                experiment.pipeline_layout,0,1,&experiment.descriptor_set,0,nullptr);
+            experiment.trace(experiment.command,&experiment.raygen,&experiment.miss,&experiment.empty,&experiment.empty,uv.size(),1,1);
+            VkMemoryBarrier visibility{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            visibility.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            visibility.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            vkCmdPipelineBarrier(experiment.command,VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                VK_PIPELINE_STAGE_HOST_BIT,0,1,&visibility,0,nullptr,0,nullptr);
+            experiment.submit();
+            if (std::memcmp(actual,indirect_values,uv.size() * 64)) ++buffer_failed;
+            // The control corrupts only binding 13's BDA result, ensuring both
+            // bindings and both readback paths are checked independently.
+            if (inject_mismatch && cases == 0) indirect_values[4] = 0.75f;
+            for (unsigned i = 0; i < uv.size(); ++i) {
+              const auto &request = request_data[i];
+              const auto ra = sample_lod(*a.image,a.view,state_a,request[0],request[1],request[2],clamp_a);
+              const auto rb = sample_lod(*b.image,b.view,state_b,request[1],request[0],request[3],clamp_b);
+              Color mix{};
+              for (unsigned c = 0; c < 4; ++c) mix[c] = ra.rgba[c] * 0.25f + rb.rgba[c] * 0.75f;
+              const std::array<Color, 3> expected{ra.rgba,rb.rgba,mix};
+              const std::array<float, 4> marker{73,123,456,789};
+              for (unsigned path = 0; path < 2; ++path) {
+                const float *values = (path ? indirect_values : actual) + i * 16;
+                if (!std::equal(marker.begin(),marker.end(),values + 12)) ++markers_failed;
+                for (unsigned output = 0; output < expected.size(); ++output) {
+                  for (unsigned c = 0; c < 4; ++c) {
+                    const float value = values[output * 4 + c];
+                    const double error = std::abs(static_cast<double>(value) - expected[output][c]);
+                    if (std::isfinite(value)) max_error = std::max(max_error,error);
+                    if (!std::isfinite(value) || error > tolerance) {
+                      ++mismatches;
+                      if (mismatches <= 12) std::cerr << "MISMATCH case=" << cases << " pair=" << pair
+                          << " phase=" << phases[phase] << " path=" << path << " output=" << output
+                          << " request=" << i << " channel=" << c << " reference=" << expected[output][c]
+                          << " gpu=" << value << " error=" << error << '\n';
+                    }
+                    csv << cases << ',' << pair << ',' << phases[phase] << ',' << (path ? "bda" : "ssbo")
+                        << ',' << output << ',' << (swap_images ? 1 : 0) << ',' << (swap_images ? 0 : 1)
+                        << ',' << a.view.base_mip << ',' << b.view.base_mip << ',' << ra.mip << ',' << rb.mip
+                        << ',' << i << ',' << request[0] << ',' << request[1] << ',' << request[2] << ',' << request[3]
+                        << ',' << static_cast<int>(state_a.address_u) << ',' << static_cast<int>(state_a.address_v)
+                        << ',' << static_cast<int>(state_a.filter) << ',' << clamp_a.min << ',' << clamp_a.max
+                        << ',' << static_cast<int>(state_b.address_u) << ',' << static_cast<int>(state_b.address_v)
+                        << ',' << static_cast<int>(state_b.filter) << ',' << clamp_b.min << ',' << clamp_b.max
+                        << ',' << c << ',' << expected[output][c] << ',' << value << ',' << error << '\n';
+                    ++components;
+                  }
+                  if (output < 2) ++samples;
+                  else ++mixed_results;
+                }
+              }
+            }
+            ++phase_counts[phase]; ++pair_counts[pair]; ++cases;
+            std::cout << "CASE " << cases << "/" << limit << " pair=" << pair << " phase=" << phases[phase]
+                      << " mismatches=" << mismatches << " markers_failed=" << markers_failed << " buffer_failed=" << buffer_failed << std::endl;
+          }
+        }
+  }
+multi_finished:
+  csv.flush();
+  if (!csv) throw std::runtime_error("cannot write multi-binding CSV");
+  loaded_libraries();
+  std::cout << std::setprecision(10) << "SUMMARY cases=" << cases << " samples=" << samples
+      << " mixed_results=" << mixed_results << " components=" << components << " mismatches=" << mismatches << " markers_failed=" << markers_failed
+      << " buffer_failed=" << buffer_failed << " max_abs_error=" << max_error << " tolerance=" << tolerance
+      << " injected=" << inject_mismatch;
+  for (unsigned phase = 0; phase < phase_counts.size(); ++phase) std::cout << " phase" << phase << '=' << phase_counts[phase];
+  for (unsigned pair = 0; pair < pair_counts.size(); ++pair) std::cout << " pair" << pair << '=' << pair_counts[pair];
+  std::cout << std::endl;
+  return cases && !mismatches && !markers_failed && !buffer_failed ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
   try {
     if (argc > 6 && std::string(argv[6]) == "checks")
       return profile_checks(argv[1], argv[2], argc - 7, argv + 7);
+    if (argc == 7 && std::string(argv[6]) == "multi")
+      return run_multi(argv[1],argv[2],argv[3],std::stoul(argv[4]),std::string(argv[5]) == "1");
     const bool reject_linear = argc == 7 && std::string(argv[6]) == "reject-mip-linear";
     const bool mips = argc == 7 && (std::string(argv[6]) == "mips" || reject_linear);
     if (argc != 6 && !mips) throw std::runtime_error("expected rgen.spv rmiss.spv numeric.csv case-limit inject-mismatch");

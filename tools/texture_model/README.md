@@ -68,12 +68,13 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 python3 tools/texture_model.py gpu
 python3 tools/texture_model.py gpu --case-limit 1
 python3 tools/texture_model.py gpu-mips
+python3 tools/texture_model.py gpu-multi
 python3 tools/texture_model.py gpu-checks
 python3 tools/texture_model.py gpu-mip-linear-check
 python3 tools/texture_model.py gpu --case-limit 1 --inject-mismatch
 ```
 
-`gpu --case-limit 1 --inject-mismatch` 是比较器负向校验：故意修改读回的一个颜色分量，**必须返回 1**，不应作为普通成功测试执行。`--case-limit` 可限定前 1..180 种 LOD0 配置或 1..360 种 mip 配置；`--timeout` 限制运行时间；`--out-dir` 指向空目录，以避免旧结果混入证据。默认输出位于 `artifacts/texture_model/gpu-<UTC>-<id>/`。
+`gpu --case-limit 1 --inject-mismatch` 是比较器负向校验：故意修改读回的一个颜色分量，**必须返回 1**，不应作为普通成功测试执行。`--case-limit` 可限定前 1..180 种 LOD0 配置、1..360 种 mip 配置或 1..432 种多 binding 配置；`--timeout` 限制运行时间；`--out-dir` 指向空目录，以避免旧结果混入证据。默认输出位于 `artifacts/texture_model/gpu-<UTC>-<id>/`。
 
 此动作需要已构建的本地 Mesa `mesa/build-ventus`、driver `driver/build/driver/spike_device`、Spike `spike/build`、LLVM `llvm/build`、`llvm/build-rt-libclc/lib/crt0.o`，以及 PATH 上的 `glslangValidator`、host C++ 编译器、Vulkan headers/loader 和 `pkg-config vulkan`。`--mesa-build` 可选择另一份已有 Mesa build。它不构建或安装上述组件。
 
@@ -136,12 +137,31 @@ dyadic UV 能在本组尺寸下精确表示相关坐标计算，减少 nearest �
 
 上传和执行顺序的证据限定在当前 coherent backing、串行提交的 Spike 实验路径；不证明一般 Vulkan barrier/layout、跨队列或缓存一致性。模型尚未成为 Spike 的纹理指令处理程序，也未接入 RTL。
 
+### 多固定 binding 回归与当前阻塞（2026-10-06）
+
+`gpu-multi` 使用 `sample_multi.rgen`，在同一个 shader 中无条件采样 set 0 的 combined bindings **2 和 13**。每个请求分别提供两组显式 LOD，保存 A、B、`0.25*A + 0.75*B` 和完成标记；SSBO/BDA 两条路径各自对照模型。CSV 保留请求编号、资源/view、sampler 状态、选中 mip 和逐分量误差。
+
+432 配置由三组资源 × 九种 U/V 组合 × 两种过滤 × 八个执行阶段组成。资源包含不同格式/尺寸/mip 链，以及同一 image 的两个不同 view；两个 sampler 使用不同寻址、过滤和 LOD clamp。八阶段为基线、互换 image/view、同时互换 image/view 和 sampler、只互换 sampler、共享 sampler、更新 A、保持 descriptor 不变重新 dispatch、恢复 A。同一 image 的两个 view 会共同观察该 image 的更新。
+
+**当前默认编译配置未通过这项回归，不能标记 T0 已验收。**
+
+| 运行 | 结果 | 证据 |
+| --- | --- | --- |
+| 默认 LLVM 配置 | 432 配置，663,552 分量；257,864 mismatch，marker/buffer failure 均为 0 | `artifacts/texture_model/multi-default-final/manifest.json` |
+| 诊断：仅加 `llc -optimize-regalloc=false` | 同一 432 配置零差异，最大误差 `1.192092896e-7` | `artifacts/texture_model/multi-fast-ra-full/manifest.json` |
+| 诊断负向校验 | 只破坏 binding 13 的一个 BDA 分量；mismatch=1，返回 1 | `artifacts/texture_model/multi-fast-ra-negative/manifest.json` |
+| 原单 binding 回归 | LOD0 180 配置、mip 360 配置、38 项拒绝检查全部通过 | `multi-harness-lod0-regression/`、`multi-harness-mip-regression/`、`multi-harness-profile-regression/` 下的 manifest |
+
+诊断 manifest 标记为 `DIAGNOSTIC_PASS` / `DIAGNOSTIC_EXPECTED_FAILURE`，记录独立 llc wrapper、命令、环境与哈希；它们不代替默认路径验收。生产 Mesa、LLVM、driver、Spike 源码和默认优化设置均未修改。单采样对照正确，改变双采样顺序会改变错误范围；`-O0` 也可消除首个用例的错误，`-O1` 和 legacy SGPR keepalive 仍失败。证据将问题缩小到优化寄存器分配相关的代码生成路径，具体错误指令、活跃区间或 pass 尚未确定。
+
+下一代码任务应修复默认编译路径并让 `gpu-multi` 原命令通过，同时保持现有回归。范围不扩展到 descriptor array、独立 image/sampler、动态索引、其他 descriptor set 或 TMU/RTL。
+
 ## 代码组织与规范来源
 
 - `model.hpp` / `model.cpp`：功能模型，只使用 C++ 标准库。
 - `test.cpp`：独立 oracle、手算例子和回归。
 - `demo.cpp`：采样过程示例。
-- `gpu.cpp` / `gpu.py` / `sample.rgen` / `sample_mip.rgen` / `sample.rmiss`：真实 Vulkan→Spike 数值比较与运行证据。
+- `gpu.cpp` / `gpu.py` / `sample.rgen` / `sample_mip.rgen` / `sample_multi.rgen` / `sample.rmiss`：真实 Vulkan→Spike 数值比较与运行证据。
 - 一级入口 `../texture_model.py`：host 构建与运行。
 
 模型语义依据 [Vulkan Sampling](https://docs.vulkan.org/spec/latest/chapters/textures.html)，特别是 Image Level(s) Selection、Texel Filtering 和 Texel Addressing。2026-10-05 核查了 [官方规范源文件](https://github.com/KhronosGroup/Vulkan-Docs/blob/main/chapters/textures.adoc) 的 preferred/alternative mip nearest 规则。没有将该文档的全部功能纳入本模型。

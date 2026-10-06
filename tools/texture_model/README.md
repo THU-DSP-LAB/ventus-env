@@ -133,28 +133,38 @@ dyadic UV 能在本组尺寸下精确表示相关坐标计算，减少 nearest �
 
 两组数值门禁的最大绝对误差均为 `5.960464478e-8`。Mesa `vt_nir_to_llvm_phi_test` 与 host 模型 47,885 项检查（普通/ASan/UBSan）通过。软件执行证据对应 Mesa 本地提交 `7f5b850`。
 
-仍要求 min/mag 相同、零 bias、有限 UV/LOD、二维单 layer/sample、RGBA8/BGRA8 UNORM 和 identity swizzle。不支持跨 mip 线性混合、导数选级、独立 sampler、数组/非一致 descriptor 索引、comparison、anisotropy、offset、projector、gather、texelFetch、sRGB 或压缩。host 模型的 NaN/Inf 异常诊断不是 GPU 运行时异常能力。不同 Image 在同一 binding 顺序替换已验证，多 binding 同时采样尚未作为本次门禁覆盖。
+仍要求 min/mag 相同、零 bias、有限 UV/LOD、二维单 layer/sample、RGBA8/BGRA8 UNORM 和 identity swizzle。不支持跨 mip 线性混合、导数选级、独立 sampler、数组/非一致 descriptor 索引、comparison、anisotropy、offset、projector、gather、texelFetch、sRGB 或压缩。host 模型的 NaN/Inf 异常诊断不是 GPU 运行时异常能力。不同 Image 在同一 binding 顺序替换已验证；多 binding 的后续专项验证见下一节。
 
 上传和执行顺序的证据限定在当前 coherent backing、串行提交的 Spike 实验路径；不证明一般 Vulkan barrier/layout、跨队列或缓存一致性。模型尚未成为 Spike 的纹理指令处理程序，也未接入 RTL。
 
-### 多固定 binding 回归与当前阻塞（2026-10-06）
+### 多固定 binding 回归与执行路径修复（2026-10-06）
 
 `gpu-multi` 使用 `sample_multi.rgen`，在同一个 shader 中无条件采样 set 0 的 combined bindings **2 和 13**。每个请求分别提供两组显式 LOD，保存 A、B、`0.25*A + 0.75*B` 和完成标记；SSBO/BDA 两条路径各自对照模型。CSV 保留请求编号、资源/view、sampler 状态、选中 mip 和逐分量误差。
 
 432 配置由三组资源 × 九种 U/V 组合 × 两种过滤 × 八个执行阶段组成。资源包含不同格式/尺寸/mip 链，以及同一 image 的两个不同 view；两个 sampler 使用不同寻址、过滤和 LOD clamp。八阶段为基线、互换 image/view、同时互换 image/view 和 sampler、只互换 sampler、共享 sampler、更新 A、保持 descriptor 不变重新 dispatch、恢复 A。同一 image 的两个 view 会共同观察该 image 的更新。
 
-**当前默认编译配置未通过这项回归，不能标记 T0 已验收。**
+首次运行的默认路径有数值错误。修复 Spike 的 VF 标量 `regext` 读取后，**默认 LLVM 配置通过本项 T0 回归**。
 
 | 运行 | 结果 | 证据 |
 | --- | --- | --- |
-| 默认 LLVM 配置 | 432 配置，663,552 分量；257,864 mismatch，marker/buffer failure 均为 0 | `artifacts/texture_model/multi-default-final/manifest.json` |
+| 修复前的默认路径 | 432 配置，663,552 分量；257,864 mismatch，marker/buffer failure 均为 0 | `artifacts/texture_model/multi-default-final/manifest.json` |
 | 诊断：仅加 `llc -optimize-regalloc=false` | 同一 432 配置零差异，最大误差 `1.192092896e-7` | `artifacts/texture_model/multi-fast-ra-full/manifest.json` |
 | 诊断负向校验 | 只破坏 binding 13 的一个 BDA 分量；mismatch=1，返回 1 | `artifacts/texture_model/multi-fast-ra-negative/manifest.json` |
 | 原单 binding 回归 | LOD0 180 配置、mip 360 配置、38 项拒绝检查全部通过 | `multi-harness-lod0-regression/`、`multi-harness-mip-regression/`、`multi-harness-profile-regression/` 下的 manifest |
+| Spike 修复后的默认路径 | 432 配置，663,552 分量零差异；最大误差 `1.192092896e-7` | `artifacts/texture_model/multi-regext-default-final/manifest.json` |
+| 默认路径负向校验 | 修改 binding 13 的一个 BDA 分量，恰好 1 mismatch、返回 1 | `artifacts/texture_model/multi-regext-negative/manifest.json` |
 
-诊断 manifest 标记为 `DIAGNOSTIC_PASS` / `DIAGNOSTIC_EXPECTED_FAILURE`，记录独立 llc wrapper、命令、环境与哈希；它们不代替默认路径验收。生产 Mesa、LLVM、driver、Spike 源码和默认优化设置均未修改。单采样对照正确，改变双采样顺序会改变错误范围；`-O0` 也可消除首个用例的错误，`-O1` 和 legacy SGPR keepalive 仍失败。证据将问题缩小到优化寄存器分配相关的代码生成路径，具体错误指令、活跃区间或 pass 尚未确定。
+诊断 manifest 标记为 `DIAGNOSTIC_PASS` / `DIAGNOSTIC_EXPECTED_FAILURE`，记录独立 llc wrapper、命令、环境与哈希；它们保留为定位证据。单采样对照正确，改变双采样顺序会改变错误范围；`-O0` 和 basic 分配器可消除首个用例的错误。最终根因是 Spike `riscv/v_ext_macros.h` 的 `VFP_SCALAR` 未给标量 rs1 加上 `ext_rs1()`，把 x49 等高编号寄存器读成 x17。greedy 分配增加了使用高寄存器的机会，从而暴露执行器的解码缺陷。
 
-下一代码任务应修复默认编译路径并让 `gpu-multi` 原命令通过，同时保持现有回归。范围不扩展到 descriptor array、独立 image/sampler、动态索引、其他 descriptor set 或 TMU/RTL。
+Spike 本地修复提交 `4b34446a` 在选择 Zfinx/XPR 或标准 F/FPR 后端前应用扩展位。修复前后默认 ELF 的 SHA256 完全相同，Mesa、LLVM、driver 二进制也相同，只有 Spike 库发生变化；因此不需要关闭优化或修改纹理 lowering。
+
+指令级测试直接调用生产指令处理函数，覆盖两种浮点寄存器域、全部八个 register bank、四种算术和四种比较、16/32 位输入的两类 widening、inactive lane 与无 prefix 的低寄存器读取。低寄存器、高寄存器和另一浮点域故意存放不同值；该测试在修复前复现 bank 1 的错误。
+
+```sh
+python3 spike/tests/ventus_zfinx_vf_static.py --spike-build spike/build --spike-dasm spike/build/spike-dasm
+```
+
+最终单 binding LOD0/mip、38 项范围检查和多级 mip-linear 拒绝检查均通过，分别见 `lod0-regext-final/`、`mip-regext-final/`、`profile-regext-final/`、`mip-linear-regext-final/` 的 manifest；原 any-hit 场景仍保持同一 SHA256，见 `any-hit-regext-final/textured-any-hit-validation.txt`。T0 证据限定为本测试的两个固定 combined bindings，范围不扩展到 descriptor array、独立 image/sampler、动态索引、其他 descriptor set 或 TMU/RTL。
 
 ## 代码组织与规范来源
 

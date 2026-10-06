@@ -500,6 +500,66 @@ void loaded_libraries() {
   for (const auto &path : paths) std::cout << "LIBRARY " << path << '\n';
 }
 
+void sampler_checks(Experiment &experiment, unsigned &count) {
+  VkSamplerCreateInfo base{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+  base.magFilter = base.minFilter = VK_FILTER_NEAREST;
+  base.addressModeU = base.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+  base.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+  // Inactive fields and mipmapMode must not reject the valid LOD0 defaults.
+  base.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+  base.compareOp = VK_COMPARE_OP_GREATER;
+  base.maxAnisotropy = 16;
+  auto verify = [&](const char *label, VkSamplerCreateInfo info, bool accepted) {
+    VkSampler sampler = VK_NULL_HANDLE;
+    const auto result = vkCreateSampler(experiment.device, &info, nullptr, &sampler);
+    if (result == VK_SUCCESS) vkDestroySampler(experiment.device, sampler, nullptr);
+    if (result != (accepted ? VK_SUCCESS : VK_ERROR_FEATURE_NOT_PRESENT))
+      throw std::runtime_error(std::string("sampler check failed: ") + label);
+    ++count;
+    std::cout << "CHECK sampler=" << label << " result=" << result << std::endl;
+  };
+  verify("inactive-defaults", base, true);
+  auto changed = base; changed.minFilter = VK_FILTER_LINEAR; verify("unequal-filters", changed, false);
+  changed = base; changed.magFilter = changed.minFilter = VK_FILTER_CUBIC_EXT; verify("cubic", changed, false);
+  changed = base; changed.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; verify("border-u", changed, false);
+  changed = base; changed.addressModeV = VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE; verify("mirror-clamp-v", changed, false);
+  changed = base; changed.mipLodBias = 0.5f; verify("bias", changed, false);
+  changed = base; changed.mipLodBias = std::numeric_limits<float>::quiet_NaN(); verify("nan-bias", changed, false);
+  changed = base; changed.compareEnable = VK_TRUE; verify("comparison", changed, false);
+  changed = base; changed.anisotropyEnable = VK_TRUE; verify("anisotropy", changed, false);
+  changed = base; changed.unnormalizedCoordinates = VK_TRUE; verify("unnormalized", changed, false);
+  changed = base; changed.minLod = -1; verify("negative-min-lod", changed, false);
+  changed = base; changed.minLod = 2; changed.maxLod = 1; verify("reversed-lod", changed, false);
+  changed = base; changed.maxLod = std::numeric_limits<float>::infinity(); verify("infinite-lod", changed, false);
+}
+
+int profile_checks(const char *rgen, const char *rmiss, int bad_count, char **bad_shaders) {
+  unsigned samplers = 0, shaders = 0;
+  Experiment baseline;
+  baseline.initialize();
+  sampler_checks(baseline, samplers);
+  baseline.setup_pipeline(rgen, rmiss);
+  for (int i = 0; i < bad_count; ++i) {
+    Experiment experiment;
+    experiment.initialize();
+    bool rejected = false;
+    try { experiment.setup_pipeline(bad_shaders[i], rmiss); }
+    catch (const std::runtime_error &error) {
+      const std::string message = error.what();
+      if (message != "create RT pipeline: VkResult=-8" &&
+          message != "create RT pipeline: VkResult=-3") throw;
+      std::cout << "CHECK compiler-error=" << message << std::endl;
+      rejected = true;
+    }
+    if (!rejected) throw std::runtime_error(std::string("unsupported shader accepted: ") + bad_shaders[i]);
+    ++shaders;
+    std::cout << "CHECK shader=" << bad_shaders[i] << " result=rejected" << std::endl;
+  }
+  loaded_libraries();
+  std::cout << "CHECKS samplers=" << samplers << " shaders=" << shaders << " baseline=pass errors=0" << std::endl;
+  return 0;
+}
+
 int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limit,
         bool inject_mismatch) {
   Experiment experiment;
@@ -631,6 +691,8 @@ finished:
 
 int main(int argc, char **argv) {
   try {
+    if (argc > 6 && std::string(argv[6]) == "checks")
+      return profile_checks(argv[1], argv[2], argc - 7, argv + 7);
     if (argc != 6) throw std::runtime_error("expected rgen.spv rmiss.spv numeric.csv case-limit inject-mismatch");
     return run(argv[1], argv[2], argv[3], std::stoul(argv[4]), std::string(argv[5]) == "1");
   } catch (const std::exception &error) {

@@ -17,7 +17,7 @@ import tempfile
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Standalone C++ texture functional model")
-    parser.add_argument("action", choices=("test", "demo", "gpu"))
+    parser.add_argument("action", choices=("test", "demo", "gpu", "gpu-checks"))
     parser.add_argument("--sanitize", action="store_true", help="enable address/UB sanitizers")
     parser.add_argument("--cxx", default="c++", help="host C++17 compiler executable")
     parser.add_argument("--mesa-build", type=Path, help="local Mesa build directory for gpu")
@@ -31,7 +31,7 @@ def main() -> int:
         parser.error(f"host compiler not found: {args.cxx}")
     if args.case_limit < 1 or args.case_limit > 180 or args.timeout <= 0:
         parser.error("case-limit must be 1..180 and timeout must be positive")
-    if args.action == "gpu":
+    if args.action in ("gpu", "gpu-checks"):
         if args.sanitize:
             parser.error("--sanitize applies to standalone host test/demo only")
         from texture_model.gpu import run

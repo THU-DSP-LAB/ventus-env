@@ -86,6 +86,31 @@ def run(args, compiler: str) -> int:
     })
     command = [str(executable), str(output / "sample.rgen.spv"), str(output / "sample.rmiss.spv"),
                str(output / "numeric.csv"), str(args.case_limit), str(int(args.inject_mismatch))]
+    checks_only = args.action == "gpu-checks"
+    bad_paths = []
+    if checks_only:
+        shader_source = (source / "sample.rgen").read_text()
+        original = "textureLod(source, requests.uv[i], 0.0)"
+        variants = {
+            "nonzero-lod": "textureLod(source, requests.uv[i], 1.0)",
+            "dynamic-lod": "textureLod(source, requests.uv[i], requests.uv[i].x)",
+            "offset": "textureLodOffset(source, requests.uv[i], 0.0, ivec2(1, 0))",
+            "gradients": "textureGrad(source, requests.uv[i], vec2(1), vec2(1))",
+            "gather": "textureGather(source, requests.uv[i])",
+            "texel-fetch": "texelFetch(source, ivec2(0), 0)",
+            "projected": "textureProjLod(source, vec3(requests.uv[i], 2), 0.0)",
+        }
+        variants = {name: shader_source.replace(original, value) for name, value in variants.items()}
+        variants["descriptor-array"] = shader_source.replace("sampler2D source;", "sampler2D source[2];").replace(original, "textureLod(source[1], requests.uv[i], 0.0)")
+        variants["separate-sampler"] = shader_source.replace("uniform sampler2D source;", "uniform texture2D source;\nlayout(set = 0, binding = 6) uniform sampler state;").replace(original, "textureLod(sampler2D(source, state), requests.uv[i], 0.0)")
+        for name, value in variants.items():
+            path = output / f"reject-{name}.rgen"
+            path.write_text(value)
+            spv = path.with_suffix(".spv")
+            with (output / f"compile-reject-{name}.log").open("w") as log:
+                subprocess.run([glslang, "-V", "--target-env", "vulkan1.2", str(path), "-o", str(spv)], stdout=log, stderr=subprocess.STDOUT, check=True)
+            bad_paths.append(spv)
+        command += ["checks", *(str(path) for path in bad_paths)]
     print(f"GPU comparison artifacts: {output}", flush=True)
     timeout = False
     with (output / "run.log").open("w") as log:
@@ -97,7 +122,7 @@ def run(args, compiler: str) -> int:
             timeout = True
             returncode = 124
     text = (output / "run.log").read_text(errors="replace")
-    match = re.search(r"^SUMMARY (.+)$", text, re.MULTILINE)
+    match = re.search(r"^" + ("CHECKS" if checks_only else "SUMMARY") + r" (.+)$", text, re.MULTILINE)
     summary = dict(item.split("=", 1) for item in match[1].split()) if match else {}
     libraries = [Path(line[8:]).resolve() for line in text.splitlines() if line.startswith("LIBRARY ")]
     expected_libraries = {paths[name].resolve() for name in ("mesa", "driver", "spike")}
@@ -108,21 +133,27 @@ def run(args, compiler: str) -> int:
         errors.append("runtime timed out")
     if not summary:
         errors.append("numeric summary is missing")
+    if checks_only:
+        expected_libraries = {paths["mesa"].resolve()}
     if not expected_libraries.issubset(set(libraries)):
         errors.append("loaded ICD/driver/Spike libraries do not match the selected local builds")
     if not checked_frontier or not elf_paths:
         errors.append("checked, retained V5 ELF evidence is missing")
-    if summary.get("cases") != str(min(args.case_limit, 180)):
-        errors.append("not all requested sampler cases completed")
-    if summary.get("samples") != str(args.case_limit * 128) or summary.get("components") != str(args.case_limit * 512):
-        errors.append("numeric coverage counts are incomplete")
-    if any(summary.get(name) != "0" for name in ("mismatches", "markers_failed", "buffer_failed")):
-        errors.append("numeric comparison, completion marker, or buffer writeback failed")
+    if checks_only:
+        if summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "13" or summary.get("errors") != "0":
+            errors.append("profile rejection checks incomplete")
+    else:
+        if summary.get("cases") != str(min(args.case_limit, 180)):
+            errors.append("not all requested sampler cases completed")
+        if summary.get("samples") != str(args.case_limit * 128) or summary.get("components") != str(args.case_limit * 512):
+            errors.append("numeric coverage counts are incomplete")
+        if any(summary.get(name) != "0" for name in ("mismatches", "markers_failed", "buffer_failed")):
+            errors.append("numeric comparison, completion marker, or buffer writeback failed")
     if returncode:
         errors.append(f"comparison process returned {returncode}")
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
-        "profile": "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag; no GPU mip support claim",
+        "profile": "API/compiler rejection checks (no execution)" if checks_only else "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag; no GPU mip support claim",
         "readback": "direct SSBO and GLSL buffer-reference stores to coherent host-visible buffers",
         "summary": summary, "errors": errors, "timeout": timeout,
         "injected_mismatch": args.inject_mismatch, "checked_frontier": checked_frontier,
@@ -139,10 +170,10 @@ def run(args, compiler: str) -> int:
     }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     if match:
-        print("SUMMARY", match[1], flush=True)
+        print("CHECKS" if checks_only else "SUMMARY", match[1], flush=True)
     if errors:
         print("FAIL:", "; ".join(errors), flush=True)
         print("\n".join(text.splitlines()[-18:]), flush=True)
     else:
-        print("PASS checked Vulkan-to-Spike texture comparison", flush=True)
+        print("PASS API/compiler profile checks" if checks_only else "PASS checked Vulkan-to-Spike texture comparison", flush=True)
     return 1 if errors else 0

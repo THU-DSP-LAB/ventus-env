@@ -32,13 +32,14 @@ python3 tools/texture_model.py demo
 | 整数读取/查询 | 合法整数坐标 `texel_fetch`；相对 View 的 `texture_size`、`texture_array_size`、`texture_query_levels`；不使用 sampler |
 | Layer/View | 独立 base layer/count；采样 layer 相对 view，以 ties-to-even 取整并 clamp，层间不插值；fetch 使用合法整数 layer |
 | Cube | `sample_cube_lod`：六个方形 face，方向映射、nearest face clamp、bilinear 跨边与角点过滤；`texture_cube_size` 查询二维尺寸 |
+| Gather | 基础 mip 的四个独立邻点，输出 01/11/10/00 顺序；普通 component gather 或 D32 comparison gather |
 | 深度比较 | `sample_compare_lod`；八种 compareOp，逐 texel 比较 Dref 后再做空间/mip 过滤；D32 identity view |
 | Trace | Dref/原始深度/逐 tap 比较结果、cube direction/face、layer 与 view 范围、下/上 mip、跨级权重、输入 UV/LOD、受限后的相对 LOD；每个 tap 的绝对 mip、坐标、偏移、合并权重和颜色 |
 | 多资源 | 不依赖全局采样状态，可交替采样不同 Image 和 Sampling 对象 |
 
 `sample_level` 在指定的 image 绝对 mip 内用 `mag_filter` 采样，它是直接指定级别与级内过滤的 helper，不进行 LOD/min/mag 选择。`sample_lod` 的 LOD 则相对 View；例如 `{base_mip=1, level_count=2}` 的 LOD 0 访问 image mip 1。每个 mip 的尺寸按 `max(1, previous/2)` 递减；可不提供后续级别，但不能在 1×1 之后继续追加重复 mip。
 
-当前尚无隐式导数、压缩、gather 或模型的 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
+当前尚无隐式导数、压缩或模型的 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
 
 ## 计算规则与数值边界
 
@@ -58,7 +59,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 ## 验证
 
-测试包含十九组，普通和 ASan/UBSan 模式目前均通过 17,416,835 项检查；包含独立 bias 与显式梯度 oracle：
+测试包含二十组，普通和 ASan/UBSan 模式目前均通过 42,564,240 项检查；包含独立 bias 与显式梯度 oracle：
 
 1. 手算四点平均、非对称插值、repeat 接缝和 mirror/clamp 边缘。
 2. 负坐标、texel 边界两侧、精确边界、负零和巨大有限坐标。
@@ -83,6 +84,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 18. Volume 的独立三轴 virtual texel oracle：3×5×7 / 1×1×4 / 2×2×2 / 1×3×1、三维 mip/view/pitches、64 种 U/V/W 寻址组合、nearest/八 texel linear、bias/min-mag/mip/border/swizzle、整数 fetch 与 size；深度溢出、截断和维度误用诊断。
 19. D32 逐 tap 比较的独立 PCF oracle：八种 compareOp、相等及相邻 float、范围外有限 Dref、空间/mip 过滤顺序、view/bias/min-mag/border、raw sample/fetch/query 与非法输入。
+20. Gather 的独立整数格网、解码/通道映射与布尔真值 oracle：四格式、D32 raw/comparison、全部通道/compareOp、mip/layer view、代表映射与边界寻址、filter/bias 不改变结果、返回次序/trace/非法输入。
 
 独立对照以 long double 在虚拟延伸图像上枚举 nearest 区间或 tent kernel，逐个真实 texel 累积贡献；不调用模型的坐标归约、四点选择或寻址函数。精确样例和 UNORM 解码做相应精确比较；过滤测试的每分量绝对误差上限为 `2e-7`，适用于该模型的 float 输出，不能直接当成未来 TMU 精度要求。
 
@@ -550,3 +552,29 @@ Vulkan 使用现有 image/view/copy/format query 与 sampler compareEnable/compa
 参考模型的独立 oracle 枚举延伸 texel 格网，在每个 tap 使用独立布尔真值表，再累加空间/mip 权重；覆盖八种 compareOp、相等点与相邻 float、Dref 越界、bias/clamp/view、border 和非法输入。reference 反例把 shader Dref 固定为零；order 反例故意把 oracle 改为“先过滤深度再比较”，正确 GPU 路径保持不变，必须出现数值差异。
 
 最终隔离/主目录验收共 50 个 GPU 命令（45 正向、5 预期失败反例），正向零差异，最大误差 `1.192092896e-7`，原 `1e-6` 上限保持。19 组、17,416,835 host 检查在普通/ASan/UBSan 模式通过；Dref 反例检出 2,256 差异，单/多资源顺序反例检出 224/1,736 差异，查询反例检出 1 项。127 项 API/compiler/copy/limits 检查、隔离/主目录 Mesa unit 与原 any-hit exact SHA 均通过，源码/二进制哈希冻结检查一致。Mesa 本地提交 `b4bd8f5`；LLVM/Spike 未修改。证据 `artifacts/texture_model/depth-implementation/verification.json`；smoke 和停止的首轮均排除。E07 深度比较完成，下一切片为 gather。
+
+
+## E07 第二切片：Gather
+
+```sh
+python3 tools/texture_model.py gpu-min-mag --gather --gather-component 0 --lod-bias 16
+python3 tools/texture_model.py gpu-swizzle --gather --gather-component 3
+python3 tools/texture_model.py gpu-multi-nonuniform-separate --gather --image-layers 4 --array-length 4
+python3 tools/texture_model.py gpu-min-mag --gather --depth --compare-op 3
+python3 tools/texture_model.py gpu-min-mag --gather --depth --raw-depth
+python3 tools/texture_model.py gpu-min-mag --gather --case-limit 8 --inject-gather-order-mismatch
+python3 tools/texture_model.py gpu-min-mag --gather --case-limit 8 --inject-gather-filter-mismatch
+python3 tools/texture_model.py gpu-min-mag --gather --case-limit 8 --inject-gather-level-mismatch
+```
+
+`gather` 以 view 基础 mip 的 linear 2×2 footprint 选择邻点，但不插值：结果四通道分别来自 `(i0,j1)、(i1,j1)、(i1,j0)、(i0,j0)`。每个 texel 按实际格式解码，先应用 view swizzle，再选择 `--gather-component`（0/1/2/3 对应 R/G/B/A）。例：四 texel 的 R 按 j0/j1 两行分别为 `.1/.2` 和 `.3/.4`，中心 gather 返回 `(.3,.4,.2,.1)`；bilinear 返回 `.25`，两种运算不能混用。规范依据：[Vulkan Texel Gathering](https://github.com/KhronosGroup/Vulkan-Docs/blob/v1.4.328/chapters/textures.adoc#textures-gather)。
+
+支持四种 RGBA8/BGRA8 UNORM/sRGB 的 2D/2D array，含非零 mip/layer view、四种寻址、core float border、swizzle 和既有独立 image/sampler、固定/一致/NonUniform descriptor 索引。sRGB 仍逐 texel 解码；gather 不使用 min/mag/mipmap filter、LOD clamp 或 bias，不接受显式 Lod/Grad。数组 layer 仍相对 view 取 ties-to-even 并 clamp，不插值。
+
+D32 单层二维普通 gather 先替换为 `(D,0,0,1)` 再取通道；Dref gather 使用 `gather_compare` 返回四个按相同顺序排列的比较 0/1，使用实际 sampler 的八种 compareOp，没有加权 PCF。Dref 和存储深度沿上一切片的有界规则；comparison gather 没有 component 参数。Cube/3D、深度 array、gather offset/ConstOffsets、projector、sparse 及 AMD gather implicit-LOD 扩展仍不支持；`shaderImageGatherExtended` 仍不开放，不把基本 gather 当作 extended gather。
+
+Mesa 解析已有 `nir_texop_tg4`，直接在 NIR→LLVM 层生成普通 load、地址/寻址、通道选择和（Dref 时）fcmp/select；最终由现有 LLVM backend 选择 Ventus 指令。私有 112B resource、32B mip 和16B directory 未再修改，没有新增 NIR/LLVM texture intrinsic、ISA、LLVM backend 或 Spike 修改。实际 shader 必须保留 `OpImageGather` 或 `OpImageDrefGather`，结果来自最终 ELF 的 Spike SSBO/BDA 执行，CPU 模型只提供期望值。
+
+模型 gather helper 复用既有二维 footprint/layer 选择，再收集四个独立 tap；trace 标记 `from_gather`，tap 按返回顺序记录，`weight=1` 表示独立返回值，不应求和作 normalized filter。独立 oracle 用 signed floor blocks 解析虚拟格网、直接解码原始字节、独立通道映射和布尔真值表；模型旧 swizzle 全枚举仍保留，gather 使用六种代表映射。反例分别颠倒实际 shader 的邻点次序、故意把期望改为加权平均或改用 view 下一 mip；应返回 1 并出现实际数值差异。Gather 忽略 bias，旧 bias-mismatch 反例不适用。
+
+最终隔离/主目录共 61 个 GPU 命令（54 正向、7 预期失败反例），正向零差异，最大误差 `1.192092896e-7`，旧 `1e-6` 上限保持。20 组、42,564,240 host 检查在普通/ASan/UBSan 模式通过。颜色顺序/错误平均/错误级别反例检出 4,096/4,080/4,096 差异，深度顺序/错误平均检出 1,056/1,520 差异，忽略层检出 3,072 差异；输出 marker/buffer 比对保持正确。129 项 API/compiler/copy/limits 检查、隔离/主目录 Mesa unit 与原 any-hit exact SHA 均通过，源码/库哈希冻结检查一致。Mesa 本地提交 `97e50fa`，LLVM/Spike 未改；证据 `artifacts/texture_model/gather-implementation/verification.json`，smoke 排除。E07 两切片完成；E08 需先选择 quad/导数执行环境。

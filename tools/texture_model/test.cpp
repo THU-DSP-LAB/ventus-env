@@ -1297,6 +1297,94 @@ void depth_comparison() {
   auto mapped=View{0,3};mapped.components[0]=Component::One;rejected([&]{sample_compare_lod(image,mapped,state,0,0,.5,0);},"depth swizzle outside profile");
 }
 
+// Independent gather oracle: resolve each virtual integer cell by signed
+// floor blocks, decode bytes directly, map components, then assemble neighbors.
+int gather_oracle_axis(long long raw,unsigned n,AddressMode mode) {
+  if(mode==AddressMode::ClampToBorder && (raw<0 || raw>=n))return -1;
+  if(mode==AddressMode::ClampToEdge || mode==AddressMode::ClampToBorder)return static_cast<int>(std::clamp(raw,0LL,static_cast<long long>(n)-1));
+  const auto block=static_cast<long long>(std::floor(static_cast<long double>(raw)/n));
+  auto local=raw-block*n;
+  if(mode==AddressMode::MirroredRepeat && block%2!=0)local=n-1-local;
+  return static_cast<int>(local);
+}
+Color gather_oracle(const Image &image,View view,Sampling state,double u,double v,unsigned component,double layer=0,float reference=0) {
+  const auto &level=image.levels[view.base_mip];
+  const auto raw_x=static_cast<long long>(std::floor(static_cast<long double>(u)*level.width-.5L));
+  const auto raw_y=static_cast<long long>(std::floor(static_cast<long double>(v)*level.height-.5L));
+  const double a=std::clamp(layer,0.,static_cast<double>(view.layer_count-1));
+  const unsigned lo=static_cast<unsigned>(std::floor(a));
+  const auto plane=view.base_layer+lo+((a-lo)>.5 || ((a-lo)==.5 && lo%2));
+  Color result{};
+  const std::array<std::array<unsigned,2>,4> points{{{0,1},{1,1},{1,0},{0,0}}};
+  for(unsigned out=0;out<4;++out) {
+    const int x=gather_oracle_axis(raw_x+points[out][0],level.width,state.address_u);
+    const int y=gather_oracle_axis(raw_y+points[out][1],level.height,state.address_v);
+    Color color{};
+    if(x<0 || y<0)color=state.border_color==BorderColor::OpaqueWhite ? Color{1,1,1,1} : state.border_color==BorderColor::OpaqueBlack ? Color{0,0,0,1} : Color{};
+    else if(is_depth(image.format))color={depth_oracle_value(image,view.base_mip,x,y),0,0,1};
+    else {
+      const auto offset=level.offset+plane*level.layer_pitch+y*level.row_pitch+x*4;
+      for(unsigned c=0;c<4;++c) {
+        const unsigned byte=is_bgra(image.format) && (c==0 || c==2) ? 2-c : c;
+        const long double e=image.data[offset+byte]/255.L;
+        color[c]=static_cast<float>(is_srgb(image.format) && c<3 ? e<=.04045L ? e/12.92L : std::pow((e+.055L)/1.055L,2.4L) : e);
+      }
+    }
+    result[out]=state.compare_enable ? compare_oracle_value(state.compare_op,reference,color[0]) : mapped_oracle(color,view.components)[component];
+  }
+  return result;
+}
+void gather_sampling() {
+  expect_color(gather(four_colors(),{0,1},{},.5,.5,0).rgba,{0,1,0,1},"gather unweighted R order 01,11,10,00",0);
+  expect_color(gather(four_colors(),{0,1},{},.5,.5,2).rgba,{1,1,0,0},"gather B distinct from filtered color",0);
+  const std::array<ComponentMapping,6> maps{{{}, {Component::B,Component::G,Component::R,Component::A},
+    {Component::A,Component::A,Component::A,Component::A}, {Component::Zero,Component::One,Component::R,Component::G},
+    {Component::G,Component::B,Component::A,Component::R}, {Component::R,Component::G,Component::B,Component::A}}};
+  const std::array<double,8> coords{-1.75,-.125,0,.125,.5,.999,1,2.25};
+  for(auto format:{Format::RGBA8_UNORM,Format::BGRA8_UNORM,Format::RGBA8_SRGB,Format::BGRA8_SRGB})
+    for(unsigned layers:{1U,4U}) {
+      auto image=array_image(layers,format);
+      for(unsigned base=0;base<3;++base)for(auto mapping:maps)for(unsigned u=0;u<4;++u)for(unsigned v=0;v<4;++v)
+        for(unsigned border=0;border<3;++border)for(unsigned filters=0;filters<4;++filters) {
+          if(border==1 && mapping!=ComponentMapping{} && mapping!=maps.back())continue;
+          View view{base,3-base,mapping,layers==1 ? 0U : 1U,layers==1 ? 1U : 3U};
+          Sampling state{static_cast<AddressMode>(u),static_cast<AddressMode>(v),static_cast<Filter>(filters%2),static_cast<Filter>(filters/2),filters%2 ? MipFilter::Linear : MipFilter::Nearest};
+          state.border_color=static_cast<BorderColor>(border);state.lod_bias=filters<2 ? -16 : 16;
+          for(unsigned component=0;component<4;++component)for(unsigned i=0;i<coords.size();++i)for(double layer:{-.5,.5,1.5,100.}) {
+            const auto result=gather(image,view,state,coords[i],coords[(i*3+1)%coords.size()],component,layer);
+            expect_color(result.rgba,gather_oracle(image,view,state,coords[i],coords[(i*3+1)%coords.size()],component,layer),"independent gather cells/bytes/component/layer/base-level oracle");
+            expect(result.from_gather && result.mip==base && result.taps.size()==4,"gather trace base level and no weights");
+            for(const auto &tap:result.taps)expect(tap.mip==base && tap.weight==1,"gather returns tap independently of filtering");
+          }
+        }
+    }
+  const auto depth=depth_fixture();
+  for(unsigned base=0;base<3;++base)for(unsigned op=0;op<8;++op)for(unsigned u=0;u<4;++u)for(unsigned v=0;v<4;++v)
+    for(unsigned border=0;border<3;++border)for(float reference:{-1.f,0.f,.125f,std::nextafter(.5f,0.f),.5f,std::nextafter(.5f,1.f),1.f,1.125f}) {
+      Sampling state{static_cast<AddressMode>(u),static_cast<AddressMode>(v),Filter::Nearest,Filter::Bilinear,MipFilter::Linear};
+      state.compare_enable=true;state.compare_op=static_cast<CompareOp>(op);state.border_color=static_cast<BorderColor>(border);state.lod_bias=16;
+      for(unsigned i=0;i<coords.size();++i) {
+        auto result=gather_compare(depth,{base,3-base},state,coords[i],coords[(i*3+1)%coords.size()],reference);
+        expect_color(result.rgba,gather_oracle(depth,{base,3-base},state,coords[i],coords[(i*3+1)%coords.size()],0,0,reference),"Dref gather independent comparisons in neighbor order",0);
+        expect(result.from_compare && result.from_gather && result.mip==base,"comparison gather trace");
+      }
+    }
+  for(unsigned base=0;base<3;++base)for(unsigned component=0;component<4;++component)for(unsigned u=0;u<4;++u)for(unsigned v=0;v<4;++v) {
+    Sampling state{static_cast<AddressMode>(u),static_cast<AddressMode>(v),Filter::Nearest};
+    state.border_color=BorderColor::OpaqueWhite;state.lod_bias=-16;
+    for(unsigned i=0;i<coords.size();++i)
+      expect_color(gather(depth,{base,3-base},state,coords[i],coords[(i*3+1)%coords.size()],component).rgba,
+          gather_oracle(depth,{base,3-base},state,coords[i],coords[(i*3+1)%coords.size()],component),"raw D32 component substitution before gather",0);
+  }
+  rejected([&]{gather(four_colors(),{0,1},{},0,0,4);},"invalid gather component");
+  rejected([&]{gather(four_colors(),{0,1},{},std::numeric_limits<double>::infinity(),0);},"nonfinite gather coordinate");
+  auto bad=Sampling{};bad.compare_enable=true;
+  rejected([&]{gather(four_colors(),{0,1},bad,0,0);},"comparison sampler used with color gather");
+  rejected([&]{gather_compare(depth,{0,3},bad,0,0,std::numeric_limits<double>::quiet_NaN());},"nonfinite gather Dref");
+  auto volume=volume_fixture(2,2,2,Format::RGBA8_UNORM);
+  rejected([&]{gather(volume,{0,2},{},0,0);},"3D gather outside profile");
+}
+
 void invalid_inputs() {
   const auto image = four_colors();
   for (double invalid : {std::numeric_limits<double>::infinity(),
@@ -1351,7 +1439,7 @@ void invalid_inputs() {
 } // namespace
 
 int main() {
-  const std::array<std::pair<const char *, void (*)()>, 19> suites{{
+  const std::array<std::pair<const char *, void (*)()>, 20> suites{{
       {"hand-calculated filtering and seams", hand_calculated},
       {"negative UV, boundaries and huge finite UV", negative_and_boundary_coordinates},
       {"all 256 UNORM values in both formats", all_unorm_values},
@@ -1365,6 +1453,7 @@ int main() {
       {"Cube face/edge/corner independent geometric oracle", cube_sampling},
       {"3D volume pitches and independent eight-texel oracle", volume_sampling},
       {"D32 float depth comparison before filtering independent oracle", depth_comparison},
+      {"unweighted color and Dref gather independent neighbors/component oracle", gather_sampling},
       {"independent min/mag selection before view clamp", min_mag},
       {"sRGB decoding before filtering and unchanged alpha", srgb},
       {"integer texel fetch and view-relative property queries", fetch_and_queries},

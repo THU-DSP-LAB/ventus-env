@@ -23,6 +23,11 @@ def main() -> int:
     parser.add_argument("--array-binding", type=int, choices=(2, 12), default=2)
     parser.add_argument("--array-length", type=int, choices=(1, 2, 4), default=4)
     parser.add_argument("--array-index", type=int, default=None)
+    parser.add_argument("--gather", action="store_true", help="four unweighted neighbors from view base mip")
+    parser.add_argument("--gather-component", type=int, choices=range(4), default=0)
+    parser.add_argument("--inject-gather-order-mismatch", action="store_true")
+    parser.add_argument("--inject-gather-filter-mismatch", action="store_true")
+    parser.add_argument("--inject-gather-level-mismatch", action="store_true")
     parser.add_argument("--depth", action="store_true", help="single-layer 2D D32 explicit LOD comparison or raw fetch")
     parser.add_argument("--raw-depth", action="store_true", help="sample D32 without comparison")
     parser.add_argument("--compare-op", type=int, choices=range(8), default=3)
@@ -59,6 +64,12 @@ def main() -> int:
     parser.add_argument("--inject-mismatch", action="store_true", help="gpu checker negative control; must fail")
     parser.add_argument("--inject-query-mismatch", action="store_true", help="fetch/query checker negative control; must fail")
     args = parser.parse_args()
+    if args.gather and (args.action in ("test","demo","gpu","gpu-checks","gpu-srgb-values") or args.action.startswith("gpu-fetch") or args.cube or args.volume or args.gradients or args.offset is not None or args.inject_depth_order_mismatch or args.inject_bias_mismatch):
+        parser.error("gather requires a mip-capable 2D/array sampling profile; offsets/Grad/other dimensions are separate")
+    if (args.gather_component!=0 or args.inject_gather_order_mismatch or args.inject_gather_filter_mismatch or args.inject_gather_level_mismatch) and not args.gather:
+        parser.error("gather options require gather")
+    if args.gather and args.depth and not args.raw_depth and args.gather_component!=0:
+        parser.error("Dref gather has no component operand")
     if args.depth and (args.action in ("test","demo","gpu","gpu-checks","gpu-srgb-values","gpu-srgb","gpu-multi-srgb","gpu-swizzle","gpu-fetch-swizzle","gpu-multi-swizzle") or args.cube or args.volume or args.image_layers is not None or args.single_layer_view or args.gradients or args.offset is not None):
         parser.error("depth requires a mip-capable identity 2D GPU profile; other dimensions/Grad/Offset are separate")
     if (args.raw_depth or args.compare_op!=3 or args.inject_depth_reference_mismatch or args.inject_depth_order_mismatch) and not args.depth:

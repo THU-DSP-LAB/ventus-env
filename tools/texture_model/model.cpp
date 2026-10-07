@@ -451,6 +451,31 @@ Result sample_compare_lod(const Image &image,View view,const Sampling &sampling,
   result.from_compare=true;result.input_dref=dref;return result;
 }
 
+static Result pack_gather(Result result,unsigned component) {
+  require(component<4,"gather component outside RGBA");
+  require(result.taps.size()==4,"gather needs exactly four 2D taps");
+  const auto taps=result.taps;const std::array<unsigned,4> order{2,3,1,0};
+  for(unsigned c=0;c<4;++c) {
+    result.taps[c]=taps[order[c]];result.taps[c].weight=1;
+    result.rgba[c]=result.taps[c].color[component];
+  }
+  result.from_gather=true;result.gather_component=component;return result;
+}
+
+Result gather(const Image &image,View view,const Sampling &sampling,double u,double v,unsigned component,double layer) {
+  require(component<4 && !image.volume && !sampling.compare_enable,"gather requires noncomparison 2D and constant RGBA component");
+  check_filters(sampling);
+  auto footprint=sampling;footprint.mag_filter=footprint.min_filter=Filter::Bilinear;
+  footprint.mip_filter=MipFilter::Nearest;footprint.lod_bias=0;
+  return pack_gather(sample_lod(image,view,footprint,u,v,0,{0,0},{},layer),component);
+}
+Result gather_compare(const Image &image,View view,const Sampling &sampling,double u,double v,double reference) {
+  check_filters(sampling);
+  auto footprint=sampling;footprint.mag_filter=footprint.min_filter=Filter::Bilinear;
+  footprint.mip_filter=MipFilter::Nearest;footprint.lod_bias=0;
+  return pack_gather(sample_compare_lod(image,view,footprint,u,v,reference,0,{0,0}),0);
+}
+
 Result sample_volume_lod(const Image &image,View view,const Sampling &sampling,
                          double u,double v,double w,double lod,LodRange range) {
   require(image.volume && !sampling.compare_enable,"3D sampling requires noncomparison volume image");

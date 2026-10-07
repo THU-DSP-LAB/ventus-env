@@ -196,7 +196,26 @@ def run(args, compiler: str) -> int:
         rgen_path = output / "volume.rgen"
         rgen_path.write_text(text)
     depth_compare = args.depth and not fetch_query and not args.raw_depth
-    if depth_compare:
+    if args.gather:
+        text = rgen_path.read_text()
+        if depth_compare:
+            text = text.replace("sampler2D", "sampler2DShadow")
+            if multi:
+                text = text.replace("requests.uv_lod[i].xy","requests.uv_lod[2*i].xy").replace("requests.uv_lod[i].yx","requests.uv_lod[2*i+1].xy")
+        operation = 0
+        def gather_call(match):
+            nonlocal operation
+            reference = "0.0" if args.inject_depth_reference_mismatch else f"requests.uv_lod[2*i+{operation}].w" if multi else "requests.uv[i].w"
+            component = (args.gather_component+2*operation)%4
+            value = "textureGather("+match[1]+", "+(reference if depth_compare else str(component))+")"
+            operation += 1
+            return value + (".wzyx" if args.inject_gather_order_mismatch else "")
+        text, count = re.subn(r"textureLod\((.*),\s*requests\.uv(?:_lod)?\[[^\]]+\]\.[zw]\)",gather_call,text)
+        if count != (2 if multi else 1):
+            raise RuntimeError("gather transformation must cover every texture operation")
+        rgen_path = output / "gather.rgen"
+        rgen_path.write_text(text)
+    if depth_compare and not args.gather:
         text = rgen_path.read_text().replace("sampler2D", "sampler2DShadow")
         if multi:
             for swizzle, index in [("xy",0),("yx",1)]:
@@ -216,7 +235,7 @@ def run(args, compiler: str) -> int:
             subprocess.run([glslang, "-V", "--target-env", "vulkan1.2",
                             str(rgen_path if stage == "rgen" else source / "sample.rmiss"), "-o", str(output / f"sample.{stage}.spv")],
                            stdout=log, stderr=subprocess.STDOUT, check=True)
-    if uniform or args.gradients or args.offset is not None or image_array or args.cube or args.volume or args.depth:
+    if uniform or args.gradients or args.offset is not None or image_array or args.cube or args.volume or args.depth or args.gather:
         disassembler = shutil.which("spirv-dis")
         if not disassembler:
             raise RuntimeError("spirv-dis is required to retain runtime-index evidence")
@@ -251,6 +270,12 @@ def run(args, compiler: str) -> int:
     })
     if args.inject_cube_seam_mismatch:
         env["VENTUS_TEXTURE_INJECT_CUBE_SEAM_MISMATCH"] = "1"
+    if args.gather:
+        env["VENTUS_TEXTURE_GATHER_COMPONENT"] = str(args.gather_component)
+        if args.inject_gather_filter_mismatch:
+            env["VENTUS_TEXTURE_GATHER_FILTER_MISMATCH"] = "1"
+        if args.inject_gather_level_mismatch:
+            env["VENTUS_TEXTURE_GATHER_LEVEL_MISMATCH"] = "1"
     if args.depth:
         env["VENTUS_TEXTURE_DEPTH"] = "1"
         env["VENTUS_TEXTURE_COMPARE_OP"] = str(args.compare_op)
@@ -305,7 +330,7 @@ def run(args, compiler: str) -> int:
         variants = {
             "shadow-offset": "vec4(textureLodOffset(source, vec3(requests.uv[i],0.5), 0.0, ivec2(1)))",
 
-            "gather": "textureGather(source, requests.uv[i])",
+            "gather-offset": "textureGatherOffset(source, requests.uv[i], ivec2(1))",
             "projected": "textureProjLod(source, vec3(requests.uv[i], 2), 0.0)",
         }
         variants = {name: shader_source.replace(original, value) for name, value in variants.items()}
@@ -319,6 +344,8 @@ def run(args, compiler: str) -> int:
         variants["nested-descriptor-array"] = shader_source.replace("sampler2D source;", "sampler2D source[2][2];").replace(original, "textureLod(source[0][1], requests.uv[i], 0.0)")
         variants["dynamic-storage-image-array"] = nonuniform_source.replace("image2D carrier;", "image2D carrier[2];").replace("imageStore(carrier,", "imageStore(carrier[nonuniformEXT(i & 1u)],")
         variants["storage-image-layer-array"] = shader_source.replace("image2D carrier;", "image2DArray carrier;").replace("imageStore(carrier, ivec2(i, 0),", "imageStore(carrier, ivec3(i, 0, 0),")
+        variants["cube-gather"] = shader_source.replace("sampler2D source;", "samplerCube source;").replace(original,"textureGather(source,vec3(requests.uv[i],1))")
+        variants["array-shadow-gather"] = shader_source.replace("sampler2D source;", "sampler2DArrayShadow source;").replace(original,"textureGather(source,vec3(requests.uv[i],0),.5)")
         variants["cube-gradients"] = shader_source.replace("sampler2D source;", "samplerCube source;").replace(original,"textureGrad(source, vec3(requests.uv[i],1), vec3(1), vec3(1))")
         variants["cube-array-sampling"] = shader_source.replace("sampler2D source;", "samplerCubeArray source;").replace(original,"textureLod(source, vec4(requests.uv[i],1,0), 0.0)")
         for name, value in variants.items():
@@ -479,8 +506,8 @@ def run(args, compiler: str) -> int:
         errors.append("depth format feature/rejection checks incomplete")
     if depth_compare:
         assembly = (output / "sample.rgen.spvasm").read_text()
-        if "OpImageSampleDrefExplicitLod" not in assembly:
-            errors.append("SPIR-V lacks explicit Dref sampling")
+        if ("OpImageDrefGather" if args.gather else "OpImageSampleDrefExplicitLod") not in assembly:
+            errors.append("SPIR-V lacks selected Dref sampling/gather operation")
     if multi:
         filters = "independent min/mag and linear/nearest mip filters" if multi_min_mag or multi_srgb or view_swizzle else "linear/nearest and linear/linear mip filters" if multi_linear else "mip-nearest"
         profile = "two fixed combined bindings (set0:2,13), simultaneous samples and mix, view/sampler swaps and updates; " + filters
@@ -525,9 +552,18 @@ def run(args, compiler: str) -> int:
         profile += "; 2D image layers with independent view layer subrange; " + ("single-layer 2D view" if args.single_layer_view else "array sample RNE/clamp and integer fetch/query")
     if args.depth:
         profile += "; D32 single-layer identity 2D; " + ("per-tap Dref comparison then PCF/mip blend" if depth_compare else "raw depth decode")
+    if args.gather:
+        if ("OpImageDrefGather" if depth_compare else "OpImageGather") not in (output / "sample.rgen.spvasm").read_text():
+            errors.append("SPIR-V lacks actual gather instruction")
+        profile += "; unweighted gather at view base mip, 01/11/10/00 order"
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
         "profile": profile,
+        "gather": args.gather,
+        "gather_component": args.gather_component,
+        "injected_gather_order_mismatch": args.inject_gather_order_mismatch,
+        "injected_gather_filter_mismatch": args.inject_gather_filter_mismatch,
+        "injected_gather_level_mismatch": args.inject_gather_level_mismatch,
         "depth": args.depth,
         "depth_compare": depth_compare,
         "compare_op": args.compare_op,

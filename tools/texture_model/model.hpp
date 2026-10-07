@@ -116,6 +116,8 @@ struct Result {
   double input_lod = 0;
   double sampler_lod = 0;
   double clamped_lod = 0;
+  bool from_gather = false;
+  unsigned gather_component = 0;
   bool from_compare = false;
   double input_dref = 0;
   bool from_volume = false;
@@ -147,6 +149,11 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
 // The scalar result is repeated in rgba for existing numeric tools.
 Result sample_compare_lod(const Image &image, View view, const Sampling &sampling,
                           double u, double v, double reference, double lod, LodRange range = {});
+// Four unweighted neighbors in 01,11,10,00 order, at view base mip.
+Result gather(const Image &image, View view, const Sampling &sampling,
+              double u, double v, unsigned component = 0, double layer = 0);
+Result gather_compare(const Image &image, View view, const Sampling &sampling,
+                      double u, double v, double reference);
 // 3D volumes: all three mip dimensions shrink; W is filtered, never a layer.
 Result sample_volume_lod(const Image &image, View view, const Sampling &sampling,
                          double u, double v, double w, double lod, LodRange range = {});

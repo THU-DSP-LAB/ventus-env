@@ -320,7 +320,32 @@ public:
       reference>texel,reference!=texel,reference>=texel,true};
     return truth.at(static_cast<unsigned>(op));
   }
+  static bool gathering() {return std::getenv("VENTUS_TEXTURE_GATHER_COMPONENT")!=nullptr;}
+  static unsigned gather_channel(bool second=false) {return (std::stoul(std::getenv("VENTUS_TEXTURE_GATHER_COMPONENT"))+(second ? 2 : 0))%4;}
+  static View gather_view(View view) {
+    if(std::getenv("VENTUS_TEXTURE_GATHER_LEVEL_MISMATCH") && view.level_count>1) {++view.base_mip;--view.level_count;}
+    return view;
+  }
+  static Result color_reference(const Image &image,View view,Sampling state,double u,double v,double lod,LodRange range,TexelOffset offset={},double layer=0,bool second=false) {
+    if(!gathering())return sample_lod(image,view,state,u,v,lod,range,offset,layer);
+    view=gather_view(view);const auto component=gather_channel(second);
+    auto result=gather(image,view,state,u,v,component,layer);
+    if(std::getenv("VENTUS_TEXTURE_GATHER_FILTER_MISMATCH")) {
+      state.mag_filter=state.min_filter=Filter::Bilinear;state.mip_filter=MipFilter::Nearest;state.lod_bias=0;
+      const auto filtered=sample_lod(image,view,state,u,v,0,{0,0},{},layer);
+      result.rgba.fill(filtered.rgba[component]);
+    }
+    return result;
+  }
   static Result depth_reference(const Image &image,View view,Sampling state,double u,double v,float reference,double lod,LodRange range) {
+    if(gathering()) {
+      view=gather_view(view);auto result=gather_compare(image,view,state,u,v,reference);
+      if(std::getenv("VENTUS_TEXTURE_GATHER_FILTER_MISMATCH")) {
+        state.mag_filter=state.min_filter=Filter::Bilinear;state.mip_filter=MipFilter::Nearest;state.lod_bias=0;
+        result.rgba.fill(sample_compare_lod(image,view,state,u,v,reference,0,{0,0}).rgba[0]);
+      }
+      return result;
+    }
     auto result=sample_compare_lod(image,view,state,u,v,reference,lod,range);
     if(std::getenv("VENTUS_TEXTURE_DEPTH_ORDER_MISMATCH")) {
       state.compare_enable=false;
@@ -1671,7 +1696,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                   static_cast<int32_t>(uv[i][1]),static_cast<int32_t>(mip_inputs[i][2]),Experiment::texel_offset(),static_cast<int32_t>(mip_inputs[i][3])) :
                   Experiment::gradients() ? sample_grad(image,sampled_view,sampling,uv[i][0],uv[i][1],
                       {mip_inputs[i][2],mip_inputs[i][3]},{Experiment::gradient_request(i)[2],Experiment::gradient_request(i)[3]},config.range,Experiment::texel_offset(),Experiment::array_sampling() ? Experiment::layer_request(i) : 0) :
-                  sample_lod(image, sampled_view, sampling, uv[i][0], uv[i][1], mips ? mip_inputs[i][2] : 0, config.range,Experiment::texel_offset(),Experiment::array_sampling() ? Experiment::layer_request(i) : 0);
+                  Experiment::color_reference(image, sampled_view, sampling, uv[i][0], uv[i][1], mips ? mip_inputs[i][2] : 0, config.range,Experiment::texel_offset(),Experiment::array_sampling() ? Experiment::layer_request(i) : 0);
               if (query_mode) {
                 if (values[i*output_floats+4]!=73) ++markers_failed;
                 const auto size=texture_size(image,lane_view,(Experiment::cube() || (Experiment::volume() && !fetch_query)) ? static_cast<int32_t>(i%lane_view.level_count) : static_cast<int32_t>(mip_inputs[i][2]));
@@ -2006,13 +2031,13 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
               auto ra = Experiment::depth_compare() ? Experiment::depth_reference(*lane_a.image,lane_a.view,flip_sa ? state_b : state_a,request[0],request[1],Experiment::dref(i),request[2],flip_sa ? clamp_b : clamp_a) : Experiment::volume() ? Experiment::volume_reference(*lane_a.image,lane_a.view,flip_sa ? state_b : state_a,request[0],request[1],Experiment::volume_w(i),request[2],flip_sa ? clamp_b : clamp_a) : Experiment::cube() ? Experiment::cube_reference(*lane_a.image,lane_a.view,flip_sa ? state_b : state_a,Experiment::cube_model_direction(i),request[2],flip_sa ? clamp_b : clamp_a) : Experiment::gradients() ? sample_grad(*lane_a.image,lane_a.view,flip_sa ? state_b : state_a,
                   request[0],request[1],{request[2],request[3]},
                   {Experiment::gradient_request(i)[2],Experiment::gradient_request(i)[3]},flip_sa ? clamp_b : clamp_a,Experiment::texel_offset(),Experiment::array_sampling() ? Experiment::layer_request(i) : 0) :
-                  sample_lod(*lane_a.image,lane_a.view,flip_sa ? state_b : state_a,
+                  Experiment::color_reference(*lane_a.image,lane_a.view,flip_sa ? state_b : state_a,
                   request[0],request[1],request[2],flip_sa ? clamp_b : clamp_a,Experiment::texel_offset(),Experiment::array_sampling() ? Experiment::layer_request(i) : 0);
               auto rb = Experiment::depth_compare() ? Experiment::depth_reference(*lane_b.image,lane_b.view,flip_sb ? state_a : state_b,request[1],request[0],Experiment::dref(i,true),request[3],flip_sb ? clamp_a : clamp_b) : Experiment::volume() ? Experiment::volume_reference(*lane_b.image,lane_b.view,flip_sb ? state_a : state_b,request[1],request[0],Experiment::volume_w(i,true),request[3],flip_sb ? clamp_a : clamp_b) : Experiment::cube() ? Experiment::cube_reference(*lane_b.image,lane_b.view,flip_sb ? state_a : state_b,Experiment::cube_model_direction(i,true),request[3],flip_sb ? clamp_a : clamp_b) : Experiment::gradients() ? sample_grad(*lane_b.image,lane_b.view,flip_sb ? state_a : state_b,
                   request[1],request[0],{request[3],request[2]},
                   {Experiment::gradient_request(i)[3],Experiment::gradient_request(i)[2]},flip_sb ? clamp_a : clamp_b,Experiment::texel_offset(),Experiment::array_sampling() ? Experiment::layer_request(i,true) : 0) :
-                  sample_lod(*lane_b.image,lane_b.view,flip_sb ? state_a : state_b,
-                  request[1],request[0],request[3],flip_sb ? clamp_a : clamp_b,Experiment::texel_offset(),Experiment::array_sampling() ? Experiment::layer_request(i,true) : 0);
+                  Experiment::color_reference(*lane_b.image,lane_b.view,flip_sb ? state_a : state_b,
+                  request[1],request[0],request[3],flip_sb ? clamp_a : clamp_b,Experiment::texel_offset(),Experiment::array_sampling() ? Experiment::layer_request(i,true) : 0,true);
               if (experiment.nonuniform_index) {
                 ++experiment.lane_invocations;
                 ++experiment.lane_mixes;

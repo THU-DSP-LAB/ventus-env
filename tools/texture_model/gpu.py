@@ -37,10 +37,12 @@ def run(args, compiler: str) -> int:
         "llvm_objdump": root / "llvm/build/bin/llvm-objdump",
         "crt0": root / "llvm/build-rt-libclc/lib/crt0.o",
         "checker": root / "tools/rtcore.py",
+        "descriptor_abi": mesa.parent / "src/ventus/compiler/vt_rt_descriptor_abi.h",
     }
     for name, path in paths.items():
         if not path.is_file():
             raise RuntimeError(f"missing local {name}: {path}")
+    descriptor_size = int(re.search(r"VT_RT_DESCRIPTOR_ELEMENT_SIZE\s*=\s*(\d+)", paths["descriptor_abi"].read_text())[1])
     glslang = shutil.which("glslangValidator")
     if glslang is None:
         raise RuntimeError("glslangValidator is required")
@@ -62,12 +64,16 @@ def run(args, compiler: str) -> int:
     fetch_query = args.action in ("gpu-fetch-query", "gpu-fetch-swizzle", "gpu-fetch-border", "gpu-fetch-separate", "gpu-fetch-array", "gpu-fetch-uniform", "gpu-fetch-nonuniform")
     border_mode = uniform or args.action in ("gpu-border", "gpu-fetch-border", "gpu-multi-border", "gpu-separate", "gpu-fetch-separate", "gpu-multi-separate", "gpu-multi-array", "gpu-multi-array-separate", "gpu-fetch-array", "gpu-multi-uniform-separate", "gpu-fetch-uniform", "gpu-multi-nonuniform-separate", "gpu-fetch-nonuniform")
     view_swizzle = args.action in ("gpu-swizzle", "gpu-fetch-swizzle", "gpu-multi-swizzle") or border_mode
+    if args.depth:
+        view_swizzle = False
+        srgb = False
     srgb_values = args.action == "gpu-srgb-values"
     multi_srgb = args.action == "gpu-multi-srgb"
     multi_min_mag = args.action == "gpu-multi-min-mag"
     multi_linear = args.action == "gpu-multi-linear"
     multi = args.action.startswith("gpu-multi")
     mips = args.action == "gpu-mips" or linear_check or min_mag or (srgb and not multi_srgb) or fetch_query or (view_swizzle and not multi)
+    mips = mips or (args.depth and not multi)
     rgen_name = "sample_fetch.rgen" if fetch_query else "sample_multi.rgen" if multi else "sample_mip.rgen" if mips else "sample.rgen"
     if separate:
         rgen_name = "sample_fetch_separate.rgen" if fetch_query else "sample_multi_separate.rgen" if multi else "sample_separate.rgen"
@@ -189,12 +195,28 @@ def run(args, compiler: str) -> int:
             text = text.replace("imageStore(carrier,","direct.values[3 * i + 2] = extra;\n    indirect.values[3 * i + 2] = extra;\n    imageStore(carrier,")
         rgen_path = output / "volume.rgen"
         rgen_path.write_text(text)
+    depth_compare = args.depth and not fetch_query and not args.raw_depth
+    if depth_compare:
+        text = rgen_path.read_text().replace("sampler2D", "sampler2DShadow")
+        if multi:
+            for swizzle, index in [("xy",0),("yx",1)]:
+                reference = "0.0" if args.inject_depth_reference_mismatch else f"requests.uv_lod[2*i+{index}].w"
+                text = text.replace(f"requests.uv_lod[i].{swizzle}",f"vec3(requests.uv_lod[2*i+{index}].xy,{reference})")
+            text = text.replace("requests.uv_lod[i].z","requests.uv_lod[2*i].z").replace("requests.uv_lod[i].w","requests.uv_lod[2*i+1].z")
+        else:
+            reference = "0.0" if args.inject_depth_reference_mismatch else "requests.uv[i].w"
+            text = text.replace("requests.uv[i].xy",f"vec3(requests.uv[i].xy,{reference})")
+        text, count = re.subn(r"textureLod\((.*)\)(?=;)", lambda m: "vec4(textureLod("+m[1]+"))",text)
+        if count != (2 if multi else 1):
+            raise RuntimeError("depth transformation must cover every texture operation")
+        rgen_path = output / "depth.rgen"
+        rgen_path.write_text(text)
     for stage in ("rgen", "rmiss"):
         with (output / f"compile-{stage}.log").open("w") as log:
             subprocess.run([glslang, "-V", "--target-env", "vulkan1.2",
                             str(rgen_path if stage == "rgen" else source / "sample.rmiss"), "-o", str(output / f"sample.{stage}.spv")],
                            stdout=log, stderr=subprocess.STDOUT, check=True)
-    if uniform or args.gradients or args.offset is not None or image_array or args.cube or args.volume:
+    if uniform or args.gradients or args.offset is not None or image_array or args.cube or args.volume or args.depth:
         disassembler = shutil.which("spirv-dis")
         if not disassembler:
             raise RuntimeError("spirv-dis is required to retain runtime-index evidence")
@@ -229,6 +251,13 @@ def run(args, compiler: str) -> int:
     })
     if args.inject_cube_seam_mismatch:
         env["VENTUS_TEXTURE_INJECT_CUBE_SEAM_MISMATCH"] = "1"
+    if args.depth:
+        env["VENTUS_TEXTURE_DEPTH"] = "1"
+        env["VENTUS_TEXTURE_COMPARE_OP"] = str(args.compare_op)
+        if depth_compare:
+            env["VENTUS_TEXTURE_DEPTH_COMPARE"] = "1"
+        if args.inject_depth_order_mismatch:
+            env["VENTUS_TEXTURE_DEPTH_ORDER_MISMATCH"] = "1"
     if args.volume:
         env["VENTUS_TEXTURE_VOLUME_DEPTH"] = str(args.volume_depth)
         if args.inject_volume_filter_mismatch:
@@ -274,13 +303,13 @@ def run(args, compiler: str) -> int:
         shader_source = (source / "sample.rgen").read_text()
         original = "textureLod(source, requests.uv[i], 0.0)"
         variants = {
-            "shadow-lod": "vec4(textureLod(source, vec3(requests.uv[i], 0.5), 0.0))",
+            "shadow-offset": "vec4(textureLodOffset(source, vec3(requests.uv[i],0.5), 0.0, ivec2(1)))",
 
             "gather": "textureGather(source, requests.uv[i])",
             "projected": "textureProjLod(source, vec3(requests.uv[i], 2), 0.0)",
         }
         variants = {name: shader_source.replace(original, value) for name, value in variants.items()}
-        variants["shadow-lod"] = variants["shadow-lod"].replace("sampler2D source;", "sampler2DShadow source;")
+        variants["shadow-offset"] = variants["shadow-offset"].replace("sampler2D source;", "sampler2DShadow source;")
         variants["3d-gradients"] = shader_source.replace("sampler2D source;", "sampler3D source;").replace(original, "textureGrad(source, vec3(requests.uv[i],0), vec3(1),vec3(1))")
         variants["3d-offset"] = shader_source.replace("sampler2D source;", "sampler3D source;").replace(original, "textureLodOffset(source,vec3(requests.uv[i],0),0,ivec3(1))")
         variants["shadow-gradients"] = shader_source.replace("sampler2D source;", "sampler2DShadow source;").replace(original,
@@ -366,7 +395,7 @@ def run(args, compiler: str) -> int:
         uniform_profile["dynamic_spirv"] = bool(re.search(r"OpAccessChain .* %source(?:_[ab])? %\w+", spirv_text) and
                                                  "OpVariable %_ptr_PushConstant_Selectors PushConstant" in spirv_text)
         uniform_profile["dynamic_llvm"] = bool(re.search(r"shl i32 %\w+, 7", llvm_text) and
-                                                re.search(r"mul i32 %\w+, 104", llvm_text))
+                                                re.search(r"mul i32 %\w+, " + str(descriptor_size) + r"\b", llvm_text))
         uniform_profile["elf_count"] = len(elf_paths)
         if nonuniform:
             uniform_profile["nonuniform_spirv"] = "OpCapability SampledImageArrayNonUniformIndexing" in spirv_text and "NonUniform" in spirv_text
@@ -401,7 +430,7 @@ def run(args, compiler: str) -> int:
     if not checked_frontier or not elf_paths:
         errors.append("checked, retained V5 ELF evidence is missing")
     if checks_only:
-        if summary.get("copies") != "6" or summary.get("limits") != "5" or summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "24" or summary.get("errors") != "0" or summary.get("images") != "27" or summary.get("views") != "33":
+        if summary.get("copies") != "9" or summary.get("limits") != "5" or summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "25" or summary.get("errors") != "0" or summary.get("images") != "35" or summary.get("views") != "41":
             errors.append("profile rejection checks incomplete")
     else:
         if summary.get("cases") != str(args.case_limit):
@@ -412,7 +441,7 @@ def run(args, compiler: str) -> int:
             errors.append("numeric coverage counts are incomplete")
         if (srgb or view_swizzle) and summary.get("format_checks") != "18":
             errors.append("sRGB/UNORM format feature and unsupported usage checks incomplete")
-        if (fetch_query or ((args.cube or args.volume) and not multi)) and (summary.get("format_checks") != "18" or
+        if (fetch_query or ((args.cube or args.volume) and not multi)) and (summary.get("format_checks") != ("8" if args.depth else "18") or
                             summary.get("query_components") != str(args.case_limit * 64 * (8 if array_sampling or args.volume else 6)) or
                             summary.get("query_failed") != "0"):
             errors.append("fetch/query format coverage or exact property comparison failed")
@@ -446,6 +475,12 @@ def run(args, compiler: str) -> int:
             errors.append("numeric comparison, completion marker, or buffer writeback failed")
     if returncode:
         errors.append(f"comparison process returned {returncode}")
+    if args.depth and summary.get("format_checks") != "8":
+        errors.append("depth format feature/rejection checks incomplete")
+    if depth_compare:
+        assembly = (output / "sample.rgen.spvasm").read_text()
+        if "OpImageSampleDrefExplicitLod" not in assembly:
+            errors.append("SPIR-V lacks explicit Dref sampling")
     if multi:
         filters = "independent min/mag and linear/nearest mip filters" if multi_min_mag or multi_srgb or view_swizzle else "linear/nearest and linear/linear mip filters" if multi_linear else "mip-nearest"
         profile = "two fixed combined bindings (set0:2,13), simultaneous samples and mix, view/sampler swaps and updates; " + filters
@@ -488,9 +523,17 @@ def run(args, compiler: str) -> int:
         profile += "; six-face Cube, preferred Z/Y/X tie, seamless edges and three-corner average, explicit LOD"
     if image_array:
         profile += "; 2D image layers with independent view layer subrange; " + ("single-layer 2D view" if args.single_layer_view else "array sample RNE/clamp and integer fetch/query")
+    if args.depth:
+        profile += "; D32 single-layer identity 2D; " + ("per-tap Dref comparison then PCF/mip blend" if depth_compare else "raw depth decode")
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
         "profile": profile,
+        "depth": args.depth,
+        "depth_compare": depth_compare,
+        "compare_op": args.compare_op,
+        "descriptor_element_size": descriptor_size,
+        "injected_depth_reference_mismatch": args.inject_depth_reference_mismatch,
+        "injected_depth_order_mismatch": args.inject_depth_order_mismatch,
         "volume": args.volume,
         "volume_depth": args.volume_depth,
         "injected_volume_w_mismatch": args.inject_volume_w_mismatch,

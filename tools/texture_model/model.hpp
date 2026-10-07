@@ -8,7 +8,8 @@
 
 namespace ventus::texture {
 
-enum class Format { RGBA8_UNORM, BGRA8_UNORM, RGBA8_SRGB, BGRA8_SRGB };
+enum class Format { RGBA8_UNORM, BGRA8_UNORM, RGBA8_SRGB, BGRA8_SRGB, D32_SFLOAT };
+constexpr bool is_depth(Format format) { return format==Format::D32_SFLOAT; }
 constexpr bool is_bgra(Format format) {
   return format == Format::BGRA8_UNORM || format == Format::BGRA8_SRGB;
 }
@@ -17,6 +18,7 @@ constexpr bool is_srgb(Format format) {
 }
 enum class AddressMode { Repeat, MirroredRepeat, ClampToEdge, ClampToBorder };
 enum class BorderColor { TransparentBlack, OpaqueBlack, OpaqueWhite };
+enum class CompareOp { Never, Less, Equal, LessOrEqual, Greater, NotEqual, GreaterOrEqual, Always };
 enum class Filter { Nearest, Bilinear };
 enum class MipFilter { Nearest, Linear };
 enum class Component { Identity, Zero, One, R, G, B, A };
@@ -55,6 +57,8 @@ struct Sampling {
   double lod_bias = 0;
   static constexpr double max_lod_bias = 16;
   AddressMode address_w = AddressMode::Repeat;
+  bool compare_enable = false;
+  CompareOp compare_op = CompareOp::LessOrEqual;
 
   Sampling() = default;
   // Existing equal-filter call sites retain their meaning.
@@ -93,6 +97,9 @@ struct Tap {
   std::uint32_t layer = 0;
   std::int64_t raw_z = 0;
   std::uint32_t z = 0;
+  bool compared = false;
+  float depth_value = 0;
+  float comparison = 0;
   bool border = false; // No image byte address for a border-replacement tap.
 };
 
@@ -109,6 +116,8 @@ struct Result {
   double input_lod = 0;
   double sampler_lod = 0;
   double clamped_lod = 0;
+  bool from_compare = false;
+  double input_dref = 0;
   bool from_volume = false;
   double input_w = 0;
   bool from_cube = false;
@@ -134,6 +143,10 @@ Result sample_level(const Image &image, std::uint32_t mip,
 Result sample_lod(const Image &image, View view, const Sampling &sampling,
                   double u, double v, double lod, LodRange range = {},
                   TexelOffset offset = {}, double layer = 0);
+// D32 2D comparison: reference OP stored depth at every tap before filtering.
+// The scalar result is repeated in rgba for existing numeric tools.
+Result sample_compare_lod(const Image &image, View view, const Sampling &sampling,
+                          double u, double v, double reference, double lod, LodRange range = {});
 // 3D volumes: all three mip dimensions shrink; W is filtered, never a layer.
 Result sample_volume_lod(const Image &image, View view, const Sampling &sampling,
                          double u, double v, double w, double lod, LodRange range = {});

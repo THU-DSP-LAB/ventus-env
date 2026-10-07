@@ -19,7 +19,7 @@ python3 tools/texture_model.py demo
 | 功能 | 行为 |
 | --- | --- |
 | Image | 2D / 2D array / Cube / 3D、单 sample；传统 mip 链，array 层数固定，volume depth 随 mip 递减 |
-| 格式 | RGBA8/BGRA8 UNORM 或 sRGB；RGBA 浮点结果，sRGB RGB 在过滤前解码，alpha 保持 UNORM |
+| 格式 | 单层二维 D32_SFLOAT 或 RGBA8/BGRA8 UNORM/sRGB；RGBA 浮点结果，sRGB RGB 在过滤前解码，alpha 保持 UNORM |
 | 存储 | 各 mip 独立 offset、width、height、depth、row/layer/slice pitch；允许行/层填充和非零偏移 |
 | 寻址 | U/V（3D 另有 W）独立的 repeat、mirrored repeat、clamp-to-edge、clamp-to-border |
 | Texel 过滤 | nearest 或 2D bilinear / 3D 八点 linear；独立 minFilter/magFilter，按 sampler clamp 后的 LOD 选择 |
@@ -32,12 +32,13 @@ python3 tools/texture_model.py demo
 | 整数读取/查询 | 合法整数坐标 `texel_fetch`；相对 View 的 `texture_size`、`texture_array_size`、`texture_query_levels`；不使用 sampler |
 | Layer/View | 独立 base layer/count；采样 layer 相对 view，以 ties-to-even 取整并 clamp，层间不插值；fetch 使用合法整数 layer |
 | Cube | `sample_cube_lod`：六个方形 face，方向映射、nearest face clamp、bilinear 跨边与角点过滤；`texture_cube_size` 查询二维尺寸 |
-| Trace | cube direction/face、layer 与 view 范围、下/上 mip、跨级权重、输入 UV/LOD、受限后的相对 LOD；每个 tap 的绝对 mip、坐标、偏移、合并权重和颜色 |
+| 深度比较 | `sample_compare_lod`；八种 compareOp，逐 texel 比较 Dref 后再做空间/mip 过滤；D32 identity view |
+| Trace | Dref/原始深度/逐 tap 比较结果、cube direction/face、layer 与 view 范围、下/上 mip、跨级权重、输入 UV/LOD、受限后的相对 LOD；每个 tap 的绝对 mip、坐标、偏移、合并权重和颜色 |
 | 多资源 | 不依赖全局采样状态，可交替采样不同 Image 和 Sampling 对象 |
 
 `sample_level` 在指定的 image 绝对 mip 内用 `mag_filter` 采样，它是直接指定级别与级内过滤的 helper，不进行 LOD/min/mag 选择。`sample_lod` 的 LOD 则相对 View；例如 `{base_mip=1, level_count=2}` 的 LOD 0 访问 image mip 1。每个 mip 的尺寸按 `max(1, previous/2)` 递减；可不提供后续级别，但不能在 1×1 之后继续追加重复 mip。
 
-当前尚无隐式导数、压缩、比较过滤或模型的 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
+当前尚无隐式导数、压缩、gather 或模型的 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
 
 ## 计算规则与数值边界
 
@@ -57,7 +58,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 ## 验证
 
-测试包含十八组，普通和 ASan/UBSan 模式目前均通过 11,792,751 项检查；包含独立 bias 与显式梯度 oracle：
+测试包含十九组，普通和 ASan/UBSan 模式目前均通过 17,416,835 项检查；包含独立 bias 与显式梯度 oracle：
 
 1. 手算四点平均、非对称插值、repeat 接缝和 mirror/clamp 边缘。
 2. 负坐标、texel 边界两侧、精确边界、负零和巨大有限坐标。
@@ -81,6 +82,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 17. Cube 的独立几何 oracle：六 face、12 条边的双向朝向、八角点、preferred 主轴 ties、跨 face virtual tap、角点三面平均；12 plane 的 view base layer 0/1/6、非二次幂/mip、格式/过滤/bias/swizzle、方向缩放和无效输入。
 
 18. Volume 的独立三轴 virtual texel oracle：3×5×7 / 1×1×4 / 2×2×2 / 1×3×1、三维 mip/view/pitches、64 种 U/V/W 寻址组合、nearest/八 texel linear、bias/min-mag/mip/border/swizzle、整数 fetch 与 size；深度溢出、截断和维度误用诊断。
+19. D32 逐 tap 比较的独立 PCF oracle：八种 compareOp、相等及相邻 float、范围外有限 Dref、空间/mip 过滤顺序、view/bias/min-mag/border、raw sample/fetch/query 与非法输入。
 
 独立对照以 long double 在虚拟延伸图像上枚举 nearest 区间或 tent kernel，逐个真实 texel 累积贡献；不调用模型的坐标归约、四点选择或寻址函数。精确样例和 UNORM 解码做相应精确比较；过滤测试的每分量绝对误差上限为 `2e-7`，适用于该模型的 float 输出，不能直接当成未来 TMU 精度要求。
 
@@ -521,3 +523,30 @@ GPU 使用标准 `sampler3D/texture3D`、`textureLod/texelFetch/textureSize/text
 私有资源元素从 96B→104B，在偏移 96 追加 addressModeW，100 保留为零；mip record 从 24B→32B，在 24/28 追加 depth/slicePitch。16B binding directory 和所有旧字段解释不变，2D/array/Cube producer、consumer、buffer 元素寻址和 sRGB 表起点同步迁移；详见 [ADR-0029](../../../docs/rt-implementation-architecture/decisions/ADR-0029-software-texture-volume-metadata.md)。没有冻结公共 RT/ISA/TMU 格式。
 
 W 反例把 shader W 固定为零；filter 反例把比较端 W 强制移动到所选 mip 的最近 texel 中心，故意抑制 W 插值，实际 GPU 和正确模型仍正常。二者应报告颜色差异并返回 1；另有精确查询反例。101 项范围/limits 检查加六项 copy 检查共 107 项。E06 最终隔离/主目录验收共 50 个 GPU 命令（45 正向、5 预期失败反例），正向零差异，最大误差 `1.192092896e-7`。18 组、11,792,751 host 检查在普通/ASan/UBSan 模式通过；W 反例检出 1,072 差异，单/多 volume 的 filter 反例检出 528/1,112 差异，查询反例检出 1 项。107 项范围/copy/limits 检查、隔离/主目录 Mesa unit 与原 any-hit exact SHA 均通过；源码/库前后哈希一致。Mesa 本地提交 `5052dde`，LLVM/Spike 未改。证据 `artifacts/texture_model/volume-implementation/verification.json`；smoke 和中途范围补齐前的结果不计入完成结论。下一项 E07 深度比较，然后 gather。
+
+
+## E07 第一切片：D32 深度比较
+
+```sh
+python3 tools/texture_model.py gpu-min-mag --depth --compare-op 3 --lod-bias 0.5
+python3 tools/texture_model.py gpu-border --depth
+python3 tools/texture_model.py gpu-multi-nonuniform-separate --depth --array-length 4
+python3 tools/texture_model.py gpu-min-mag --depth --raw-depth
+python3 tools/texture_model.py gpu-fetch-nonuniform --depth --linear-image --array-length 4
+python3 tools/texture_model.py gpu-min-mag --depth --case-limit 8 --inject-depth-reference-mismatch
+python3 tools/texture_model.py gpu-min-mag --depth --case-limit 8 --inject-depth-order-mismatch
+```
+
+范围为单 sample、单 layer 的二维 `D32_SFLOAT`，identity view 和传统 mip 链；存储值限定有限 `[0,1]`，Dref 是任意有限 binary32，浮点深度格式的 Dref 不截到 `[0,1]`。格式按 little-endian IEEE binary32 保存，texel 四字节，沿用 row/mip padding 和 LINEAR 布局查询。普通采样/fetch 解码为 `(D,0,0,1)`；比较采样返回一个标量，数值实验 shader 用 `vec4(scalar)` 保持已有输出工具，模型也重复四通道。这不是硬件返回格式。
+
+`--compare-op` 的 0–7 顺序为 NEVER、LESS、EQUAL、LESS_OR_EQUAL、GREATER、NOT_EQUAL、GREATER_OR_EQUAL、ALWAYS，比较方向是 **Dref OP 当前 tap 的深度**。Border 先替换该 tap 的深度；比较产生 0/1，再使用 bilinear 权重；最后使用 mip 权重。手算 `[.125,.375;.625,.875]`、Dref=.5、LE、中心 linear 得到 .5；先过滤深度再比较会得到 1，属于错误顺序。固定加权 PCF 是本实现选择；[Vulkan 深度比较规则](https://github.com/KhronosGroup/Vulkan-Docs/blob/v1.4.328/chapters/textures.adoc#textures-depth-compare-operation) 对线性比较过滤允许实现差异。
+
+显式 LOD、bias、min/mag、mip、寻址/border、独立 image/sampler、固定数组和一致/NonUniform 索引均沿现有软件路径执行。比较 Grad/Offset、深度 array/Cube/3D、projector、gather 尚未开放；当前 RT 的无显式 LOD 路径仍沿旧 LOD0 规则，不代表已实现隐式导数。没有验证任意笛卡尔功能组合或 NaN 深度行为。
+
+Vulkan 使用现有 image/view/copy/format query 与 sampler compareEnable/compareOp；shader 产生标准 `OpImageSampleDrefExplicitLod`，Mesa 解析已有 `nir_tex_instr` comparator，直接在 NIR→LLVM 转换层生成 load、fcmp、select、地址/插值计算。LLVM 后端选择已有 Ventus 指令；无新 NIR intrinsic、LLVM texture intrinsic、Spike opcode 或 LLVM 后端修改。
+
+私有资源元素 104B→112B，追加 compareEnable104/compareOp108；16B binding directory、32B mip record 与旧偏移保留，image 与 sampler 字段独立读取，全部维度和 buffer 元素寻址同步迁移。详见 [ADR-0030](../../../docs/rt-implementation-architecture/decisions/ADR-0030-software-depth-comparison-metadata.md)。实验从选中 Mesa 源码获取元素 stride 并保留其哈希。
+
+参考模型的独立 oracle 枚举延伸 texel 格网，在每个 tap 使用独立布尔真值表，再累加空间/mip 权重；覆盖八种 compareOp、相等点与相邻 float、Dref 越界、bias/clamp/view、border 和非法输入。reference 反例把 shader Dref 固定为零；order 反例故意把 oracle 改为“先过滤深度再比较”，正确 GPU 路径保持不变，必须出现数值差异。
+
+最终隔离/主目录验收共 50 个 GPU 命令（45 正向、5 预期失败反例），正向零差异，最大误差 `1.192092896e-7`，原 `1e-6` 上限保持。19 组、17,416,835 host 检查在普通/ASan/UBSan 模式通过；Dref 反例检出 2,256 差异，单/多资源顺序反例检出 224/1,736 差异，查询反例检出 1 项。127 项 API/compiler/copy/limits 检查、隔离/主目录 Mesa unit 与原 any-hit exact SHA 均通过，源码/二进制哈希冻结检查一致。Mesa 本地提交 `b4bd8f5`；LLVM/Spike 未修改。证据 `artifacts/texture_model/depth-implementation/verification.json`；smoke 和停止的首轮均排除。E07 深度比较完成，下一切片为 gather。

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cfenv>
 #include <functional>
 #include <iostream>
@@ -1218,6 +1219,84 @@ void volume_sampling() {
 
 }
 
+void put_depth(Image &image,const Level &level,unsigned x,unsigned y,float value) {
+  std::uint32_t bits;std::memcpy(&bits,&value,4);const auto offset=level.offset+y*level.row_pitch+x*4;
+  for(unsigned c=0;c<4;++c)image.data[offset+c]=static_cast<uint8_t>(bits>>(c*8));
+}
+Image depth_fixture() {
+  Image image{Format::D32_SFLOAT,{},{}};unsigned width=5,height=3;
+  for(unsigned mip=0;mip<3;++mip) {
+    Level level{width,height,image.data.size()+5,width*4ULL+3};image.data.resize(level.offset+height*level.row_pitch,0xcd);image.levels.push_back(level);
+    for(unsigned y=0;y<height;++y)for(unsigned x=0;x<width;++x)put_depth(image,level,x,y,static_cast<float>((x*3+y*5+mip*2)%9)/8);
+    width=std::max(1U,width/2);height=std::max(1U,height/2);
+  }
+  return image;
+}
+float depth_oracle_value(const Image &image,unsigned mip,unsigned x,unsigned y) {
+  const auto &level=image.levels[mip];const auto p=level.offset+y*level.row_pitch+x*4;
+  uint32_t bits=0;for(unsigned b=0;b<4;++b)bits|=static_cast<uint32_t>(image.data[p+b])<<(b*8);
+  float value;std::memcpy(&value,&bits,4);return value;
+}
+long double compare_oracle_value(CompareOp op,float ref,float depth) {
+  const std::array<bool,8> truth{false,ref<depth,ref==depth,ref<=depth,ref>depth,ref!=depth,ref>=depth,true};
+  return truth[static_cast<unsigned>(op)] ? 1 : 0;
+}
+Color depth_compare_oracle(const Image &image,View view,Sampling state,double u,double v,float ref,double lod,LodRange range) {
+  const double biased=state.lod_bias ? static_cast<float>(static_cast<float>(lod)+static_cast<float>(state.lod_bias)) : lod;
+  const auto lambda=std::clamp(biased,range.min,range.max);const auto filter=lambda<=0 ? state.mag_filter : state.min_filter;
+  const long double level=std::clamp(lambda,0.0,static_cast<double>(view.level_count-1));long double result=0;
+  for(unsigned r=0;r<view.level_count;++r) {
+    long double mw=state.mip_filter==MipFilter::Linear ? std::max(0.L,1-std::abs(level-r)) : (((r==0 ? level>=0 : level>r-.5L) && (r+1==view.level_count || level<=r+.5L)) ? 1 : 0);
+    if(!mw)continue;
+    const auto &mip=image.levels[view.base_mip+r];auto wx=axis_weights(mip.width,u,state.address_u,filter),wy=axis_weights(mip.height,v,state.address_v,filter);
+    long double cx=0,cy=0,value=0;for(auto w:wx)cx+=w;for(auto w:wy)cy+=w;
+    for(unsigned y=0;y<mip.height;++y)for(unsigned x=0;x<mip.width;++x)value+=wx[x]*wy[y]*compare_oracle_value(state.compare_op,ref,depth_oracle_value(image,view.base_mip+r,x,y));
+    value+=(1-cx*cy)*compare_oracle_value(state.compare_op,ref,state.border_color==BorderColor::OpaqueWhite ? 1 : 0);result+=mw*value;
+  }
+  const float value=static_cast<float>(result);return {value,value,value,value};
+}
+void depth_comparison() {
+  auto image=depth_fixture();
+  Sampling state{AddressMode::ClampToEdge,AddressMode::ClampToEdge,Filter::Bilinear};state.compare_enable=true;
+  Image hand{Format::D32_SFLOAT,std::vector<uint8_t>(16),{Level{2,2,0,8}}};
+  put_depth(hand,hand.levels[0],0,0,.125f);put_depth(hand,hand.levels[0],1,0,.375f);put_depth(hand,hand.levels[0],0,1,.625f);put_depth(hand,hand.levels[0],1,1,.875f);
+  auto pcf=sample_compare_lod(hand,{0,1},state,.5,.5,.5,0);expect_color(pcf.rgba,{.5,.5,.5,.5},"compare every tap before average");
+  auto color_state=state;color_state.compare_enable=false;
+  expect_color(sample_lod(hand,{0,1},color_state,.5,.5,0).rgba,{.5,0,0,1},"raw depth component substitution");
+  expect(pcf.taps.size()==4 && pcf.from_compare,"comparison trace");for(auto tap:pcf.taps)expect(tap.compared && tap.weight==.25 && (tap.comparison==0 || tap.comparison==1),"comparison tap trace");
+  const std::array<std::array<double,2>,7> coordinates{{{0,0},{1,1},{.5,.5},{-.125,.75},{1.125,-.25},{.125,.625},{.999,.001}}};
+  const std::array<float,11> references{-1,0,.125f,std::nextafter(.5f,0.f),.5f,std::nextafter(.5f,1.f),.875f,1,1.125f,std::numeric_limits<float>::max(),-std::numeric_limits<float>::max()};
+  for(unsigned base=0;base<3;++base) {
+    View view{base,3-base};
+    for(unsigned op=0;op<8;++op)for(auto au:{AddressMode::Repeat,AddressMode::MirroredRepeat,AddressMode::ClampToEdge,AddressMode::ClampToBorder})for(auto av:{AddressMode::Repeat,AddressMode::MirroredRepeat,AddressMode::ClampToEdge,AddressMode::ClampToBorder})for(auto mag:{Filter::Nearest,Filter::Bilinear})for(auto min:{Filter::Nearest,Filter::Bilinear})for(auto mip:{MipFilter::Nearest,MipFilter::Linear}) {
+      Sampling sampling{au,av,mag,min,mip};sampling.compare_enable=true;sampling.compare_op=static_cast<CompareOp>(op);
+      for(auto p:coordinates)for(auto ref:references)for(double lod:{-.25,.5,1.25}) {
+        const auto result=sample_compare_lod(image,view,sampling,p[0],p[1],ref,lod);
+        expect_color(result.rgba,depth_compare_oracle(image,view,sampling,p[0],p[1],ref,lod,{}),"independent PCF/mip oracle");
+        expect(result.rgba[0]>=0 && result.rgba[0]<=1,"comparison result bounded");
+        for(auto tap:result.taps)expect(tap.compared && (tap.comparison==0 || tap.comparison==1),"compare before filtering trace");
+      }
+    }
+    for(auto bias:{-1.,.75,16.})for(auto border:{BorderColor::TransparentBlack,BorderColor::OpaqueBlack,BorderColor::OpaqueWhite})for(unsigned op=0;op<8;++op)for(auto p:coordinates) {
+      auto sampling=state;sampling.address_u=sampling.address_v=AddressMode::ClampToBorder;sampling.lod_bias=bias;sampling.border_color=border;sampling.compare_op=static_cast<CompareOp>(op);sampling.mip_filter=MipFilter::Linear;
+      expect_color(sample_compare_lod(image,view,sampling,p[0],p[1],1.125,.25,{.5,1.75}).rgba,depth_compare_oracle(image,view,sampling,p[0],p[1],1.125f,.25,{.5,1.75}),"float Dref not clamped and border compared");
+    }
+    for(unsigned r=0;r<view.level_count;++r) {
+      const auto &level=image.levels[base+r];
+      expect(texture_size(image,view,r)==std::array<uint32_t,2>{level.width,level.height},"depth size query");
+      for(unsigned y=0;y<level.height;++y)for(unsigned x=0;x<level.width;++x)expect_color(texel_fetch(image,view,x,y,r).rgba,{depth_oracle_value(image,base+r,x,y),0,0,1},"depth fetch independent float bytes");
+    }
+  }
+  auto bad=state;bad.compare_op=static_cast<CompareOp>(99);rejected([&]{sample_compare_lod(image,{0,3},bad,0,0,.5,0);},"unknown compare operation");
+  bad=state;bad.compare_enable=false;rejected([&]{sample_compare_lod(image,{0,3},bad,0,0,.5,0);},"disabled compare sampler");
+  rejected([&]{sample_compare_lod(make_image(2,2),{0,1},state,0,0,.5,0);},"comparison color image");
+  for(double reference:{std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()})rejected([&]{sample_compare_lod(image,{0,3},state,0,0,reference,0);},"nonfinite Dref");
+  rejected([&]{sample_lod(image,{0,3},state,0,0,0);},"comparison helper required");
+  auto invalid=image;put_depth(invalid,invalid.levels[0],0,0,std::numeric_limits<float>::quiet_NaN());rejected([&]{texel_fetch(invalid,{0,3},0,0,0);},"nonfinite stored depth");
+  invalid=image;put_depth(invalid,invalid.levels[0],0,0,1.125f);rejected([&]{texel_fetch(invalid,{0,3},0,0,0);},"depth outside bounded range");
+  auto mapped=View{0,3};mapped.components[0]=Component::One;rejected([&]{sample_compare_lod(image,mapped,state,0,0,.5,0);},"depth swizzle outside profile");
+}
+
 void invalid_inputs() {
   const auto image = four_colors();
   for (double invalid : {std::numeric_limits<double>::infinity(),
@@ -1272,7 +1351,7 @@ void invalid_inputs() {
 } // namespace
 
 int main() {
-  const std::array<std::pair<const char *, void (*)()>, 18> suites{{
+  const std::array<std::pair<const char *, void (*)()>, 19> suites{{
       {"hand-calculated filtering and seams", hand_calculated},
       {"negative UV, boundaries and huge finite UV", negative_and_boundary_coordinates},
       {"all 256 UNORM values in both formats", all_unorm_values},
@@ -1285,6 +1364,7 @@ int main() {
       {"2D image array layer storage/view/selection oracle", image_array_layers},
       {"Cube face/edge/corner independent geometric oracle", cube_sampling},
       {"3D volume pitches and independent eight-texel oracle", volume_sampling},
+      {"D32 float depth comparison before filtering independent oracle", depth_comparison},
       {"independent min/mag selection before view clamp", min_mag},
       {"sRGB decoding before filtering and unchanged alpha", srgb},
       {"integer texel fetch and view-relative property queries", fetch_and_queries},

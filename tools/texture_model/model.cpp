@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 
 namespace ventus::texture {
+static_assert(sizeof(float)==4 && std::numeric_limits<float>::is_iec559,"D32 requires IEEE binary32");
 namespace {
 
 void require(bool condition, const char *message) {
@@ -25,6 +27,23 @@ void check_filters(const Sampling &sampling) {
   require(sampling.border_color == BorderColor::TransparentBlack ||
               sampling.border_color == BorderColor::OpaqueBlack ||
               sampling.border_color == BorderColor::OpaqueWhite, "unsupported border color");
+}
+
+void compare_tap(Tap &tap, CompareOp op, float reference) {
+  const float depth=tap.color[0];bool passes=false;
+  switch(op) {
+  case CompareOp::Never:break;
+  case CompareOp::Less:passes=reference<depth;break;
+  case CompareOp::Equal:passes=reference==depth;break;
+  case CompareOp::LessOrEqual:passes=reference<=depth;break;
+  case CompareOp::Greater:passes=reference>depth;break;
+  case CompareOp::NotEqual:passes=reference!=depth;break;
+  case CompareOp::GreaterOrEqual:passes=reference>=depth;break;
+  case CompareOp::Always:passes=true;break;
+  default:throw std::invalid_argument("unsupported depth compare operation");
+  }
+  tap.depth_value=depth;tap.compared=true;tap.comparison=passes ? 1 : 0;
+  tap.color.fill(tap.comparison);
 }
 
 Color border_color(BorderColor color) {
@@ -83,6 +102,13 @@ Tap read_at(const Image &image, const Level &level, std::uint32_t x,
   tap.weight = weight;
   // Byte reads work at arbitrary host alignment and do not assume endianness.
   const auto *p = image.data.data() + tap.byte_offset;
+  if (is_depth(image.format)) {
+    const std::uint32_t bits=static_cast<std::uint32_t>(p[0])|(static_cast<std::uint32_t>(p[1])<<8)|
+      (static_cast<std::uint32_t>(p[2])<<16)|(static_cast<std::uint32_t>(p[3])<<24);
+    float depth;std::memcpy(&depth,&bits,sizeof(depth));
+    require(std::isfinite(depth) && depth>=0 && depth<=1,"depth outside finite [0,1] profile");
+    tap.color={depth,0,0,1};tap.depth_value=depth;return tap;
+  }
   const bool bgra = is_bgra(image.format);
   tap.color = {p[bgra ? 2 : 0] / 255.0f, p[1] / 255.0f,
                p[bgra ? 0 : 2] / 255.0f, p[3] / 255.0f};
@@ -122,6 +148,8 @@ void validate_view(const Image &image, View view) {
   require(view.layer_count > 0 && view.base_layer < image.layer_count &&
               view.layer_count <= image.layer_count - view.base_layer,
           "view layer range outside image");
+  if (is_depth(image.format))
+    for (unsigned c=0;c<4;++c) require(view.components[c]==Component::Identity || static_cast<unsigned>(view.components[c])==static_cast<unsigned>(Component::R)+c,"depth view requires identity swizzle");
   for (auto component : view.components)
     require(component >= Component::Identity && component <= Component::A,
             "unsupported view component mapping");
@@ -204,7 +232,7 @@ std::vector<Tap> cube_read(const Image &image, unsigned mip, unsigned base,
 }
 
 Result sample_validated(const Image &image, std::uint32_t mip,
-                        const Sampling &sampling, double u, double v, Filter filter, TexelOffset offset, std::uint32_t layer, bool cube = false, std::uint32_t cube_base = 0, double w = 0) {
+                        const Sampling &sampling, double u, double v, Filter filter, TexelOffset offset, std::uint32_t layer, bool cube = false, std::uint32_t cube_base = 0, double w = 0, const float *reference = nullptr) {
   require(std::isfinite(u) && std::isfinite(v), "UV must be finite");
   check_mode(sampling.address_u);
   check_mode(sampling.address_v);
@@ -252,6 +280,7 @@ Result sample_validated(const Image &image, std::uint32_t mip,
     result.taps.push_back(read(image, level, lookup,
                               static_cast<std::int64_t>(std::floor(x)) + offset[0],
                               static_cast<std::int64_t>(std::floor(y)) + offset[1], 1));
+    if(reference) compare_tap(result.taps[0],sampling.compare_op,*reference);
     result.rgba = result.taps[0].color;
     result.taps[0].mip = mip;
     result.taps[0].layer = layer;
@@ -271,7 +300,7 @@ Result sample_validated(const Image &image, std::uint32_t mip,
       result.taps.insert(result.taps.end(),taps.begin(),taps.end());
     } else {
       auto tap=read(image,level,sampling,tx,ty,weight);
-      tap.mip=mip;tap.layer=layer;result.taps.push_back(tap);
+      tap.mip=mip;tap.layer=layer;if(reference)compare_tap(tap,sampling.compare_op,*reference);result.taps.push_back(tap);
     }
   };
   add(ix,iy,(1-a)*(1-b));add(ix+1,iy,a*(1-b));
@@ -289,10 +318,11 @@ Result sample_validated(const Image &image, std::uint32_t mip,
 
 void validate(const Image &image) {
   require(image.format == Format::RGBA8_UNORM || image.format == Format::BGRA8_UNORM ||
-              image.format == Format::RGBA8_SRGB || image.format == Format::BGRA8_SRGB,
+              image.format == Format::RGBA8_SRGB || image.format == Format::BGRA8_SRGB || is_depth(image.format),
           "unsupported format");
   require(image.layer_count > 0, "image needs at least one layer");
   require(!image.volume || image.layer_count==1,"3D images have one array layer");
+  require(!is_depth(image.format) || (!image.volume && image.layer_count==1),"depth profile is single-layer 2D");
   require(!image.levels.empty(), "image needs at least one mip");
   for (std::size_t i = 0; i < image.levels.size(); ++i) {
     const auto &level = image.levels[i];
@@ -334,15 +364,16 @@ Result sample_level(const Image &image, std::uint32_t mip,
                     const Sampling &sampling, double u, double v, TexelOffset offset, std::uint32_t layer) {
   validate(image);
   check_filters(sampling);
-  require(!image.volume,"use sample_volume_lod for 3D images");
+  require(!image.volume && !sampling.compare_enable,"single-level helper is noncomparison 2D");
   return sample_validated(image, mip, sampling, u, v, sampling.mag_filter, offset, layer);
 }
 
 static Result sample_lod_impl(const Image &image, View view, const Sampling &sampling,
-                  double u, double v, double lod, LodRange range, TexelOffset offset, double layer, bool cube, double w = 0) {
+                  double u, double v, double lod, LodRange range, TexelOffset offset, double layer, bool cube, double w = 0, const float *reference = nullptr) {
   validate(image);
   check_filters(sampling);
   validate_view(image, view);
+  require(sampling.compare_enable == (reference != nullptr),"comparison state requires comparison helper");
   require(std::isfinite(layer), "sample layer must be finite");
   const double relative_layer = std::clamp(layer, 0.0, static_cast<double>(view.layer_count - 1));
   const auto low_layer = static_cast<std::uint32_t>(std::floor(relative_layer));
@@ -379,13 +410,13 @@ static Result sample_lod_impl(const Image &image, View view, const Sampling &sam
               sampling.mip_filter == MipFilter::Linear, "unsupported mip filter");
   const bool linear = sampling.mip_filter == MipFilter::Linear;
   const auto selected = static_cast<std::uint32_t>(low + (!linear && relative - low > 0.5));
-  Result result = sample_validated(image, view.base_mip + selected, sampling, u, v, filter, offset, selected_layer, cube, view.base_layer, w);
+  Result result = sample_validated(image, view.base_mip + selected, sampling, u, v, filter, offset, selected_layer, cube, view.base_layer, w, reference);
   if (linear) {
     result.mip_upper = view.base_mip + std::min(selected + 1, view.level_count - 1);
     result.mip_weight = relative - low;
     // Exact integer/end LODs retain the first sample without needless reads.
     if (result.mip_weight > 0 && result.mip_upper != result.mip) {
-      auto upper = sample_validated(image, result.mip_upper, sampling, u, v, filter, offset, selected_layer, cube, view.base_layer, w);
+      auto upper = sample_validated(image, result.mip_upper, sampling, u, v, filter, offset, selected_layer, cube, view.base_layer, w, reference);
       for (unsigned c = 0; c < 4; ++c)
         result.rgba[c] = static_cast<float>((1 - result.mip_weight) * result.rgba[c] +
                                            result.mip_weight * upper.rgba[c]);
@@ -406,13 +437,23 @@ static Result sample_lod_impl(const Image &image, View view, const Sampling &sam
 
 Result sample_lod(const Image &image, View view, const Sampling &sampling,
                   double u,double v,double lod,LodRange range,TexelOffset offset,double layer) {
-  require(!image.volume,"use sample_volume_lod for 3D images");
+  require(!image.volume && !sampling.compare_enable,"use dimension/comparison sampling helper");
   return sample_lod_impl(image,view,sampling,u,v,lod,range,offset,layer,false);
+}
+
+Result sample_compare_lod(const Image &image,View view,const Sampling &sampling,
+                          double u,double v,double reference,double lod,LodRange range) {
+  require(is_depth(image.format) && sampling.compare_enable,"comparison requires D32 and enabled sampler");
+  require(std::isfinite(reference) && std::abs(reference)<=std::numeric_limits<float>::max(),"Dref must be finite binary32");
+  require(sampling.compare_op>=CompareOp::Never && sampling.compare_op<=CompareOp::Always,"unsupported compare operation");
+  const float dref=static_cast<float>(reference);
+  auto result=sample_lod_impl(image,view,sampling,u,v,lod,range,{},0,false,0,&dref);
+  result.from_compare=true;result.input_dref=dref;return result;
 }
 
 Result sample_volume_lod(const Image &image,View view,const Sampling &sampling,
                          double u,double v,double w,double lod,LodRange range) {
-  require(image.volume,"3D sampling requires volume image");
+  require(image.volume && !sampling.compare_enable,"3D sampling requires noncomparison volume image");
   return sample_lod_impl(image,view,sampling,u,v,lod,range,{},0,false,w);
 }
 std::array<std::uint32_t,3> texture_volume_size(const Image &image,View view,std::int32_t lod) {
@@ -433,6 +474,7 @@ Result texel_fetch_volume(const Image &image,View view,std::int32_t x,std::int32
 Result sample_cube_lod(const Image &image,View view,const Sampling &sampling,
                        std::array<double,3> direction,double lod,LodRange range) {
   validate_cube(image,view);
+  require(!sampling.compare_enable,"Cube comparison is outside this profile");
   for (double component : direction)
     require(std::isfinite(component) && std::abs(component)<=std::numeric_limits<float>::max(),
             "Cube direction must be finite binary32");

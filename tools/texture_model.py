@@ -23,6 +23,11 @@ def main() -> int:
     parser.add_argument("--array-binding", type=int, choices=(2, 12), default=2)
     parser.add_argument("--array-length", type=int, choices=(1, 2, 4), default=4)
     parser.add_argument("--array-index", type=int, default=None)
+    parser.add_argument("--depth", action="store_true", help="single-layer 2D D32 explicit LOD comparison or raw fetch")
+    parser.add_argument("--raw-depth", action="store_true", help="sample D32 without comparison")
+    parser.add_argument("--compare-op", type=int, choices=range(8), default=3)
+    parser.add_argument("--inject-depth-reference-mismatch", action="store_true")
+    parser.add_argument("--inject-depth-order-mismatch", action="store_true", help="oracle compares filtered depth instead of filtering comparisons")
     parser.add_argument("--volume", action="store_true", help="3D color volume explicit LOD or fetch/query")
     parser.add_argument("--volume-depth", type=int, choices=(1,2,4,5,8), default=5)
     parser.add_argument("--inject-volume-w-mismatch", action="store_true", help="volume negative control: shader W is zero")
@@ -54,6 +59,12 @@ def main() -> int:
     parser.add_argument("--inject-mismatch", action="store_true", help="gpu checker negative control; must fail")
     parser.add_argument("--inject-query-mismatch", action="store_true", help="fetch/query checker negative control; must fail")
     args = parser.parse_args()
+    if args.depth and (args.action in ("test","demo","gpu","gpu-checks","gpu-srgb-values","gpu-srgb","gpu-multi-srgb","gpu-swizzle","gpu-fetch-swizzle","gpu-multi-swizzle") or args.cube or args.volume or args.image_layers is not None or args.single_layer_view or args.gradients or args.offset is not None):
+        parser.error("depth requires a mip-capable identity 2D GPU profile; other dimensions/Grad/Offset are separate")
+    if (args.raw_depth or args.compare_op!=3 or args.inject_depth_reference_mismatch or args.inject_depth_order_mismatch) and not args.depth:
+        parser.error("depth options require depth")
+    if (args.inject_depth_reference_mismatch or args.inject_depth_order_mismatch) and (args.raw_depth or args.action.startswith("gpu-fetch")):
+        parser.error("depth comparison controls require comparison sampling")
     if args.volume and (args.action in ("test","demo","gpu","gpu-checks","gpu-srgb-values") or args.cube or args.image_layers is not None or args.single_layer_view or args.gradients or args.offset is not None):
         parser.error("volume requires mip-capable sampling/fetch; Cube/array/Grad/Offset are separate")
     if (args.volume_depth!=5 or args.inject_volume_w_mismatch or args.inject_volume_filter_mismatch) and not args.volume:
@@ -68,8 +79,8 @@ def main() -> int:
         parser.error("cube-count/direction mismatch require cube")
     if args.image_layers is not None and args.action in ("test","demo","gpu-checks","gpu","gpu-srgb-values"):
         parser.error("image-layers requires a mip-capable sampling/fetch GPU profile")
-    if args.linear_image and args.image_layers is None and not args.volume:
-        parser.error("linear-image requires image-layers")
+    if args.linear_image and args.image_layers is None and not args.volume and not args.depth:
+        parser.error("linear-image requires image-layers, volume or depth")
     if args.single_layer_view and args.image_layers is None:
         parser.error("single-layer-view requires image-layers")
     if args.inject_layer_mismatch and (args.image_layers not in (2,4) or args.single_layer_view):
@@ -102,6 +113,8 @@ def main() -> int:
     if compiler is None:
         parser.error(f"host compiler not found: {args.cxx}")
     maximum = 6720 if args.action in ("gpu-border", "gpu-fetch-border", "gpu-separate", "gpu-fetch-separate", "gpu-fetch-array", "gpu-fetch-uniform", "gpu-fetch-nonuniform") else 2880 if args.action in ("gpu-fetch-query", "gpu-swizzle", "gpu-fetch-swizzle") else 144 if args.action == "gpu-srgb-values" else 1440 if args.action in ("gpu-min-mag", "gpu-srgb") else 432 if args.action.startswith("gpu-multi") else 360 if args.action in ("gpu-mips", "gpu-mip-linear-check") else 180
+    if args.depth and not args.action.startswith("gpu-multi"):
+        maximum //= 4 if args.action in ("gpu-border","gpu-fetch-border","gpu-separate","gpu-fetch-separate","gpu-fetch-array","gpu-fetch-uniform","gpu-fetch-nonuniform","gpu-fetch-query") else 2
     if args.case_limit is None:
         args.case_limit = maximum
     if args.case_limit < 1 or args.case_limit > maximum or args.timeout <= 0:

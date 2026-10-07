@@ -52,14 +52,15 @@ def run(args, compiler: str) -> int:
         raise RuntimeError(f"output directory must be empty to exclude stale evidence: {output}")
     elf_dir = output / "elf"
     elf_dir.mkdir()
-    uniform = args.action in ("gpu-multi-uniform", "gpu-multi-uniform-separate", "gpu-fetch-uniform")
+    nonuniform = args.action in ("gpu-multi-nonuniform", "gpu-multi-nonuniform-separate", "gpu-fetch-nonuniform")
+    uniform = nonuniform or args.action in ("gpu-multi-uniform", "gpu-multi-uniform-separate", "gpu-fetch-uniform")
     arrays = uniform or args.action in ("gpu-multi-array", "gpu-multi-array-separate", "gpu-fetch-array")
-    separate = args.action in ("gpu-separate", "gpu-fetch-separate", "gpu-multi-separate", "gpu-multi-array-separate", "gpu-fetch-array", "gpu-multi-uniform-separate", "gpu-fetch-uniform")
+    separate = args.action in ("gpu-separate", "gpu-fetch-separate", "gpu-multi-separate", "gpu-multi-array-separate", "gpu-fetch-array", "gpu-multi-uniform-separate", "gpu-fetch-uniform", "gpu-multi-nonuniform-separate", "gpu-fetch-nonuniform")
     linear_check = args.action == "gpu-mip-linear-check"
     min_mag = args.action == "gpu-min-mag"
     srgb = args.action in ("gpu-srgb", "gpu-srgb-values", "gpu-multi-srgb")
-    fetch_query = args.action in ("gpu-fetch-query", "gpu-fetch-swizzle", "gpu-fetch-border", "gpu-fetch-separate", "gpu-fetch-array", "gpu-fetch-uniform")
-    border_mode = uniform or args.action in ("gpu-border", "gpu-fetch-border", "gpu-multi-border", "gpu-separate", "gpu-fetch-separate", "gpu-multi-separate", "gpu-multi-array", "gpu-multi-array-separate", "gpu-fetch-array", "gpu-multi-uniform-separate", "gpu-fetch-uniform")
+    fetch_query = args.action in ("gpu-fetch-query", "gpu-fetch-swizzle", "gpu-fetch-border", "gpu-fetch-separate", "gpu-fetch-array", "gpu-fetch-uniform", "gpu-fetch-nonuniform")
+    border_mode = uniform or args.action in ("gpu-border", "gpu-fetch-border", "gpu-multi-border", "gpu-separate", "gpu-fetch-separate", "gpu-multi-separate", "gpu-multi-array", "gpu-multi-array-separate", "gpu-fetch-array", "gpu-multi-uniform-separate", "gpu-fetch-uniform", "gpu-multi-nonuniform-separate", "gpu-fetch-nonuniform")
     view_swizzle = args.action in ("gpu-swizzle", "gpu-fetch-swizzle", "gpu-multi-swizzle") or border_mode
     srgb_values = args.action == "gpu-srgb-values"
     multi_srgb = args.action == "gpu-multi-srgb"
@@ -73,20 +74,34 @@ def run(args, compiler: str) -> int:
     rgen_path = source / rgen_name
     if arrays:
         text = rgen_path.read_text()
+        if nonuniform:
+            text = text.replace("#version 460", "#version 460\n#extension GL_EXT_nonuniform_qualifier : require")
         names = ("source",) if fetch_query else ("source_a", "source_b")
         for name in names:
             text = text.replace(f"{name};", f"{name}[{args.array_length}];")
+            index_expr = ("image_b_index" if name == "source_b" else "image_a_index")
             text = re.sub(r"\b" + name + r"\b(?!\[|;)",
-                          name + ("[selectors.image_index]" if uniform else f"[{args.array_index}]"), text)
+                          name + (f"[nonuniformEXT({index_expr})]" if nonuniform else "[selectors.image_index]" if uniform else f"[{args.array_index}]"), text)
         if separate and not fetch_query:
             for name in ("state_a", "state_b"):
                 text = text.replace(f"{name};", f"{name}[{args.array_length}];")
+                index_expr = "sampler_b_index" if name == "state_b" else "sampler_a_index"
                 text = re.sub(r"\b" + name + r"\b(?!\[|;)",
-                              name + ("[selectors.sampler_index]" if uniform else f"[{args.array_length - 1 - args.array_index}]"), text)
+                              name + (f"[nonuniformEXT({index_expr})]" if nonuniform else "[selectors.sampler_index]" if uniform else f"[{args.array_length - 1 - args.array_index}]"), text)
         if args.array_binding != 2:
             text = text.replace("binding = 2)", f"binding = {args.array_binding})")
         if uniform:
             text = text.replace("void main() {", "layout(push_constant, std430) uniform Selectors { uint image_index; uint sampler_index; } selectors;\nvoid main() {")
+        if nonuniform:
+            lane = "0u" if args.inject_lane_index_mismatch else "i"
+            selectors = (f"\n    uint image_a_index = ({lane} + selectors.image_index) % {args.array_length}u;"
+                         f"\n    uint image_b_index = ({lane} / 2u + selectors.image_index + 1u) % {args.array_length}u;"
+                         f"\n    uint sampler_a_index = ({lane} * 3u + selectors.sampler_index + 1u) % {args.array_length}u;"
+                         f"\n    uint sampler_b_index = ({lane} / 2u * 3u + selectors.sampler_index + 2u) % {args.array_length}u;")
+            text = text.replace("uint i = gl_LaunchIDEXT.x;", "uint i = gl_LaunchIDEXT.x;" + selectors)
+            if multi:
+                text = re.sub(r"    vec4 a = (textureLod\(.+);", r"    vec4 a = vec4(0);\n    if (i % 4u != 3u) a = \1;", text)
+                text = re.sub(r"    vec4 b = (textureLod\(.+);", r"    vec4 b = vec4(0);\n    if (i % 2u == 0u) b = \1;", text)
         rgen_path = output / "array.rgen"
         rgen_path.write_text(text)
     for stage in ("rgen", "rmiss"):
@@ -129,6 +144,8 @@ def run(args, compiler: str) -> int:
     })
     if uniform:
         env["VENTUS_TEXTURE_UNIFORM_INDEX"] = "1"
+    if nonuniform:
+        env["VENTUS_TEXTURE_NONUNIFORM_INDEX"] = "1"
     if args.inject_index_mismatch:
         env["VENTUS_TEXTURE_INJECT_INDEX_MISMATCH"] = "1"
     if arrays:
@@ -155,9 +172,9 @@ def run(args, compiler: str) -> int:
         }
         variants = {name: shader_source.replace(original, value) for name, value in variants.items()}
         nonuniform_source = shader_source.replace("#version 460", "#version 460\n#extension GL_EXT_nonuniform_qualifier : require")
-        variants["nonuniform-descriptor-array"] = nonuniform_source.replace("sampler2D source;", "sampler2D source[2];").replace(original, "textureLod(source[nonuniformEXT(i & 1u)], requests.uv[i], 0.0)")
-        variants["nonuniform-separate-image-array"] = nonuniform_source.replace("uniform sampler2D source;", "uniform texture2D source[2];\nlayout(set = 0, binding = 6) uniform sampler state;").replace(original, "textureLod(sampler2D(source[nonuniformEXT(i & 1u)], state), requests.uv[i], 0.0)")
-        variants["nonuniform-sampler-array"] = nonuniform_source.replace("uniform sampler2D source;", "uniform texture2D source;\nlayout(set = 0, binding = 6) uniform sampler state[2];").replace(original, "textureLod(sampler2D(source, state[nonuniformEXT(i & 1u)]), requests.uv[i], 0.0)")
+        variants["runtime-descriptor-array"] = nonuniform_source.replace("sampler2D source;", "sampler2D source[];").replace(original, "textureLod(source[nonuniformEXT(i & 1u)], requests.uv[i], 0.0)")
+        variants["nested-descriptor-array"] = shader_source.replace("sampler2D source;", "sampler2D source[2][2];").replace(original, "textureLod(source[0][1], requests.uv[i], 0.0)")
+        variants["dynamic-storage-image-array"] = nonuniform_source.replace("image2D carrier;", "image2D carrier[2];").replace("imageStore(carrier,", "imageStore(carrier[nonuniformEXT(i & 1u)],")
         for name, value in variants.items():
             path = output / f"reject-{name}.rgen"
             path.write_text(value)
@@ -207,11 +224,11 @@ def run(args, compiler: str) -> int:
                 errors.append(f"array resource profile {field} mismatch")
         if "LIFECYCLE free_reallocate=1 reset_reallocate=1 failed_allocate_null=1" not in text:
             errors.append("array descriptor free/reset/reallocation checks missing")
-        if multi and args.array_length > 1 and args.case_limit >= 5 and int(resources.get("element_copies", "0")) == 0:
+        if multi and not nonuniform and args.array_length > 1 and args.case_limit >= 5 and int(resources.get("element_copies", "0")) == 0:
             errors.append("descriptor element copy was not exercised")
     uniform_profile = {}
     if uniform:
-        expected_feature = "FEATURE sampled_dynamic_query=1 sampled_dynamic_query2=1 sampled_dynamic_enabled=1 sampled_nonuniform=0 runtime_array=0 partially_bound=0 variable_count=0 storage_dynamic=0 uniform_buffer_dynamic=0"
+        expected_feature = f"FEATURE sampled_dynamic_query=1 sampled_dynamic_query2=1 sampled_dynamic_enabled=1 sampled_nonuniform_query=1 sampled_nonuniform_enabled={int(nonuniform)} runtime_array=0 partially_bound=0 variable_count=0 storage_dynamic=0 uniform_buffer_dynamic=0 sampled_native=0 implicit_divergent_lod=0"
         if expected_feature not in text:
             errors.append("F09 feature query/enable boundary missing")
         uniform_match = re.search(r"^UNIFORM (.+)$", text, re.MULTILINE)
@@ -223,6 +240,19 @@ def run(args, compiler: str) -> int:
         uniform_profile["dynamic_llvm"] = bool(re.search(r"shl i32 %\w+, 7", llvm_text) and
                                                 re.search(r"mul i32 %\w+, 80", llvm_text))
         uniform_profile["elf_count"] = len(elf_paths)
+        if nonuniform:
+            uniform_profile["nonuniform_spirv"] = "OpCapability SampledImageArrayNonUniformIndexing" in spirv_text and "NonUniform" in spirv_text
+            lane_match = re.search(r"^LANES (.+)$", text, re.MULTILINE)
+            lane_profile = dict(item.split("=", 1) for item in lane_match[1].split()) if lane_match else {}
+            uniform_profile["lanes"] = lane_profile
+            invocations = args.case_limit * 64
+            expected_lanes = {"invocations": invocations, "active_a": invocations * 3 // 4 if multi else invocations,
+                              "active_b": invocations // 2 if multi else 0,
+                              "inactive_a": invocations // 4 if multi else 0,
+                              "inactive_b": invocations // 2 if multi else invocations,
+                              "reconverged_mixes": invocations if multi else 0}
+            if not uniform_profile["nonuniform_spirv"] or any(lane_profile.get(k) != str(v) for k, v in expected_lanes.items()):
+                errors.append("NonUniform decoration/capability or active/inactive lane coverage missing")
         if not uniform_profile["dynamic_spirv"] or (args.array_length > 1 and not uniform_profile["dynamic_llvm"]):
             errors.append("retained SPIR-V/LLVM lacks runtime descriptor-index evidence")
         if len(elf_paths) != 1:
@@ -313,7 +343,7 @@ def run(args, compiler: str) -> int:
     else:
         profile = "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag"
     if arrays:
-        profile += "; fixed descriptor arrays with " + ("runtime dispatch-uniform push-constant" if uniform else "compile-time") + " image/sampler indices and element updates/copies"
+        profile += "; fixed descriptor arrays with " + ("runtime per-lane NonUniform" if nonuniform else "runtime dispatch-uniform push-constant" if uniform else "compile-time") + " image/sampler indices and element updates/copies"
     if separate:
         profile += "; sampled image in set0, sampler in set1 bindings6/7; samplerless layout for fetch/query"
     manifest = {
@@ -327,7 +357,8 @@ def run(args, compiler: str) -> int:
         "readback": "direct SSBO and GLSL buffer-reference stores to coherent host-visible buffers",
         "summary": summary, "errors": errors, "timeout": timeout,
         "injected_mismatch": args.inject_mismatch,
-        "injected_index_mismatch": args.inject_index_mismatch, "checked_frontier": checked_frontier,
+        "injected_index_mismatch": args.inject_index_mismatch,
+        "injected_lane_index_mismatch": args.inject_lane_index_mismatch, "checked_frontier": checked_frontier,
         "injected_query_mismatch": args.inject_query_mismatch,
         "command": command,
         "runtime_environment": {name: value for name, value in env.items()

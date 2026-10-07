@@ -81,7 +81,8 @@ public:
   VkDescriptorSet sampler_set = VK_NULL_HANDLE;
   bool separate = false, samplerless = false;
   unsigned array_length = 1, array_index = 0, array_binding = 2;
-  bool uniform_index = false;
+  bool uniform_index = false, nonuniform_index = false;
+  unsigned lane_invocations = 0, lane_active_a = 0, lane_active_b = 0, lane_mixes = 0;
   unsigned initial_array_index = 0;
   std::array<unsigned, 4> index_counts{};
   bool array_mode = false, image_a_initialized = false, image_b_initialized = false;
@@ -142,6 +143,7 @@ public:
 
   void initialize() {
     uniform_index = std::getenv("VENTUS_TEXTURE_UNIFORM_INDEX") != nullptr;
+    nonuniform_index = std::getenv("VENTUS_TEXTURE_NONUNIFORM_INDEX") != nullptr;
     VkApplicationInfo application{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     application.pApplicationName = "ventus-texture-model-comparison";
     application.apiVersion = VK_API_VERSION_1_2;
@@ -187,6 +189,8 @@ public:
     VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     VkPhysicalDeviceFeatures core_features{};
     core_features.shaderInt64 = VK_TRUE;
+    VkPhysicalDeviceDescriptorIndexingFeatures enabled_indexing{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
     if (uniform_index) {
       VkPhysicalDeviceFeatures features{};
       vkGetPhysicalDeviceFeatures(physical, &features);
@@ -195,14 +199,27 @@ public:
       VkPhysicalDeviceFeatures2 features2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
       features2.pNext = &indexing;
       vkGetPhysicalDeviceFeatures2(physical, &features2);
+      VkPhysicalDeviceDescriptorIndexingProperties index_properties{
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES};
+      VkPhysicalDeviceProperties2 properties2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+      properties2.pNext = &index_properties;
+      vkGetPhysicalDeviceProperties2(physical, &properties2);
+      if (index_properties.shaderSampledImageArrayNonUniformIndexingNative ||
+          index_properties.quadDivergentImplicitLod)
+        throw std::runtime_error("unexpected native or implicit-LOD descriptor promise");
       if (!features.shaderSampledImageArrayDynamicIndexing ||
           !features2.features.shaderSampledImageArrayDynamicIndexing ||
-          indexing.shaderSampledImageArrayNonUniformIndexing || indexing.runtimeDescriptorArray ||
+          !indexing.shaderSampledImageArrayNonUniformIndexing || indexing.runtimeDescriptorArray ||
+          indexing.shaderStorageImageArrayNonUniformIndexing || indexing.shaderStorageBufferArrayNonUniformIndexing ||
           indexing.descriptorBindingPartiallyBound || indexing.descriptorBindingVariableDescriptorCount ||
           features.shaderStorageImageArrayDynamicIndexing || features.shaderStorageBufferArrayDynamicIndexing ||
           features.shaderUniformBufferArrayDynamicIndexing)
-        throw std::runtime_error("unexpected F09 feature boundary");
+        throw std::runtime_error("unexpected sampled array feature boundary");
       core_features.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
+      if (nonuniform_index) {
+        enabled_indexing.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+        acceleration.pNext = &enabled_indexing;
+      }
     }
     device_info.pEnabledFeatures = &core_features;
     device_info.pNext = &rt;
@@ -213,8 +230,9 @@ public:
     check(vkCreateDevice(physical, &device_info, nullptr, &device), "vkCreateDevice");
     if (uniform_index)
       std::cout << "FEATURE sampled_dynamic_query=1 sampled_dynamic_query2=1 sampled_dynamic_enabled=1"
-                   " sampled_nonuniform=0 runtime_array=0 partially_bound=0 variable_count=0"
-                   " storage_dynamic=0 uniform_buffer_dynamic=0" << std::endl;
+                << " sampled_nonuniform_query=1 sampled_nonuniform_enabled=" << nonuniform_index
+                << " runtime_array=0 partially_bound=0 variable_count=0"
+                   " storage_dynamic=0 uniform_buffer_dynamic=0 sampled_native=0 implicit_divergent_lod=0" << std::endl;
     vkGetDeviceQueue(device, family, 0, &queue);
     create_as = proc<PFN_vkCreateAccelerationStructureKHR>("vkCreateAccelerationStructureKHR");
     destroy_as = proc<PFN_vkDestroyAccelerationStructureKHR>("vkDestroyAccelerationStructureKHR");
@@ -579,6 +597,10 @@ public:
     for (unsigned i = 0; i < array_length; ++i)
       std::cout << " index" << i << '=' << index_counts[i];
     std::cout << std::endl;
+    if (nonuniform_index)
+      std::cout << "LANES invocations=" << lane_invocations << " active_a=" << lane_active_a
+                << " active_b=" << lane_active_b << " inactive_a=" << lane_invocations - lane_active_a
+                << " inactive_b=" << lane_invocations - lane_active_b << " reconverged_mixes=" << lane_mixes << std::endl;
   }
 
   void bind_descriptors() {
@@ -1046,6 +1068,22 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
           View mapped=view;mapped.components=mapping;
           mapped_views.push_back(experiment.additional_view(texture,vk_format(format),mapped));
         }
+      std::vector<View> element_views;
+      std::vector<std::vector<Texture>> element_mapped_views;
+      if (experiment.nonuniform_index) {
+        for (unsigned element = 0; element < experiment.array_length; ++element) {
+          View selected = view;
+          const unsigned offset = element % view.level_count;
+          selected.base_mip += offset;
+          selected.level_count -= offset;
+          element_views.push_back(selected);
+          element_mapped_views.emplace_back();
+          for (auto mapping : mappings) {
+            selected.components = mapping;
+            element_mapped_views.back().push_back(experiment.additional_view(texture,vk_format(format),selected));
+          }
+        }
+      }
       auto staging = experiment.buffer(image.data.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
       if (mips) std::memset(staging.map, 0xee, image.data.size());
       else std::memcpy(staging.map, image.data.data(), image.data.size());
@@ -1094,8 +1132,30 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
             View sampled_view=view;
             const unsigned mapping_index=border_mode && border_index==1 && !fetch_query ? cases%2 : cases%mappings.size();
             if (view_swizzle) sampled_view.components=mappings[mapping_index];
+            if (experiment.nonuniform_index) {
+              const unsigned base_index = experiment.array_index;
+              // Each lane uses legal coordinates/LOD relative to its selected
+              // view; dimensions and level counts now differ within one warp.
+              for (unsigned i = 0; i < uv.size(); ++i) {
+                const View &selected = element_views[(i + base_index) % experiment.array_length];
+                const unsigned lod = i % selected.level_count;
+                const auto &level = image.levels[selected.base_mip + lod];
+                uv[i] = {static_cast<float>((i * 37) % level.width),static_cast<float>((i * 17) % level.height)};
+                mip_inputs[i] = {uv[i][0],uv[i][1],static_cast<float>(lod),0};
+              }
+              std::memcpy(inputs.map,mip_inputs.data(),mip_inputs.size()*sizeof(mip_inputs[0]));
+              for (unsigned element = 0; element < experiment.array_length; ++element) {
+                experiment.array_index = element;
+                experiment.descriptors(element_mapped_views[element][(mapping_index + element) % mappings.size()],
+                    sampler, carrier, inputs, direct, output_address, uv.size(), mips ? 16 : 8);
+              }
+              experiment.array_index = base_index;
+              experiment.lane_invocations += uv.size();
+              experiment.lane_active_a += uv.size();
+            } else {
             experiment.descriptors(view_swizzle ? mapped_views[mapping_index] : texture,
                 sampler, carrier, inputs, direct, output_address, uv.size(), mips ? 16 : 8);
+            }
             auto *actual = static_cast<float *>(direct.map);
             auto *indirect_values = static_cast<float *>(indirect.map);
             std::fill(actual, actual + uv.size() * 8, std::numeric_limits<float>::quiet_NaN());
@@ -1137,17 +1197,23 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
             for (unsigned path = 0; path < 2; ++path) {
               auto *values = path ? indirect_values : actual;
               for (unsigned i = 0; i < uv.size(); ++i) {
-              const auto reference = fetch_query ? texel_fetch(image,sampled_view,static_cast<int32_t>(uv[i][0]),
+              View lane_view = sampled_view;
+              if (experiment.nonuniform_index) {
+                const unsigned selected = (i + experiment.array_index) % experiment.array_length;
+                lane_view = element_views[selected];
+                lane_view.components = mappings[(mapping_index + selected) % mappings.size()];
+              }
+              const auto reference = fetch_query ? texel_fetch(image,lane_view,static_cast<int32_t>(uv[i][0]),
                   static_cast<int32_t>(uv[i][1]),static_cast<int32_t>(mip_inputs[i][2])) :
                   sample_lod(image, sampled_view, sampling, uv[i][0], uv[i][1], mips ? mip_inputs[i][2] : 0, config.range);
               if (fetch_query) {
                 if (values[i*8+4]!=73) ++markers_failed;
-                const auto size=texture_size(image,view,static_cast<int32_t>(mip_inputs[i][2]));
-                const std::array<uint32_t,3> expected{size[0],size[1],texture_query_levels(image,view)};
+                const auto size=texture_size(image,lane_view,static_cast<int32_t>(mip_inputs[i][2]));
+                const std::array<uint32_t,3> expected{size[0],size[1],texture_query_levels(image,lane_view)};
                 for (unsigned q=0;q<3;++q) {
                   if (values[i*8+5+q]!=static_cast<float>(expected[q])) ++query_failed;
                   query_csv << cases << ',' << (path ? "bda" : "ssbo") << ',' << i << ','
-                      << mip_inputs[i][2] << ',' << view.base_mip << ',' << view.level_count << ','
+                      << mip_inputs[i][2] << ',' << lane_view.base_mip << ',' << lane_view.level_count << ','
                       << q << ',' << expected[q] << ',' << values[i*8+5+q] << '\n';
                   ++query_components;
                 }
@@ -1175,9 +1241,9 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                     << ',' << static_cast<int>(u_mode) << ',' << static_cast<int>(v_mode)
                     << ',' << static_cast<int>(mag) << ',' << static_cast<int>(min) << ',' << static_cast<int>(reference.filter)
                     << ',' << reference.sampler_lod << ',' << i << ',' << uv[i][0] << ',' << uv[i][1]
-                    << ',' << (mips ? mip_inputs[i][2] : 0) << ',' << view.base_mip << ',' << view.level_count << ',' << reference.mip
+                    << ',' << (mips ? mip_inputs[i][2] : 0) << ',' << lane_view.base_mip << ',' << lane_view.level_count << ',' << reference.mip
                     << ',' << reference.mip_upper << ',' << reference.mip_weight << ',' << static_cast<int>(sampling.mip_filter)
-                    << ',' << packed_mapping(sampled_view.components)
+                    << ',' << packed_mapping(lane_view.components)
                     << ',' << static_cast<unsigned>(sampling.border_color)
                     << ',' << c << ',' << reference.rgba[c] << ',' << value << ',' << error << '\n';
                 ++components;
@@ -1286,7 +1352,7 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
   experiment.submit();
   std::ofstream csv(csv_path);
   if (!csv) throw std::runtime_error("cannot open multi-binding CSV");
-  csv << "case,pair,phase,path,output,resource_a,resource_b,view_a_base,view_b_base,mip_a,mip_b,mip_a_upper,mip_b_upper,mip_weight_a,mip_weight_b,request,u,v,lod_a,lod_b,address_a_u,address_a_v,mag_filter_a,min_filter_a,selected_filter_a,mip_filter_a,min_lod_a,max_lod_a,address_b_u,address_b_v,mag_filter_b,min_filter_b,selected_filter_b,mip_filter_b,min_lod_b,max_lod_b,channel,reference,gpu,abs_error\n";
+  csv << "case,pair,phase,path,output,resource_a,resource_b,view_a_base,view_b_base,mip_a,mip_b,mip_a_upper,mip_b_upper,mip_weight_a,mip_weight_b,request,u,v,lod_a,lod_b,address_a_u,address_a_v,mag_filter_a,min_filter_a,selected_filter_a,mip_filter_a,min_lod_a,max_lod_a,address_b_u,address_b_v,mag_filter_b,min_filter_b,selected_filter_b,mip_filter_b,min_lod_b,max_lod_b,channel,reference,gpu,abs_error,active_a,active_b,image_index_a,image_index_b,sampler_index_a,sampler_index_b\n";
   csv << std::setprecision(10);
   unsigned cases = 0;
   std::array<unsigned, 8> phase_counts{};
@@ -1353,11 +1419,28 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
             const Sampling state_b = shared_sampler ? sampling_a : swap_samplers ? sampling_a : sampling_b;
             const LodRange clamp_a = swap_samplers ? range_b : range_a;
             const LodRange clamp_b = shared_sampler || swap_samplers ? range_a : range_b;
-            experiment.copy_elements = phase == 3 || phase == 4;
+            experiment.copy_elements = !experiment.nonuniform_index && (phase == 3 || phase == 4);
             if (phase != 6) {
-              experiment.descriptors(a.texture,swap_samplers ? sampler_b : sampler_a,
-                  carrier,inputs,direct,output_address,uv.size(),16,64);
-              experiment.secondary_descriptor(b.texture,shared_sampler || swap_samplers ? sampler_a : sampler_b);
+              const auto selected_sampler_a = swap_samplers ? sampler_b : sampler_a;
+              const auto selected_sampler_b = shared_sampler || swap_samplers ? sampler_a : sampler_b;
+              if (experiment.nonuniform_index) {
+                const unsigned base_index = experiment.array_index;
+                for (unsigned element = 0; element < experiment.array_length; ++element) {
+                  experiment.array_index = element;
+                  const bool odd = element % 2;
+                  // sampler_descriptor writes at the inverse array index.
+                  experiment.descriptors(odd ? b.texture : a.texture,
+                      odd ? selected_sampler_b : selected_sampler_a,
+                      carrier,inputs,direct,output_address,uv.size(),16,64);
+                  experiment.secondary_descriptor(odd ? a.texture : b.texture,
+                      odd ? selected_sampler_a : selected_sampler_b);
+                }
+                experiment.array_index = base_index;
+              } else {
+                experiment.descriptors(a.texture,selected_sampler_a,
+                    carrier,inputs,direct,output_address,uv.size(),16,64);
+                experiment.secondary_descriptor(b.texture,selected_sampler_b);
+              }
             }
             auto *actual = static_cast<float *>(direct.map);
             auto *indirect_values = static_cast<float *>(indirect.map);
@@ -1389,8 +1472,30 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
             if (inject_mismatch && cases == 0) indirect_values[4] = 0.75f;
             for (unsigned i = 0; i < uv.size(); ++i) {
               const auto &request = request_data[i];
-              const auto ra = sample_lod(*a.image,a.view,state_a,request[0],request[1],request[2],clamp_a);
-              const auto rb = sample_lod(*b.image,b.view,state_b,request[1],request[0],request[3],clamp_b);
+              const unsigned index_a = (i + experiment.array_index) % experiment.array_length;
+              const unsigned index_b = (i / 2 + experiment.array_index + 1) % experiment.array_length;
+              // Independent sampler writes are at N-1-element, so undo that
+              // transformation when selecting the host sampling state.
+              const unsigned sampler_a_index = (i * 3 + experiment.array_length - experiment.array_index) % experiment.array_length;
+              const unsigned sampler_b_index = (i / 2 * 3 + experiment.array_length + 1 - experiment.array_index) % experiment.array_length;
+              const bool flip_a = experiment.nonuniform_index && index_a % 2;
+              const bool flip_b = experiment.nonuniform_index && index_b % 2;
+              const bool flip_sa = experiment.nonuniform_index && (experiment.separate ?
+                  (experiment.array_length - 1 - sampler_a_index) % 2 : index_a % 2);
+              const bool flip_sb = experiment.nonuniform_index && (experiment.separate ?
+                  (experiment.array_length - 1 - sampler_b_index) % 2 : index_b % 2);
+              const MultiResource &lane_a = flip_a ? b : a;
+              const MultiResource &lane_b = flip_b ? a : b;
+              auto ra = sample_lod(*lane_a.image,lane_a.view,flip_sa ? state_b : state_a,
+                  request[0],request[1],request[2],flip_sa ? clamp_b : clamp_a);
+              auto rb = sample_lod(*lane_b.image,lane_b.view,flip_sb ? state_a : state_b,
+                  request[1],request[0],request[3],flip_sb ? clamp_a : clamp_b);
+              if (experiment.nonuniform_index) {
+                ++experiment.lane_invocations;
+                ++experiment.lane_mixes;
+                if (i % 4 == 3) ra.rgba = {}; else ++experiment.lane_active_a;
+                if (i % 2) rb.rgba = {}; else ++experiment.lane_active_b;
+              }
               Color mix{};
               for (unsigned c = 0; c < 4; ++c) mix[c] = ra.rgba[c] * 0.25f + rb.rgba[c] * 0.75f;
               const std::array<Color, 3> expected{ra.rgba,rb.rgba,mix};
@@ -1411,17 +1516,23 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
                           << " gpu=" << value << " error=" << error << '\n';
                     }
                     csv << cases << ',' << pair << ',' << phases[phase] << ',' << (path ? "bda" : "ssbo")
-                        << ',' << output << ',' << (swap_images ? 1 : 0) << ',' << (swap_images ? 0 : 1)
-                        << ',' << a.view.base_mip << ',' << b.view.base_mip << ',' << ra.mip << ',' << rb.mip
+                        << ',' << output << ',' << (swap_images != flip_a ? 1 : 0) << ',' << (swap_images != flip_b ? 0 : 1)
+                        << ',' << lane_a.view.base_mip << ',' << lane_b.view.base_mip << ',' << ra.mip << ',' << rb.mip
                         << ',' << ra.mip_upper << ',' << rb.mip_upper << ',' << ra.mip_weight << ',' << rb.mip_weight
                         << ',' << i << ',' << request[0] << ',' << request[1] << ',' << request[2] << ',' << request[3]
-                        << ',' << static_cast<int>(state_a.address_u) << ',' << static_cast<int>(state_a.address_v)
-                        << ',' << static_cast<int>(state_a.mag_filter) << ',' << static_cast<int>(state_a.min_filter) << ',' << static_cast<int>(ra.filter)
-                        << ',' << static_cast<int>(state_a.mip_filter) << ',' << clamp_a.min << ',' << clamp_a.max
-                        << ',' << static_cast<int>(state_b.address_u) << ',' << static_cast<int>(state_b.address_v)
-                        << ',' << static_cast<int>(state_b.mag_filter) << ',' << static_cast<int>(state_b.min_filter) << ',' << static_cast<int>(rb.filter)
-                        << ',' << static_cast<int>(state_b.mip_filter) << ',' << clamp_b.min << ',' << clamp_b.max
-                        << ',' << c << ',' << expected[output][c] << ',' << value << ',' << error << '\n';
+                        << ',' << static_cast<int>((flip_sa ? state_b : state_a).address_u) << ',' << static_cast<int>((flip_sa ? state_b : state_a).address_v)
+                        << ',' << static_cast<int>((flip_sa ? state_b : state_a).mag_filter) << ',' << static_cast<int>((flip_sa ? state_b : state_a).min_filter) << ',' << static_cast<int>(ra.filter)
+                        << ',' << static_cast<int>((flip_sa ? state_b : state_a).mip_filter) << ',' << (flip_sa ? clamp_b : clamp_a).min << ',' << (flip_sa ? clamp_b : clamp_a).max
+                        << ',' << static_cast<int>((flip_sb ? state_a : state_b).address_u) << ',' << static_cast<int>((flip_sb ? state_a : state_b).address_v)
+                        << ',' << static_cast<int>((flip_sb ? state_a : state_b).mag_filter) << ',' << static_cast<int>((flip_sb ? state_a : state_b).min_filter) << ',' << static_cast<int>(rb.filter)
+                        << ',' << static_cast<int>((flip_sb ? state_a : state_b).mip_filter) << ',' << (flip_sb ? clamp_a : clamp_b).min << ',' << (flip_sb ? clamp_a : clamp_b).max
+                        << ',' << c << ',' << expected[output][c] << ',' << value << ',' << error
+                        << ',' << (!experiment.nonuniform_index || i % 4 != 3)
+                        << ',' << (!experiment.nonuniform_index || i % 2 == 0)
+                        << ',' << (experiment.nonuniform_index ? index_a : experiment.array_index)
+                        << ',' << (experiment.nonuniform_index ? index_b : experiment.array_index)
+                        << ',' << (experiment.separate ? (experiment.nonuniform_index ? sampler_a_index : experiment.array_length - 1 - experiment.array_index) : (experiment.nonuniform_index ? index_a : experiment.array_index))
+                        << ',' << (experiment.separate ? (experiment.nonuniform_index ? sampler_b_index : experiment.array_length - 1 - experiment.array_index) : (experiment.nonuniform_index ? index_b : experiment.array_index)) << '\n';
                     ++components;
                   }
                   if (output < 2) ++samples;

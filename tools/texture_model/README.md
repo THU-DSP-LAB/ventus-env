@@ -354,3 +354,24 @@ nonuniform indexing is invalid usage rather than a required compiler diagnosis.
 Evidence is retained under `artifacts/texture_model/uniform-index-implementation/`.
 This remains a bounded RV32 Spike software profile, not full Vulkan conformance
 or a texture hardware ISA/ABI.
+
+## F10 非一致数组索引
+
+新增 `gpu-multi-nonuniform`、`gpu-multi-nonuniform-separate` 和
+`gpu-fetch-nonuniform`，沿用array参数。开启采样类NonUniform feature，
+保留显式SPIR-V标记和逐lane descriptor寻址；native与分歧implicit LOD
+property仍为false。Multi同一warp访问不同资源，A屏蔽四分之一lane、B
+屏蔽一半lane，随后形成混合输出。Fetch不同lane选择不同mip view与
+swizzle，生成各自合法的坐标/LOD，精确核对尺寸及级数。
+
+`--inject-lane-index-mismatch` 提供逐lane索引错误反例。Fetch反例使用
+`gpu-fetch-nonuniform --case-limit 1 --array-index 0 --inject-lane-index-mismatch`，
+保证错误选择的view仍覆盖输入，排除越界语义。Multi使用16配置。
+CSV记录实际lane资源、sampler、view、元素下标及活跃状态；SUMMARY samples
+计数是读回的逻辑输出数量，真实活跃采样数量见LANES。
+
+最终46个有效命令符合预期（41正向、5负向）；新长度2/4完整矩阵、
+F01–F09累计回归、40项范围检查、unit/host和原图通过。规范、源码、
+命令及数值证据见 `artifacts/texture_model/nonuniform-index-implementation/verification.json`。
+F01–F10在既定RV32 Spike软件profile中累计完成；这不冻结TMU接口或声明
+完整Vulkan/RV64/RTL一致性。LLVM backend/Spike/ISA未改，18项既有LLVM失败未处理。

@@ -304,3 +304,19 @@ F01 依据固定版本 [Vulkan-Docs v1.4.328](https://github.com/KhronosGroup/Vu
 F06在TASK-1321修复LLVM leaf函数入口VGPR栈分配后完成验收。原来通用stackSize为0时跳过prologue，epilogue却仍释放VGPR frame；新增MIR回归独立验证有frame/无frame的入口与返回平衡。LLVM提交 `9d3d82603b4b`，未修改Spike、ISA编码/语义、默认优化或容差；历史调查及精确测试边界见根仓库 `docs/architecture/VentusGPU_TEXTURE_BORDER_CODEGEN_BLOCKER.md`。
 
 修复后重新执行全部18个正向GPU命令、三种负向控制、host普通/sanitizer各12组1,375,170检查及Mesa unit，均符合预期。新sample/fetch各6,720配置、3,440,640颜色分量，fetch另有2,580,480精确查询分量；multi432配置、663,552分量，零差异，最大误差1.192092896e-7。主目录补验sample/multi/39项范围检查/unit/原any-hit通过，原图hash完全一致。LLVM扩展89项检查仍有18项与修复前相同的历史失败，新增栈回归由失败变为通过，没有新增失败；不声明整套LLVM全绿。证据在 `artifacts/texture_model/border-implementation/completed-verification.json`；下一切片F07独立image/sampler。
+
+## F07 独立 sampled image/sampler
+
+2026-10-07，TASK-1322 为现有软件路径加入 `VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE` 和 `VK_DESCRIPTOR_TYPE_SAMPLER`。Shader 的 texture deref 与 sampler deref 分别解析自己的 set/binding：image 地址、格式、mip/view 和 swizzle 从 image 记录读取，过滤、寻址、LOD clamp 与 border color 从 sampler 记录读取。Combined descriptor 仍让两种 deref 指向同一个记录。NIR texture instruction 进入现有 LLVM lowering 后生成软件计算及普通访存，没有新增 Vulkan 扩展、ISA 指令或 TMU 接口。
+
+描述符更新分别保存 image/view 和 sampler；dispatch capture 与上传分别物化对应状态。私有记录仍是80字节，mip记录仍是24字节，槽号仍为 `set * 32 + binding`。本步支持固定、标量、完整绑定的资源，未实现 immutable sampler、descriptor array 或动态索引。参考模型已经把 image/view 和 Sampling 分开，因此无需改变模型数值规则。
+
+新增三个可复现实验：
+
+- `gpu-separate`：image 在 set0/binding2，sampler 在 set1/binding6，验证跨 set 的独立解析，并覆盖 F01–F06 已支持的过滤、格式、view 和边界状态。
+- `gpu-fetch-separate`：只有 sampled image，没有创建 sampler，没有 sampler binding；SPIR-V 中没有 `OpTypeSampler`/`OpSampledImage`，整数 fetch、尺寸和级数查询正常执行。
+- `gpu-multi-separate`：image 在 set0/binding2、13，sampler 在 set1/binding6、7。八阶段覆盖基线、交换 image、交换 image 与 sampler、仅交换 sampler、共享 sampler、更新 image、保持 descriptor 再 dispatch、恢复 image；三组资源包含混合格式、不同 view 和共享 image。
+
+隔离源码验收：sample/fetch 各6,720配置、3,440,640颜色分量；fetch另有2,580,480精确查询分量。multi有432配置、663,552分量。均零差异，最大颜色误差 `1.192092896e-7`。21个正向命令和6个预期失败的比较器负向控制符合预期；39项范围检查继续拒绝 descriptor array，原先“独立 sampler 不支持”的检查改为独立 image array 检查。Host模型12组1,375,170检查和 Mesa translation unit test 通过。原160×96 any-hit图像保持 SHA256 `88b724540dc17b23161c638ebcbb71e9acaf73ff098b43764f9edf17cd5bebb0`。
+
+复现入口为 `python3 tools/texture_model.py gpu-separate`、`gpu-fetch-separate`、`gpu-multi-separate`，支持 `--mesa-build` 和 `--out-dir`。命令、CSV、实际源码/工具/库哈希、LLVM/ELF及资源数量证明保存在 `artifacts/texture_model/separate-sampler-implementation/`；汇总见 `verification.json`。本步不扩大纹理数值 profile，不声明完整 Vulkan descriptor indexing 或硬件一致性。下一切片是 F08：固定长度 descriptor array 的常量索引。

@@ -76,6 +76,10 @@ public:
   VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
   VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
   VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+  VkDescriptorSetLayout sampler_layout = VK_NULL_HANDLE;
+  VkDescriptorSet sampler_set = VK_NULL_HANDLE;
+  bool separate = false, samplerless = false;
+  unsigned separate_sampler_bindings = 0;
   VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
   VkPipeline pipeline = VK_NULL_HANDLE;
   VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
@@ -102,6 +106,7 @@ public:
       if (pipeline) vkDestroyPipeline(device, pipeline, nullptr);
       if (pipeline_layout) vkDestroyPipelineLayout(device, pipeline_layout, nullptr);
       if (set_layout) vkDestroyDescriptorSetLayout(device, set_layout, nullptr);
+      if (sampler_layout) vkDestroyDescriptorSetLayout(device, sampler_layout, nullptr);
       if (tlas && destroy_as) destroy_as(device, tlas, nullptr);
       for (auto module : modules) vkDestroyShaderModule(device, module, nullptr);
       for (auto sampler : samplers) vkDestroySampler(device, sampler, nullptr);
@@ -372,12 +377,16 @@ public:
     return module;
   }
 
-  void setup_pipeline(const char *rgen, const char *rmiss, bool multiple_bindings = false) {
+  void setup_pipeline(const char *rgen, const char *rmiss, bool multiple_bindings = false,
+                      bool separate_images = false, bool no_sampler = false) {
+    separate = separate_images;
+    samplerless = no_sampler;
     std::vector<VkDescriptorType> types{
         VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
-    if (multiple_bindings) types.push_back(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    if (separate) types[2] = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    if (multiple_bindings) types.push_back(types[2]);
     std::vector<VkDescriptorSetLayoutBinding> bindings(types.size());
     for (unsigned i = 0; i < bindings.size(); ++i)
       bindings[i] = {i == 6 ? 13 : i, types[i], 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr};
@@ -385,21 +394,37 @@ public:
     layout.bindingCount = bindings.size();
     layout.pBindings = bindings.data();
     check(vkCreateDescriptorSetLayout(device, &layout, nullptr, &set_layout), "create descriptor layout");
-    const VkDescriptorPoolSize sizes[]{{types[0], 1}, {types[1], 1},
-                                     {types[2], multiple_bindings ? 2U : 1U}, {types[3], 3}};
+    std::vector<VkDescriptorPoolSize> sizes{{types[0], 1}, {types[1], 1},
+        {types[2], multiple_bindings ? 2U : 1U}, {types[3], 3}};
+    if (separate && !samplerless) {
+      const VkDescriptorSetLayoutBinding states[]{{6, VK_DESCRIPTOR_TYPE_SAMPLER, 1,
+          VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr}, {7, VK_DESCRIPTOR_TYPE_SAMPLER, 1,
+          VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr}};
+      VkDescriptorSetLayoutCreateInfo state_layout{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+      state_layout.bindingCount = multiple_bindings ? 2 : 1;
+      state_layout.pBindings = states;
+      check(vkCreateDescriptorSetLayout(device, &state_layout, nullptr, &sampler_layout), "create sampler layout");
+      sizes.push_back({VK_DESCRIPTOR_TYPE_SAMPLER, multiple_bindings ? 2U : 1U});
+      separate_sampler_bindings = multiple_bindings ? 2 : 1;
+    }
     VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pool.maxSets = 1;
-    pool.poolSizeCount = 4;
-    pool.pPoolSizes = sizes;
+    pool.maxSets = sampler_layout ? 2 : 1;
+    pool.poolSizeCount = sizes.size();
+    pool.pPoolSizes = sizes.data();
     check(vkCreateDescriptorPool(device, &pool, nullptr, &descriptor_pool), "create descriptor pool");
     VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     allocate.descriptorPool = descriptor_pool;
     allocate.descriptorSetCount = 1;
     allocate.pSetLayouts = &set_layout;
     check(vkAllocateDescriptorSets(device, &allocate, &descriptor_set), "allocate descriptor set");
+    if (sampler_layout) {
+      allocate.pSetLayouts = &sampler_layout;
+      check(vkAllocateDescriptorSets(device, &allocate, &sampler_set), "allocate sampler set");
+    }
+    const VkDescriptorSetLayout layouts[]{set_layout, sampler_layout};
     VkPipelineLayoutCreateInfo pipeline_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    pipeline_info.setLayoutCount = 1;
-    pipeline_info.pSetLayouts = &set_layout;
+    pipeline_info.setLayoutCount = sampler_layout ? 2 : 1;
+    pipeline_info.pSetLayouts = layouts;
     check(vkCreatePipelineLayout(device, &pipeline_info, nullptr, &pipeline_layout), "create pipeline layout");
     VkPipelineShaderStageCreateInfo stages[2]{};
     VkRayTracingShaderGroupCreateInfoKHR groups[2]{};
@@ -465,6 +490,23 @@ public:
     return result;
   }
 
+  void bind_descriptors() {
+    const VkDescriptorSet sets[]{descriptor_set, sampler_set};
+    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+        pipeline_layout, 0, sampler_set ? 2 : 1, sets, 0, nullptr);
+  }
+
+  void sampler_descriptor(VkSampler sampler, unsigned binding) {
+    VkDescriptorImageInfo image{sampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = sampler_set;
+    write.dstBinding = binding;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    write.pImageInfo = &image;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+  }
+
   void descriptors(Texture sampled, VkSampler sampler, Texture carrier, Buffer uv, Buffer direct, Buffer output_address,
                    std::uint64_t request_count, unsigned input_stride = 8, unsigned output_stride = 32) {
     VkWriteDescriptorSetAccelerationStructureKHR acceleration{
@@ -472,13 +514,13 @@ public:
     acceleration.accelerationStructureCount = 1;
     acceleration.pAccelerationStructures = &tlas;
     const VkDescriptorImageInfo images[]{{VK_NULL_HANDLE, carrier.view, VK_IMAGE_LAYOUT_GENERAL},
-                                         {sampler, sampled.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+                                         {separate ? VK_NULL_HANDLE : sampler, sampled.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
     const VkDescriptorBufferInfo data[]{{uv.handle, 0, request_count * input_stride},
                                       {direct.handle, 0, request_count * output_stride},
                                       {output_address.handle, 0, 8}};
     const VkDescriptorType types[]{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
                                     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                                    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                    separate ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
     VkWriteDescriptorSet writes[6]{};
@@ -496,17 +538,19 @@ public:
     writes[4].pBufferInfo = &data[1];
     writes[5].pBufferInfo = &data[2];
     vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
+    if (separate && !samplerless) sampler_descriptor(sampler, 6);
   }
 
   void secondary_descriptor(Texture sampled, VkSampler sampler) {
-    VkDescriptorImageInfo image{sampler, sampled.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkDescriptorImageInfo image{separate ? VK_NULL_HANDLE : sampler, sampled.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     write.dstSet = descriptor_set;
     write.dstBinding = 13;
     write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.descriptorType = separate ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     write.pImageInfo = &image;
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    if (separate) sampler_descriptor(sampler, 7);
   }
 };
 
@@ -754,12 +798,13 @@ unsigned srgb_format_checks(Experiment &experiment) {
 int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limit,
         bool inject_mismatch, bool mips = false, bool mip_linear = false, bool min_mag = false,
         bool srgb = false, bool sweep = false, bool fetch_query = false,
-        bool inject_query_mismatch = false, bool view_swizzle = false, bool border_mode = false) {
+        bool inject_query_mismatch = false, bool view_swizzle = false, bool border_mode = false,
+        bool separate = false) {
   Experiment experiment;
   experiment.initialize();
   const unsigned format_checks = srgb || fetch_query || view_swizzle ? srgb_format_checks(experiment) : 0;
   experiment.empty_tlas();
-  experiment.setup_pipeline(rgen, rmiss);
+  experiment.setup_pipeline(rgen, rmiss, false, separate, separate && fetch_query);
   auto uv = requests();
   if (sweep) {
     uv.clear();
@@ -909,7 +954,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
             const bool linear = mip_linear || (min_mag && filter_index >= 4);
             Sampling sampling{u_mode, v_mode, mag, min, linear ? MipFilter::Linear : MipFilter::Nearest};
             sampling.border_color=static_cast<BorderColor>(border_index);
-            auto sampler = experiment.sampler(sampling, config.range, linear || (mips && !min_mag && view.level_count == 1) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
+            auto sampler = experiment.samplerless ? VK_NULL_HANDLE : experiment.sampler(sampling, config.range, linear || (mips && !min_mag && view.level_count == 1) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
             View sampled_view=view;
             const unsigned mapping_index=border_mode && border_index==1 && !fetch_query ? cases%2 : cases%mappings.size();
             if (view_swizzle) sampled_view.components=mappings[mapping_index];
@@ -941,8 +986,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
             }
             vkCmdBindPipeline(experiment.command, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, experiment.pipeline);
-            vkCmdBindDescriptorSets(experiment.command, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
-                                    experiment.pipeline_layout, 0, 1, &experiment.descriptor_set, 0, nullptr);
+            experiment.bind_descriptors();
             experiment.trace(experiment.command, &experiment.raygen, &experiment.miss,
                              &experiment.empty, &experiment.empty, uv.size(), 1, 1);
             VkMemoryBarrier visibility{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -1021,6 +1065,10 @@ finished:
     if (!query_csv) throw std::runtime_error("cannot write query CSV");
   }
   loaded_libraries();
+  std::cout << "PROFILE separate=" << experiment.separate
+            << " descriptor_sets=" << (experiment.sampler_set ? 2 : 1)
+            << " sampler_bindings=" << experiment.separate_sampler_bindings
+            << " sampler_objects=" << experiment.samplers.size() << std::endl;
   std::cout << std::setprecision(10) << "SUMMARY cases=" << cases << " samples=" << samples
             << " components=" << components << " mismatches=" << mismatches
             << " markers_failed=" << markers_failed << " buffer_failed=" << buffer_failed << " max_abs_error=" << max_error
@@ -1070,12 +1118,12 @@ void record_upload(Experiment &experiment, const MultiResource &resource, bool i
 }
 
 int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
-              unsigned limit, bool inject_mismatch, bool mip_linear, bool min_mag, bool srgb, bool view_swizzle, bool border_mode) {
+              unsigned limit, bool inject_mismatch, bool mip_linear, bool min_mag, bool srgb, bool view_swizzle, bool border_mode, bool separate = false) {
   Experiment experiment;
   experiment.initialize();
   const unsigned format_checks = srgb || view_swizzle ? srgb_format_checks(experiment) : 0;
   experiment.empty_tlas();
-  experiment.setup_pipeline(rgen, rmiss, true);
+  experiment.setup_pipeline(rgen, rmiss, true, separate);
   const auto uv = requests();
   const std::array<float, 16> lods{-10,0,0.49f,0.5f,std::nextafter(0.5f,1.f),0.51f,
       1,1.49f,1.5f,std::nextafter(1.5f,2.f),1.51f,2,2.5f,3,10,1000};
@@ -1183,8 +1231,7 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
               record_upload(experiment,resource_a,false);
             }
             vkCmdBindPipeline(experiment.command,VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,experiment.pipeline);
-            vkCmdBindDescriptorSets(experiment.command,VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
-                experiment.pipeline_layout,0,1,&experiment.descriptor_set,0,nullptr);
+            experiment.bind_descriptors();
             experiment.trace(experiment.command,&experiment.raygen,&experiment.miss,&experiment.empty,&experiment.empty,uv.size(),1,1);
             VkMemoryBarrier visibility{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
             visibility.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -1248,6 +1295,10 @@ multi_finished:
   csv.flush();
   if (!csv) throw std::runtime_error("cannot write multi-binding CSV");
   loaded_libraries();
+  std::cout << "PROFILE separate=" << experiment.separate
+            << " descriptor_sets=" << (experiment.sampler_set ? 2 : 1)
+            << " sampler_bindings=" << experiment.separate_sampler_bindings
+            << " sampler_objects=" << experiment.samplers.size() << std::endl;
   std::cout << std::setprecision(10) << "SUMMARY cases=" << cases << " samples=" << samples
       << " mixed_results=" << mixed_results << " components=" << components << " mismatches=" << mismatches << " markers_failed=" << markers_failed
       << " buffer_failed=" << buffer_failed << " max_abs_error=" << max_error << " tolerance=" << tolerance
@@ -1265,21 +1316,22 @@ int main(int argc, char **argv) {
     if (argc > 6 && std::string(argv[6]) == "checks")
       return profile_checks(argv[1], argv[2], argc - 7, argv + 7);
     const std::string mode=argc==7 ? argv[6] : "";
-    if (mode=="multi" || mode=="multi-linear" || mode=="multi-min-mag" || mode=="multi-srgb" || mode=="multi-swizzle" || mode=="multi-border")
+    if (mode=="multi" || mode=="multi-linear" || mode=="multi-min-mag" || mode=="multi-srgb" || mode=="multi-swizzle" || mode=="multi-border" || mode=="multi-separate")
       return run_multi(argv[1],argv[2],argv[3],std::stoul(argv[4]),std::string(argv[5])=="1",
-          mode!="multi",mode=="multi-min-mag" || mode=="multi-srgb" || mode=="multi-swizzle" || mode=="multi-border",
-          mode=="multi-srgb" || mode=="multi-swizzle" || mode=="multi-border",
-          mode=="multi-swizzle" || mode=="multi-border",mode=="multi-border");
+          mode!="multi",mode=="multi-min-mag" || mode=="multi-srgb" || mode=="multi-swizzle" || mode=="multi-border" || mode=="multi-separate",
+          mode=="multi-srgb" || mode=="multi-swizzle" || mode=="multi-border" || mode=="multi-separate",
+          mode=="multi-swizzle" || mode=="multi-border" || mode=="multi-separate",mode=="multi-border" || mode=="multi-separate",mode=="multi-separate");
     const bool mip_linear=mode=="mip-linear";
     const bool srgb=mode=="srgb" || mode=="srgb-values";
-    const bool fetch_query=mode=="fetch-query" || mode=="fetch-swizzle" || mode=="fetch-border";
-    const bool border_mode=mode=="border" || mode=="fetch-border";
+    const bool fetch_query=mode=="fetch-query" || mode=="fetch-swizzle" || mode=="fetch-border" || mode=="fetch-separate";
+    const bool separate=mode=="separate" || mode=="fetch-separate";
+    const bool border_mode=mode=="border" || mode=="fetch-border" || separate;
     const bool view_swizzle=mode=="swizzle" || mode=="fetch-swizzle" || border_mode;
     const bool min_mag=mode=="min-mag" || srgb || fetch_query || view_swizzle;
     const bool mips=mode=="mips" || mip_linear || min_mag;
     if (argc!=6 && !mips) throw std::runtime_error("expected rgen.spv rmiss.spv numeric.csv case-limit inject-mismatch");
     return run(argv[1],argv[2],argv[3],std::stoul(argv[4]),std::string(argv[5])=="1",
-        mips,mip_linear,min_mag,srgb,mode=="srgb-values",fetch_query,std::string(argv[5])=="2",view_swizzle,border_mode);
+        mips,mip_linear,min_mag,srgb,mode=="srgb-values",fetch_query,std::string(argv[5])=="2",view_swizzle,border_mode,separate);
   } catch (const std::exception &error) {
     std::cerr << "FAIL " << error.what() << std::endl;
     return 1;

@@ -1,0 +1,35 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+layout(set = 0, binding = 1, rgba8) uniform image2D carrier;
+layout(set = 0, binding = 2) uniform texture2D source_a;
+layout(set = 1, binding = 6) uniform sampler state_a;
+layout(set = 0, binding = 13) uniform texture2D source_b;
+layout(set = 1, binding = 7) uniform sampler state_b;
+layout(set = 0, binding = 3, std430) readonly buffer Requests { vec4 uv_lod[]; } requests;
+layout(set = 0, binding = 4, std430) buffer Results { vec4 values[]; } direct;
+layout(set = 0, binding = 5, std430) readonly buffer Address { uint64_t address; } output_address;
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer ReferenceResults { vec4 values[]; };
+layout(location = 0) rayPayloadEXT uint completion;
+void main() {
+    uint i = gl_LaunchIDEXT.x;
+    completion = 0;
+    traceRayEXT(scene, gl_RayFlagsOpaqueEXT, 255, 0, 0, 0,
+                vec3(0), 0.001, vec3(0, 0, 1), 1.0, 0);
+    vec4 a = textureLod(sampler2D(source_a, state_a), requests.uv_lod[i].xy, requests.uv_lod[i].z);
+    vec4 b = textureLod(sampler2D(source_b, state_b), requests.uv_lod[i].yx, requests.uv_lod[i].w);
+    vec4 mixed = a * 0.25 + b * 0.75;
+    vec4 marker = vec4(float(completion), 123, 456, 789);
+    direct.values[4 * i] = a;
+    direct.values[4 * i + 1] = b;
+    direct.values[4 * i + 2] = mixed;
+    direct.values[4 * i + 3] = marker;
+    ReferenceResults indirect = ReferenceResults(output_address.address);
+    indirect.values[4 * i] = a;
+    indirect.values[4 * i + 1] = b;
+    indirect.values[4 * i + 2] = mixed;
+    indirect.values[4 * i + 3] = marker;
+    imageStore(carrier, ivec2(i, 0), mixed);
+}

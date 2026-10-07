@@ -52,11 +52,12 @@ def run(args, compiler: str) -> int:
         raise RuntimeError(f"output directory must be empty to exclude stale evidence: {output}")
     elf_dir = output / "elf"
     elf_dir.mkdir()
+    separate = args.action in ("gpu-separate", "gpu-fetch-separate", "gpu-multi-separate")
     linear_check = args.action == "gpu-mip-linear-check"
     min_mag = args.action == "gpu-min-mag"
     srgb = args.action in ("gpu-srgb", "gpu-srgb-values", "gpu-multi-srgb")
-    fetch_query = args.action in ("gpu-fetch-query", "gpu-fetch-swizzle", "gpu-fetch-border")
-    border_mode = args.action in ("gpu-border", "gpu-fetch-border", "gpu-multi-border")
+    fetch_query = args.action in ("gpu-fetch-query", "gpu-fetch-swizzle", "gpu-fetch-border", "gpu-fetch-separate")
+    border_mode = args.action in ("gpu-border", "gpu-fetch-border", "gpu-multi-border", "gpu-separate", "gpu-fetch-separate", "gpu-multi-separate")
     view_swizzle = args.action in ("gpu-swizzle", "gpu-fetch-swizzle", "gpu-multi-swizzle") or border_mode
     srgb_values = args.action == "gpu-srgb-values"
     multi_srgb = args.action == "gpu-multi-srgb"
@@ -65,6 +66,8 @@ def run(args, compiler: str) -> int:
     multi = args.action.startswith("gpu-multi")
     mips = args.action == "gpu-mips" or linear_check or min_mag or (srgb and not multi_srgb) or fetch_query or (view_swizzle and not multi)
     rgen_name = "sample_fetch.rgen" if fetch_query else "sample_multi.rgen" if multi else "sample_mip.rgen" if mips else "sample.rgen"
+    if separate:
+        rgen_name = "sample_fetch_separate.rgen" if fetch_query else "sample_multi_separate.rgen" if multi else "sample_separate.rgen"
     for stage in ("rgen", "rmiss"):
         with (output / f"compile-{stage}.log").open("w") as log:
             subprocess.run([glslang, "-V", "--target-env", "vulkan1.2",
@@ -100,9 +103,9 @@ def run(args, compiler: str) -> int:
     command = [str(executable), str(output / "sample.rgen.spv"), str(output / "sample.rmiss.spv"),
                str(output / "numeric.csv"), str(args.case_limit), str(2 if args.inject_query_mismatch else int(args.inject_mismatch))]
     if mips:
-        command.append("fetch-border" if border_mode and fetch_query else "border" if border_mode else "fetch-swizzle" if fetch_query and view_swizzle else "swizzle" if view_swizzle else "fetch-query" if fetch_query else "srgb-values" if srgb_values else "srgb" if srgb else "min-mag" if min_mag else "mip-linear" if linear_check else "mips")
+        command.append("fetch-separate" if separate and fetch_query else "separate" if separate else "fetch-border" if border_mode and fetch_query else "border" if border_mode else "fetch-swizzle" if fetch_query and view_swizzle else "swizzle" if view_swizzle else "fetch-query" if fetch_query else "srgb-values" if srgb_values else "srgb" if srgb else "min-mag" if min_mag else "mip-linear" if linear_check else "mips")
     if multi:
-        command.append("multi-border" if border_mode else "multi-swizzle" if view_swizzle else "multi-srgb" if multi_srgb else "multi-min-mag" if multi_min_mag else "multi-linear" if multi_linear else "multi")
+        command.append("multi-separate" if separate else "multi-border" if border_mode else "multi-swizzle" if view_swizzle else "multi-srgb" if multi_srgb else "multi-min-mag" if multi_min_mag else "multi-linear" if multi_linear else "multi")
     checks_only = args.action == "gpu-checks"
     bad_paths = []
     if checks_only:
@@ -117,7 +120,7 @@ def run(args, compiler: str) -> int:
         }
         variants = {name: shader_source.replace(original, value) for name, value in variants.items()}
         variants["descriptor-array"] = shader_source.replace("sampler2D source;", "sampler2D source[2];").replace(original, "textureLod(source[1], requests.uv[i], 0.0)")
-        variants["separate-sampler"] = shader_source.replace("uniform sampler2D source;", "uniform texture2D source;\nlayout(set = 0, binding = 6) uniform sampler state;").replace(original, "textureLod(sampler2D(source, state), requests.uv[i], 0.0)")
+        variants["separate-image-array"] = shader_source.replace("uniform sampler2D source;", "uniform texture2D source[2];\nlayout(set = 0, binding = 6) uniform sampler state;").replace(original, "textureLod(sampler2D(source[1], state), requests.uv[i], 0.0)")
         for name, value in variants.items():
             path = output / f"reject-{name}.rgen"
             path.write_text(value)
@@ -144,6 +147,15 @@ def run(args, compiler: str) -> int:
     checked_frontier = "V5 final ELF completion frontier passed:" in text
     elf_paths = list(elf_dir.glob("*.riscv"))
     errors = []
+    resource_match = re.search(r"^PROFILE (.+)$", text, re.MULTILINE)
+    resources = dict(item.split("=", 1) for item in resource_match[1].split()) if resource_match else {}
+    if separate:
+        expected_sets = "1" if fetch_query else "2"
+        expected_bindings = "0" if fetch_query else "2" if multi else "1"
+        if (resources.get("separate") != "1" or resources.get("descriptor_sets") != expected_sets or
+                resources.get("sampler_bindings") != expected_bindings or
+                (fetch_query and resources.get("sampler_objects") != "0")):
+            errors.append("independent image/sampler or samplerless resource profile incomplete")
     if timeout:
         errors.append("runtime timed out")
     if not summary:
@@ -224,9 +236,12 @@ def run(args, compiler: str) -> int:
             profile += "; all seven border address pairs, three core float border colors; opaque-black sampling restricted to identity"
     else:
         profile = "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag"
+    if separate:
+        profile += "; sampled image in set0, sampler in set1 bindings6/7; samplerless layout for fetch/query"
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
         "profile": profile,
+        "resource_profile": resources,
         "readback": "direct SSBO and GLSL buffer-reference stores to coherent host-visible buffers",
         "summary": summary, "errors": errors, "timeout": timeout,
         "injected_mismatch": args.inject_mismatch, "checked_frontier": checked_frontier,
@@ -237,7 +252,7 @@ def run(args, compiler: str) -> int:
         "loaded_libraries": [str(path) for path in libraries],
         "binary_sha256": {name: digest(path) for name, path in paths.items()},
         "source_sha256": {name: digest(source / name) for name in
-                          ("model.hpp", "model.cpp", "gpu.cpp", "gpu.py", "sample.rgen", "sample_mip.rgen", "sample_multi.rgen", "sample_fetch.rgen", "sample.rmiss")},
+                          ("model.hpp", "model.cpp", "gpu.cpp", "gpu.py", "sample.rgen", "sample_mip.rgen", "sample_multi.rgen", "sample_fetch.rgen", "sample_separate.rgen", "sample_fetch_separate.rgen", "sample_multi_separate.rgen", "sample.rmiss")},
         "entrypoint_sha256": digest(root / "tools/texture_model.py"),
         "rejection_shader_sha256": {path.name: digest(path) for path in bad_paths},
         "elf_sha256": {path.name: digest(path) for path in elf_paths},

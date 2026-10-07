@@ -25,6 +25,7 @@ python3 tools/texture_model.py demo
 | Texel 过滤 | nearest 或 bilinear；独立 minFilter/magFilter，按 sampler clamp 后的 LOD 选择 |
 | LOD | 显式有限值；sampler 范围限制后映射至 view 的可访问 mip |
 | Mip 过滤 | nearest（精确半整数选择较低一级）或 linear（相邻两级混合）；与级内过滤独立 |
+| 整数读取/查询 | 合法整数坐标 `texel_fetch`；相对 View 的 `texture_size`、`texture_query_levels`；不使用 sampler |
 | Trace | 下/上 mip、跨级权重、输入 UV/LOD、受限后的相对 LOD；每个 tap 的绝对 mip、坐标、偏移、合并权重和颜色 |
 | 多资源 | 不依赖全局采样状态，可交替采样不同 Image 和 Sampling 对象 |
 
@@ -50,7 +51,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 ## 验证
 
-测试包含九组，普通和 ASan/UBSan 模式目前均通过 228,157 项检查：
+测试包含十组，普通和 ASan/UBSan 模式目前均通过 527,509 项检查：
 
 1. 手算四点平均、非对称插值、repeat 接缝和 mirror/clamp 边缘。
 2. 负坐标、texel 边界两侧、精确边界、负零和巨大有限坐标。
@@ -61,6 +62,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 7. Mip linear 手算与独立跨级 oracle；两种格式、全部寻址/级内过滤组合、view/clamp、小数/整数相邻 LOD、非二次幂/padding，检查跨级 tap 权重和整数 LOD 的精确退化。
 8. min/mag 手算及独立 LOD oracle；四种过滤组合、两种 mip filter、零点相邻值与负零、sampler clamp、view clamp 与 mip rounding 的区别。
 9. 两种 sRGB 通道顺序、全部 256 个编码值、alpha 精确保持 UNORM、过滤前解码的手算样例，以及 sRGB/min-mag/mip/address/view 独立 oracle。
+10. 整数 fetch 的独立颜色/字节地址 oracle、与 nearest 中心读取交叉核对，合法 view 子范围的尺寸/级数、非法整数坐标和 LOD 拒绝。
 
 独立对照以 long double 在虚拟延伸图像上枚举 nearest 区间或 tent kernel，逐个真实 texel 累积贡献；不调用模型的坐标归约、四点选择或寻址函数。精确样例和 UNORM 解码做相应精确比较；过滤测试的每分量绝对误差上限为 `2e-7`，适用于该模型的 float 输出，不能直接当成未来 TMU 精度要求。
 
@@ -78,6 +80,7 @@ python3 tools/texture_model.py gpu-multi
 python3 tools/texture_model.py gpu-multi-linear
 python3 tools/texture_model.py gpu-min-mag
 python3 tools/texture_model.py gpu-multi-min-mag
+python3 tools/texture_model.py gpu-fetch-query
 python3 tools/texture_model.py gpu-srgb
 python3 tools/texture_model.py gpu-srgb-values
 python3 tools/texture_model.py gpu-multi-srgb
@@ -86,7 +89,7 @@ python3 tools/texture_model.py gpu-mip-linear-check
 python3 tools/texture_model.py gpu --case-limit 1 --inject-mismatch
 ```
 
-`gpu --case-limit 1 --inject-mismatch` 是比较器负向校验：故意修改读回的一个颜色分量，**必须返回 1**，不应作为普通成功测试执行。`--case-limit` 可限定前 1..180 种 LOD0 配置、1..360 种 mip 配置、1..432 种多 binding 配置、1..1440 种独立 min/mag/sRGB 配置或 1..144 种 sRGB 全编码值配置；`--timeout` 限制运行时间；`--out-dir` 指向空目录，以避免旧结果混入证据。默认输出位于 `artifacts/texture_model/gpu-<UTC>-<id>/`。
+`gpu --case-limit 1 --inject-mismatch` 是比较器负向校验：故意修改读回的一个颜色分量，**必须返回 1**，不应作为普通成功测试执行。`--case-limit` 可限定前 1..180 种 LOD0 配置、1..360 种 mip 配置、1..432 种多 binding 配置、1..1440 种独立 min/mag/sRGB 配置、1..144 种 sRGB 全编码值配置或 1..2880 种 fetch/query 配置；`--timeout` 限制运行时间；`--out-dir` 指向空目录，以避免旧结果混入证据。默认输出位于 `artifacts/texture_model/gpu-<UTC>-<id>/`。
 
 此动作需要已构建的本地 Mesa `mesa/build-ventus`、driver `driver/build/driver/spike_device`、Spike `spike/build`、LLVM `llvm/build`、`llvm/build-rt-libclc/lib/crt0.o`，以及 PATH 上的 `glslangValidator`、host C++ 编译器、Vulkan headers/loader 和 `pkg-config vulkan`。`--mesa-build` 可选择另一份已有 Mesa build。它不构建或安装上述组件。
 
@@ -232,6 +235,20 @@ Vulkan sampled/transfer image 创建、同格式 identity view、mip 内存范�
 规范使用 Vulkan-Docs v1.4.328 的 [Formats](https://github.com/KhronosGroup/Vulkan-Docs/blob/v1.4.328/chapters/formats.adoc) 和 [Texel Decode](https://github.com/KhronosGroup/Vulkan-Docs/blob/v1.4.328/chapters/images.adoc)，传递函数依据 Khronos DataFormat 的 `TRANSFER_SRGB_EOTF`。后者取源码快照 SHA256 `f0d612c91c45927980f94d76ad138235a6da85c098fbeeecd7a08624ad4009ce`，避免把 main 当作固定版本；三个快照、哈希及运行证据保存在 `artifacts/texture_model/srgb-implementation/`。Host/GPU 容差保持 `2e-7`/`1e-6`，不代表未来 TMU 精度。
 
 最终主目录默认 LLVM 验收：host 普通/sanitizer 各 **9 组、228,157 检查**。`gpu-srgb` **1,440 配置、737,280 分量**，`gpu-srgb-values` **144 配置、294,912 分量**，`gpu-multi-srgb` **432 配置、663,552 分量**，全部零差异，最大绝对误差 `1.192092896e-7`。每组 18 项格式检查均通过；F01/F02 和原 LOD0/mip-nearest/双 binding nearest、38 项范围检查、Mesa translation unit test 均通过。两个比较器负向校验各检测一个注入错误，原 any-hit 160×96 图像仍为 SHA256 `88b724540dc17b23161c638ebcbb71e9acaf73ff098b43764f9edf17cd5bebb0`。汇总为 `artifacts/texture_model/srgb-implementation/verification.json`，下一切片是 F04 整数读取与查询。
+
+## F04：整数 texelFetch 与尺寸/级数查询
+
+2026-10-07 新增模型 `texel_fetch(image, view, x, y, lod)`、`texture_size(image, view, lod)`、`texture_query_levels(image, view)`，以及 GPU 的 NIR `txf`、`txs`、`query_levels` lowering。Fetch 使用合法 signed int32 texel 坐标和相对 view 的 integer LOD，直接读取一个 texel，按 UNORM/sRGB 解码；不归一化坐标，不使用 sampler 寻址、过滤或 LOD clamp。尺寸查询返回 view 对应 mip 的 width/height，级数查询返回 view.level_count。GPU 查询只读取描述符/mip 元数据，不访问 texel 数据。
+
+本轮仍使用固定 combined binding，API 对象需要合法 sampler，但这些操作不读取其采样字段；独立 image/sampler 留在 F07。支持当前四种格式、2D 单 layer/sample、同格式 identity view，不包含 fetch offset、多采样、array、sparse 或新的 descriptor 索引。
+
+越界边界单列：模型对非法 view、负/过大 LOD、负/越界 texel 坐标抛出 `std::invalid_argument`；Vulkan 未启用相关 robustness 时这些输入的结果可能未定义。当前 GPU 将 index/coord 先替换为安全值再做 load，并选择零输出，仅用于内部防越界，不声明 robustness feature 或把零规定为可依赖的应用语义。合法输入完全不进行 clamp/wrap。
+
+`gpu-fetch-query` 的 2,880 配置覆盖十组 image/view/clamp × 四种格式 × 九种寻址 × 八种 min/mag/mip 状态。每次 64 请求覆盖每个 view mip 的四个角点并补充内部点；包括 1×1、NPOT、非零 base、单级 view 和 15 级链。GPU fetch 与模型比较，两份 SSBO/BDA 的尺寸/级数读回做精确比较；query CSV 独立记录在 `numeric.csv.queries.csv`。上传与末级局部更新沿用已有门禁。`--case-limit 1 --inject-mismatch` 和 `--case-limit 1 --inject-query-mismatch` 分别检验颜色和查询比较器，必须返回 1。
+
+规范继续采用 Vulkan-Docs v1.4.328 的 Integer Texel Coordinate Operations 和 Image Query Instructions（`textures-integer-coordinate-operations`、`textures-queries`），颜色解码复用 F03 的 Texel Decode。没有新增 Vulkan API、ISA 或纹理字节布局。
+
+最终验收：host 普通/sanitizer 各 **10 组、527,509 检查**；`gpu-fetch-query` **2,880 配置、1,474,560 颜色分量、1,105,920 查询分量**，零差异，尺寸/级数精确一致，颜色最大误差 `2.980232239e-8`。18 项格式检查、F01–F03 和原 LOD0/mip-nearest/双 binding nearest、38 项范围检查、Mesa translation unit test 全部通过。颜色/查询负向校验分别只检测一个注入错误，原 160×96 any-hit 图像 SHA256 不变。证据汇总为 `artifacts/texture_model/fetch-query-implementation/verification.json`，保留命令、CSV、库/源码/ELF 哈希。
 
 ## 代码组织与规范来源
 

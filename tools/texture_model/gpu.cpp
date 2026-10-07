@@ -726,10 +726,11 @@ unsigned srgb_format_checks(Experiment &experiment) {
 
 int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limit,
         bool inject_mismatch, bool mips = false, bool mip_linear = false, bool min_mag = false,
-        bool srgb = false, bool sweep = false) {
+        bool srgb = false, bool sweep = false, bool fetch_query = false,
+        bool inject_query_mismatch = false) {
   Experiment experiment;
   experiment.initialize();
-  const unsigned format_checks = srgb ? srgb_format_checks(experiment) : 0;
+  const unsigned format_checks = srgb || fetch_query ? srgb_format_checks(experiment) : 0;
   experiment.empty_tlas();
   experiment.setup_pipeline(rgen, rmiss);
   auto uv = requests();
@@ -780,6 +781,13 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   unsigned cases = 0;
   std::uint64_t samples = 0, components = 0, mismatches = 0, markers_failed = 0, buffer_failed = 0;
   double max_error = 0;
+  std::uint64_t query_components = 0, query_failed = 0;
+  std::ofstream query_csv;
+  if (fetch_query) {
+    query_csv.open(std::string(csv_path) + ".queries.csv");
+    if (!query_csv) throw std::runtime_error("cannot open query CSV");
+    query_csv << "case,path,request,lod,view_base,view_count,property,expected,actual\n";
+  }
   struct Config { unsigned width, height, levels, base, count; LodRange range; };
   const std::vector<Config> configurations = sweep ? std::vector<Config>{{256,1,1,0,1,{0,1000}}} : mips ? std::vector<Config>{
       {5,3,3,0,3,{0,1000}}, {5,3,3,1,VK_REMAINING_MIP_LEVELS,{0,1000}},
@@ -789,14 +797,29 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
       {16384,1,15,0,15,{0,1000}}, {16384,1,15,13,VK_REMAINING_MIP_LEVELS,{0,1000}}} : std::vector<Config>{
       {1,1,1,0,1,{0,0}}, {1,5,1,0,1,{0,0}}, {5,1,1,0,1,{0,0}},
       {3,5,1,0,1,{0,0}}, {4,4,1,0,1,{0,0}}};
-  const unsigned total_cases = configurations.size() * (min_mag ? 144 : 36);
-  const std::array<Format,2> formats = srgb ? std::array<Format,2>{Format::RGBA8_SRGB,Format::BGRA8_SRGB}
-                                          : std::array<Format,2>{Format::RGBA8_UNORM,Format::BGRA8_UNORM};
+  const unsigned total_cases = configurations.size() * (min_mag ? 144 : 36) * (fetch_query ? 2 : 1);
+  const std::vector<Format> formats = fetch_query ? std::vector<Format>{Format::RGBA8_UNORM,Format::BGRA8_UNORM,Format::RGBA8_SRGB,Format::BGRA8_SRGB}
+      : srgb ? std::vector<Format>{Format::RGBA8_SRGB,Format::BGRA8_SRGB}
+             : std::vector<Format>{Format::RGBA8_UNORM,Format::BGRA8_UNORM};
   for (auto config : configurations)
     for (auto format : formats) {
       const std::array<unsigned, 2> size{config.width, config.height};
       const View view{config.base, config.count == VK_REMAINING_MIP_LEVELS ? config.levels - config.base : config.count};
       auto image = mip_fixture(size[0], size[1], config.levels, format);
+      if (fetch_query) {
+        // Four corners of every accessible mip, then interior texels where
+        // enough requests remain. All inputs are legal signed integer values.
+        for (unsigned i=0;i<uv.size();++i) {
+          const unsigned lod=i%view.level_count;
+          const auto &level=image.levels[view.base_mip+lod];
+          const unsigned group=i/view.level_count;
+          const unsigned x=group<4 ? ((group&1) ? level.width-1 : 0) : (i*37)%level.width;
+          const unsigned y=group<4 ? ((group&2) ? level.height-1 : 0) : (i*17)%level.height;
+          uv[i]={static_cast<float>(x),static_cast<float>(y)};
+          mip_inputs[i]={uv[i][0],uv[i][1],static_cast<float>(lod),0};
+        }
+        std::memcpy(inputs.map,mip_inputs.data(),mip_inputs.size()*sizeof(mip_inputs[0]));
+      }
       if (sweep) {
         for (unsigned x=0;x<256;++x) {
           std::array<uint8_t,4> color{static_cast<uint8_t>(x),static_cast<uint8_t>(255-x),
@@ -883,12 +906,28 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
             experiment.submit();
             if (std::memcmp(actual, indirect_values, uv.size() * 32)) ++buffer_failed;
             if (inject_mismatch && cases == 0) actual[0] = 0.75f;
+            if (inject_query_mismatch && cases == 0) actual[5] += 1;
             for (unsigned path = 0; path < 2; ++path) {
               auto *values = path ? indirect_values : actual;
               for (unsigned i = 0; i < uv.size(); ++i) {
-              const auto reference = sample_lod(image, view, sampling, uv[i][0], uv[i][1], mips ? mip_inputs[i][2] : 0, config.range);
-              const std::array<float, 4> marker{73, 123, 456, 789};
-              if (!std::equal(marker.begin(), marker.end(), values + i * 8 + 4)) ++markers_failed;
+              const auto reference = fetch_query ? texel_fetch(image,view,static_cast<int32_t>(uv[i][0]),
+                  static_cast<int32_t>(uv[i][1]),static_cast<int32_t>(mip_inputs[i][2])) :
+                  sample_lod(image, view, sampling, uv[i][0], uv[i][1], mips ? mip_inputs[i][2] : 0, config.range);
+              if (fetch_query) {
+                if (values[i*8+4]!=73) ++markers_failed;
+                const auto size=texture_size(image,view,static_cast<int32_t>(mip_inputs[i][2]));
+                const std::array<uint32_t,3> expected{size[0],size[1],texture_query_levels(image,view)};
+                for (unsigned q=0;q<3;++q) {
+                  if (values[i*8+5+q]!=static_cast<float>(expected[q])) ++query_failed;
+                  query_csv << cases << ',' << (path ? "bda" : "ssbo") << ',' << i << ','
+                      << mip_inputs[i][2] << ',' << view.base_mip << ',' << view.level_count << ','
+                      << q << ',' << expected[q] << ',' << values[i*8+5+q] << '\n';
+                  ++query_components;
+                }
+              } else {
+                const std::array<float,4> marker{73,123,456,789};
+                if (!std::equal(marker.begin(),marker.end(),values+i*8+4)) ++markers_failed;
+              }
               for (unsigned c = 0; c < 4; ++c) {
                 const float value = values[i * 8 + c];
                 const double error = std::abs(static_cast<double>(value) - reference.rgba[c]);
@@ -926,12 +965,18 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
 finished:
   csv.flush();
   if (!csv) throw std::runtime_error("cannot write numeric result CSV");
+  if (fetch_query) {
+    query_csv.flush();
+    if (!query_csv) throw std::runtime_error("cannot write query CSV");
+  }
   loaded_libraries();
   std::cout << std::setprecision(10) << "SUMMARY cases=" << cases << " samples=" << samples
             << " components=" << components << " mismatches=" << mismatches
             << " markers_failed=" << markers_failed << " buffer_failed=" << buffer_failed << " max_abs_error=" << max_error
-            << " tolerance=" << tolerance << " injected=" << inject_mismatch << " format_checks=" << format_checks << std::endl;
-  return cases && !mismatches && !markers_failed && !buffer_failed ? 0 : 1;
+            << " tolerance=" << tolerance << " injected=" << inject_mismatch << " format_checks=" << format_checks
+            << " query_components=" << query_components << " query_failed=" << query_failed
+            << " injected_query=" << inject_query_mismatch << std::endl;
+  return cases && !mismatches && !markers_failed && !buffer_failed && !query_failed ? 0 : 1;
 }
 
 // Each resource has its own model/view; shared-image fixtures deliberately
@@ -1155,10 +1200,11 @@ int main(int argc, char **argv) {
       return run_multi(argv[1],argv[2],argv[3],std::stoul(argv[4]),std::string(argv[5]) == "1",std::string(argv[6]) != "multi",std::string(argv[6]) == "multi-min-mag" || std::string(argv[6]) == "multi-srgb",std::string(argv[6]) == "multi-srgb");
     const bool mip_linear = argc == 7 && std::string(argv[6]) == "mip-linear";
     const bool srgb = argc == 7 && (std::string(argv[6]) == "srgb" || std::string(argv[6]) == "srgb-values");
-    const bool min_mag = argc == 7 && (std::string(argv[6]) == "min-mag" || srgb);
+    const bool fetch_query = argc == 7 && std::string(argv[6]) == "fetch-query";
+    const bool min_mag = argc == 7 && (std::string(argv[6]) == "min-mag" || srgb || fetch_query);
     const bool mips = argc == 7 && (std::string(argv[6]) == "mips" || mip_linear || min_mag);
     if (argc != 6 && !mips) throw std::runtime_error("expected rgen.spv rmiss.spv numeric.csv case-limit inject-mismatch");
-    return run(argv[1], argv[2], argv[3], std::stoul(argv[4]), std::string(argv[5]) == "1", mips, mip_linear, min_mag,srgb,argc == 7 && std::string(argv[6]) == "srgb-values");
+    return run(argv[1], argv[2], argv[3], std::stoul(argv[4]), std::string(argv[5]) == "1", mips, mip_linear, min_mag,srgb,argc == 7 && std::string(argv[6]) == "srgb-values",fetch_query,std::string(argv[5]) == "2");
   } catch (const std::exception &error) {
     std::cerr << "FAIL " << error.what() << std::endl;
     return 1;

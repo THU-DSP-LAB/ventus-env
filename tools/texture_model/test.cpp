@@ -505,6 +505,64 @@ void srgb() {
   }
 }
 
+void fetch_and_queries() {
+  for (auto format : {Format::RGBA8_UNORM,Format::BGRA8_UNORM,
+                      Format::RGBA8_SRGB,Format::BGRA8_SRGB})
+    for (auto size : {std::array<unsigned,2>{5,3},{1,8},{8,1},{1,1},{256,1}}) {
+      Image image{format,{}, {}};
+      unsigned w=size[0],h=size[1];
+      for (;;) {
+        auto part=make_image(w,h,format,7,3);
+        auto level=part.levels[0];level.offset+=image.data.size();
+        image.data.insert(image.data.end(),part.data.begin(),part.data.end());
+        image.levels.push_back(level);
+        if (w==1 && h==1) break;
+        w=std::max(1U,w/2);h=std::max(1U,h/2);
+      }
+      for (unsigned base=0;base<image.levels.size();++base)
+        for (unsigned count=1;count<=image.levels.size()-base;++count) {
+          const View view{base,count};
+          expect(texture_query_levels(image,view)==count,"levels from view, independent of sampler");
+          for (unsigned lod=0;lod<count;++lod) {
+            const auto &level=image.levels[base+lod];
+            expect(texture_size(image,view,lod)==std::array<uint32_t,2>{level.width,level.height},
+                   "exact view-relative mip dimensions");
+            for (unsigned y=0;y<level.height;++y)
+              for (unsigned x=0;x<level.width;++x) {
+                const auto result=texel_fetch(image,view,x,y,lod);
+                Color expected{};
+                const Bytes bytes{static_cast<uint8_t>((x*37+y*71+5)%256),
+                                  static_cast<uint8_t>((x*89+y*11+23)%256),
+                                  static_cast<uint8_t>((x*13+y*53+251)%256),
+                                  static_cast<uint8_t>((x*31+y*29+19)%256)};
+                for (unsigned c=0;c<4;++c) {
+                  const long double e=bytes[c]/255.0L;
+                  expected[c]=static_cast<float>(is_srgb(format) && c<3 ?
+                      (e<=0.04045L ? e/12.92L : std::pow((e+0.055L)/1.055L,2.4L)) : e);
+                }
+                expect_color(result.rgba,expected,"independent integer fetch byte/color oracle");
+                expect(result.mip==base+lod && result.taps.size()==1 && result.taps[0].weight==1,
+                       "fetch one tap in exact mip");
+                expect(result.taps[0].byte_offset==level.offset+y*level.row_pitch+x*4,
+                       "fetch exact padded byte address");
+                expect_color(result.rgba,sample_lod(image,view,{},(x+0.5)/level.width,
+                             (y+0.5)/level.height,lod).rgba,"fetch vs nearest at valid center");
+              }
+          }
+          for (int32_t lod : {-1,static_cast<int32_t>(count),std::numeric_limits<int32_t>::max()}) {
+            rejected([&]{texture_size(image,view,lod);},"query illegal mip");
+            rejected([&]{texel_fetch(image,view,0,0,lod);},"fetch illegal mip, no sampler clamp");
+          }
+          rejected([&]{texel_fetch(image,view,-1,0,0);},"fetch negative x, no wrapping");
+          rejected([&]{texel_fetch(image,view,0,-1,0);},"fetch negative y");
+          rejected([&]{texel_fetch(image,view,image.levels[base].width,0,0);},"fetch past width");
+          rejected([&]{texel_fetch(image,view,0,image.levels[base].height,0);},"fetch past height");
+        }
+      rejected([&]{texture_query_levels(image,{0,0});},"query invalid view");
+      rejected([&]{texture_size(image,{static_cast<uint32_t>(image.levels.size()),1},0);},"size invalid view");
+    }
+}
+
 void invalid_inputs() {
   const auto image = four_colors();
   for (double invalid : {std::numeric_limits<double>::infinity(),
@@ -559,7 +617,7 @@ void invalid_inputs() {
 } // namespace
 
 int main() {
-  const std::array<std::pair<const char *, void (*)()>, 9> suites{{
+  const std::array<std::pair<const char *, void (*)()>, 10> suites{{
       {"hand-calculated filtering and seams", hand_calculated},
       {"negative UV, boundaries and huge finite UV", negative_and_boundary_coordinates},
       {"all 256 UNORM values in both formats", all_unorm_values},
@@ -568,6 +626,7 @@ int main() {
       {"mip-linear/trilinear independent oracle and trace", mip_linear},
       {"independent min/mag selection before view clamp", min_mag},
       {"sRGB decoding before filtering and unchanged alpha", srgb},
+      {"integer texel fetch and view-relative property queries", fetch_and_queries},
       {"invalid inputs and storage arithmetic", invalid_inputs}}};
   try {
     for (const auto &suite : suites) {

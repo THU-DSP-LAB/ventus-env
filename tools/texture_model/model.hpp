@@ -99,5 +99,12 @@ Result sample_level(const Image &image, std::uint32_t mip,
 // levels after sampler/view clamps; no LOD bias is modeled.
 Result sample_lod(const Image &image, View view, const Sampling &sampling,
                   double u, double v, double lod, LodRange range = {});
+// Integer operations use relative view LOD and never consult a sampler.
+// Coordinates and LOD must be in range; invalid input throws.
+Result texel_fetch(const Image &image, View view, std::int32_t x,
+                   std::int32_t y, std::int32_t lod);
+std::array<std::uint32_t, 2> texture_size(const Image &image, View view,
+                                          std::int32_t lod);
+std::uint32_t texture_query_levels(const Image &image, View view);
 
 } // namespace ventus::texture

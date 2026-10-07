@@ -50,13 +50,11 @@ std::uint32_t address(std::int64_t i, std::uint32_t extent,
   return static_cast<std::uint32_t>(wrapped);
 }
 
-Tap read(const Image &image, const Level &level, const Sampling &sampling,
-         std::int64_t raw_x, std::int64_t raw_y, double weight) {
+Tap read_at(const Image &image, const Level &level, std::uint32_t x,
+            std::uint32_t y, double weight) {
   Tap tap{};
-  tap.raw_x = raw_x;
-  tap.raw_y = raw_y;
-  tap.x = address(raw_x, level.width, sampling.address_u);
-  tap.y = address(raw_y, level.height, sampling.address_v);
+  tap.raw_x = tap.x = x;
+  tap.raw_y = tap.y = y;
   tap.byte_offset = level.offset + tap.y * level.row_pitch + tap.x * 4ULL;
   tap.weight = weight;
   // Byte reads work at arbitrary host alignment and do not assume endianness.
@@ -72,6 +70,21 @@ Tap read(const Image &image, const Level &level, const Sampling &sampling,
     }
   }
   return tap;
+}
+
+Tap read(const Image &image, const Level &level, const Sampling &sampling,
+         std::int64_t raw_x, std::int64_t raw_y, double weight) {
+  auto tap = read_at(image, level, address(raw_x, level.width, sampling.address_u),
+                     address(raw_y, level.height, sampling.address_v), weight);
+  tap.raw_x = raw_x;
+  tap.raw_y = raw_y;
+  return tap;
+}
+
+void validate_view(const Image &image, View view) {
+  require(view.level_count > 0 && view.base_mip < image.levels.size() &&
+              view.level_count <= image.levels.size() - view.base_mip,
+          "view mip range outside image");
 }
 
 Result sample_validated(const Image &image, std::uint32_t mip,
@@ -160,9 +173,7 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
                   double u, double v, double lod, LodRange range) {
   validate(image);
   check_filters(sampling);
-  require(view.level_count > 0 && view.base_mip < image.levels.size() &&
-              view.level_count <= image.levels.size() - view.base_mip,
-          "view mip range outside image");
+  validate_view(image, view);
   require(std::isfinite(lod), "LOD must be finite");
   require(std::isfinite(range.min) && std::isfinite(range.max) &&
               range.min >= 0 && range.min <= range.max,
@@ -201,6 +212,36 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
   result.input_lod = lod;
   result.sampler_lod = clamped;
   result.clamped_lod = relative;
+  return result;
+}
+
+std::uint32_t texture_query_levels(const Image &image, View view) {
+  validate(image);
+  validate_view(image, view);
+  return view.level_count;
+}
+
+std::array<std::uint32_t, 2> texture_size(const Image &image, View view,
+                                         std::int32_t lod) {
+  texture_query_levels(image, view);
+  require(lod >= 0 && static_cast<std::uint32_t>(lod) < view.level_count,
+          "integer LOD outside view");
+  const auto &level = image.levels[view.base_mip + lod];
+  return {level.width, level.height};
+}
+
+Result texel_fetch(const Image &image, View view, std::int32_t x,
+                   std::int32_t y, std::int32_t lod) {
+  const auto size = texture_size(image, view, lod);
+  require(x >= 0 && y >= 0 && static_cast<std::uint32_t>(x) < size[0] &&
+              static_cast<std::uint32_t>(y) < size[1], "integer coordinate outside mip");
+  Result result;
+  result.mip = result.mip_upper = view.base_mip + lod;
+  auto tap = read_at(image, image.levels[result.mip], x, y, 1);
+  tap.mip = result.mip;
+  result.rgba = tap.color;
+  result.taps.push_back(tap);
+  result.input_lod = lod;
   return result;
 }
 

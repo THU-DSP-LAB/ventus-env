@@ -55,13 +55,14 @@ def run(args, compiler: str) -> int:
     linear_check = args.action == "gpu-mip-linear-check"
     min_mag = args.action == "gpu-min-mag"
     srgb = args.action in ("gpu-srgb", "gpu-srgb-values", "gpu-multi-srgb")
+    fetch_query = args.action == "gpu-fetch-query"
     srgb_values = args.action == "gpu-srgb-values"
     multi_srgb = args.action == "gpu-multi-srgb"
     multi_min_mag = args.action == "gpu-multi-min-mag"
     multi_linear = args.action == "gpu-multi-linear"
     multi = args.action.startswith("gpu-multi")
-    mips = args.action == "gpu-mips" or linear_check or min_mag or (srgb and not multi_srgb)
-    rgen_name = "sample_multi.rgen" if multi else "sample_mip.rgen" if mips else "sample.rgen"
+    mips = args.action == "gpu-mips" or linear_check or min_mag or (srgb and not multi_srgb) or fetch_query
+    rgen_name = "sample_fetch.rgen" if fetch_query else "sample_multi.rgen" if multi else "sample_mip.rgen" if mips else "sample.rgen"
     for stage in ("rgen", "rmiss"):
         with (output / f"compile-{stage}.log").open("w") as log:
             subprocess.run([glslang, "-V", "--target-env", "vulkan1.2",
@@ -95,9 +96,9 @@ def run(args, compiler: str) -> int:
                                       str(root / "llvm/build/lib"), env.get("LD_LIBRARY_PATH", "")]),
     })
     command = [str(executable), str(output / "sample.rgen.spv"), str(output / "sample.rmiss.spv"),
-               str(output / "numeric.csv"), str(args.case_limit), str(int(args.inject_mismatch))]
+               str(output / "numeric.csv"), str(args.case_limit), str(2 if args.inject_query_mismatch else int(args.inject_mismatch))]
     if mips:
-        command.append("srgb-values" if srgb_values else "srgb" if srgb else "min-mag" if min_mag else "mip-linear" if linear_check else "mips")
+        command.append("fetch-query" if fetch_query else "srgb-values" if srgb_values else "srgb" if srgb else "min-mag" if min_mag else "mip-linear" if linear_check else "mips")
     if multi:
         command.append("multi-srgb" if multi_srgb else "multi-min-mag" if multi_min_mag else "multi-linear" if multi_linear else "multi")
     checks_only = args.action == "gpu-checks"
@@ -109,7 +110,7 @@ def run(args, compiler: str) -> int:
             "offset": "textureLodOffset(source, requests.uv[i], 0.0, ivec2(1, 0))",
             "gradients": "textureGrad(source, requests.uv[i], vec2(1), vec2(1))",
             "gather": "textureGather(source, requests.uv[i])",
-            "texel-fetch": "texelFetch(source, ivec2(0), 0)",
+            "texel-fetch-offset": "texelFetchOffset(source, ivec2(0), 0, ivec2(1, 0))",
             "projected": "textureProjLod(source, vec3(requests.uv[i], 2), 0.0)",
         }
         variants = {name: shader_source.replace(original, value) for name, value in variants.items()}
@@ -163,6 +164,10 @@ def run(args, compiler: str) -> int:
             errors.append("numeric coverage counts are incomplete")
         if srgb and summary.get("format_checks") != "18":
             errors.append("sRGB/UNORM format feature and unsupported usage checks incomplete")
+        if fetch_query and (summary.get("format_checks") != "18" or
+                            summary.get("query_components") != str(args.case_limit * 64 * 6) or
+                            summary.get("query_failed") != "0"):
+            errors.append("fetch/query format coverage or exact property comparison failed")
         if multi:
             if summary.get("mixed_results") != str(args.case_limit * 128):
                 errors.append("mixed-result coverage incomplete")
@@ -190,6 +195,8 @@ def run(args, compiler: str) -> int:
         profile = "Vulkan V5 megakernel to Spike; 2D mip views, dynamic explicit LOD, " + filters
         if srgb:
             profile = "Vulkan V5 megakernel to Spike; RGBA/BGRA sRGB; " + ("all256 byte codes at texel centers" if srgb_values else "four min/mag combinations and both mip filters, view/address/clamp/upload")
+        if fetch_query:
+            profile = "Vulkan V5 megakernel to Spike; legal integer fetch, exact view-relative dimensions/level queries, four UNORM/sRGB formats, irrelevant sampler changes"
     else:
         profile = "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag"
     manifest = {
@@ -198,17 +205,19 @@ def run(args, compiler: str) -> int:
         "readback": "direct SSBO and GLSL buffer-reference stores to coherent host-visible buffers",
         "summary": summary, "errors": errors, "timeout": timeout,
         "injected_mismatch": args.inject_mismatch, "checked_frontier": checked_frontier,
+        "injected_query_mismatch": args.inject_query_mismatch,
         "command": command,
         "runtime_environment": {name: value for name, value in env.items()
                                 if name.startswith(("VENTUS_VK_", "VK_DRIVER_", "VK_ICD_"))},
         "loaded_libraries": [str(path) for path in libraries],
         "binary_sha256": {name: digest(path) for name, path in paths.items()},
         "source_sha256": {name: digest(source / name) for name in
-                          ("model.hpp", "model.cpp", "gpu.cpp", "gpu.py", "sample.rgen", "sample_mip.rgen", "sample_multi.rgen", "sample.rmiss")},
+                          ("model.hpp", "model.cpp", "gpu.cpp", "gpu.py", "sample.rgen", "sample_mip.rgen", "sample_multi.rgen", "sample_fetch.rgen", "sample.rmiss")},
         "entrypoint_sha256": digest(root / "tools/texture_model.py"),
         "rejection_shader_sha256": {path.name: digest(path) for path in bad_paths},
         "elf_sha256": {path.name: digest(path) for path in elf_paths},
         "numeric_csv_sha256": digest(output / "numeric.csv") if (output / "numeric.csv").exists() else None,
+        "query_csv_sha256": digest(output / "numeric.csv.queries.csv") if (output / "numeric.csv.queries.csv").exists() else None,
     }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     if match:

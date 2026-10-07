@@ -18,23 +18,26 @@ import tempfile
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Standalone C++ texture functional model")
-    parser.add_argument("action", choices=("test", "demo", "gpu", "gpu-checks", "gpu-mips", "gpu-mip-linear-check", "gpu-multi", "gpu-multi-linear", "gpu-min-mag", "gpu-multi-min-mag", "gpu-srgb", "gpu-srgb-values", "gpu-multi-srgb"))
+    parser.add_argument("action", choices=("test", "demo", "gpu", "gpu-checks", "gpu-mips", "gpu-mip-linear-check", "gpu-multi", "gpu-multi-linear", "gpu-min-mag", "gpu-multi-min-mag", "gpu-srgb", "gpu-srgb-values", "gpu-multi-srgb", "gpu-fetch-query"))
     parser.add_argument("--sanitize", action="store_true", help="enable address/UB sanitizers")
     parser.add_argument("--cxx", default="c++", help="host C++17 compiler executable")
     parser.add_argument("--mesa-build", type=Path, help="local Mesa build directory for gpu")
     parser.add_argument("--out-dir", type=Path, help="empty artifact directory for gpu")
-    parser.add_argument("--case-limit", type=int, default=None, help="cases (default: 180 LOD0 / 360 mip / 432 multi-binding / 1440 min-mag or sRGB / 144 sRGB-values)")
+    parser.add_argument("--case-limit", type=int, default=None, help="cases (default: 180 LOD0 / 360 mip / 432 multi-binding / 1440 min-mag or sRGB / 144 sRGB-values / 2880 fetch-query)")
     parser.add_argument("--timeout", type=float, default=900, help="gpu runtime timeout in seconds")
     parser.add_argument("--inject-mismatch", action="store_true", help="gpu checker negative control; must fail")
+    parser.add_argument("--inject-query-mismatch", action="store_true", help="fetch/query checker negative control; must fail")
     args = parser.parse_args()
     compiler = shutil.which(args.cxx)
     if compiler is None:
         parser.error(f"host compiler not found: {args.cxx}")
-    maximum = 144 if args.action == "gpu-srgb-values" else 1440 if args.action in ("gpu-min-mag", "gpu-srgb") else 432 if args.action.startswith("gpu-multi") else 360 if args.action in ("gpu-mips", "gpu-mip-linear-check") else 180
+    maximum = 2880 if args.action == "gpu-fetch-query" else 144 if args.action == "gpu-srgb-values" else 1440 if args.action in ("gpu-min-mag", "gpu-srgb") else 432 if args.action.startswith("gpu-multi") else 360 if args.action in ("gpu-mips", "gpu-mip-linear-check") else 180
     if args.case_limit is None:
         args.case_limit = maximum
     if args.case_limit < 1 or args.case_limit > maximum or args.timeout <= 0:
         parser.error("case-limit exceeds selected profile and timeout must be positive")
+    if args.inject_query_mismatch and (args.action != "gpu-fetch-query" or args.inject_mismatch):
+        parser.error("inject-query-mismatch requires gpu-fetch-query and excludes inject-mismatch")
     if args.action.startswith("gpu"):
         if args.sanitize:
             parser.error("--sanitize applies to standalone host test/demo only")

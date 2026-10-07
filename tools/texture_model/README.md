@@ -336,3 +336,21 @@ Compiler内部以低7位保存binding slot、高位保存element的32bit token�
 最终验收：长度1/2/4的所有合法常量下标分别验证combined与separate，三种长度的fetch/query也完整通过；另有相邻数组及跨binding双元素copy验证。每个完整multi profile为432配置、663,552颜色分量，每个fetch profile为6,720配置、3,440,640颜色分量和2,580,480精确查询分量，均零差异，最大颜色误差1.192092896e-7。共65个有效命令（含主目录补验）符合预期，其中53正向、12比较器负向；范围检查40项通过，host12组1,375,170检查和隔离/主目录unit通过。Pool已满反例在修复前失败、修复后输出NULL与free/reset/reallocation检查通过。原any-hit图像在隔离/主目录保持原SHA256。LLVM未修改，18项既有失败未处理。
 
 原array-separate-4-1执行期间host测试源码发生更新，导致manifest源码快照与已编译程序不一致；该次不计入有效验收，保留诊断证据，并以array-separate-4-1-replay重新执行通过。最终状态、命令、manifest/CSV/LLVM/ELF及失败反例保存在 `artifacts/texture_model/constant-array-implementation/verification.json`。Mesa本地实现提交为2948af7。下一切片是F09动态一致索引；本步不提前声明它已支持。
+
+F09 adds `gpu-multi-uniform`, `gpu-multi-uniform-separate`, and
+`gpu-fetch-uniform`, using the same array arguments. One pipeline/retained ELF
+loads dispatch-wide push-constant indices; image and sampler indices change
+across dispatches (samplers use the reverse index). Multi phase6 retains phase5
+selectors for the unchanged-state redispatch. The manifests retain per-index
+counts, queried/enabled core `shaderSampledImageArrayDynamicIndexing`, SPIR-V
+loads/access chains and LLVM dynamic descriptor addressing. The nonuniform
+feature, runtime arrays, partially bound and variable count remain disabled.
+
+`--inject-index-mismatch` pins the pushed GPU index to zero while retaining the
+intended CPU selection and must fail for the multi/fetch length4 profiles.
+`gpu-checks` retains40 checks; the three array rejection cases now explicitly
+mark combined, separate image and sampler indices NonUniform. Unmarked actual
+nonuniform indexing is invalid usage rather than a required compiler diagnosis.
+Evidence is retained under `artifacts/texture_model/uniform-index-implementation/`.
+This remains a bounded RV32 Spike software profile, not full Vulkan conformance
+or a texture hardware ISA/ABI.

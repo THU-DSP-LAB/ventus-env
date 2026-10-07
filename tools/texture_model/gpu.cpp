@@ -81,6 +81,9 @@ public:
   VkDescriptorSet sampler_set = VK_NULL_HANDLE;
   bool separate = false, samplerless = false;
   unsigned array_length = 1, array_index = 0, array_binding = 2;
+  bool uniform_index = false;
+  unsigned initial_array_index = 0;
+  std::array<unsigned, 4> index_counts{};
   bool array_mode = false, image_a_initialized = false, image_b_initialized = false;
   bool sampler_a_initialized = false, sampler_b_initialized = false, copy_elements = false;
   unsigned element_writes = 0, element_copies = 0, consecutive_copies = 0;
@@ -138,6 +141,7 @@ public:
   }
 
   void initialize() {
+    uniform_index = std::getenv("VENTUS_TEXTURE_UNIFORM_INDEX") != nullptr;
     VkApplicationInfo application{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     application.pApplicationName = "ventus-texture-model-comparison";
     application.apiVersion = VK_API_VERSION_1_2;
@@ -183,6 +187,23 @@ public:
     VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     VkPhysicalDeviceFeatures core_features{};
     core_features.shaderInt64 = VK_TRUE;
+    if (uniform_index) {
+      VkPhysicalDeviceFeatures features{};
+      vkGetPhysicalDeviceFeatures(physical, &features);
+      VkPhysicalDeviceDescriptorIndexingFeatures indexing{
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
+      VkPhysicalDeviceFeatures2 features2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+      features2.pNext = &indexing;
+      vkGetPhysicalDeviceFeatures2(physical, &features2);
+      if (!features.shaderSampledImageArrayDynamicIndexing ||
+          !features2.features.shaderSampledImageArrayDynamicIndexing ||
+          indexing.shaderSampledImageArrayNonUniformIndexing || indexing.runtimeDescriptorArray ||
+          indexing.descriptorBindingPartiallyBound || indexing.descriptorBindingVariableDescriptorCount ||
+          features.shaderStorageImageArrayDynamicIndexing || features.shaderStorageBufferArrayDynamicIndexing ||
+          features.shaderUniformBufferArrayDynamicIndexing)
+        throw std::runtime_error("unexpected F09 feature boundary");
+      core_features.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
+    }
     device_info.pEnabledFeatures = &core_features;
     device_info.pNext = &rt;
     device_info.queueCreateInfoCount = 1;
@@ -190,6 +211,10 @@ public:
     device_info.enabledExtensionCount = 3;
     device_info.ppEnabledExtensionNames = extensions;
     check(vkCreateDevice(physical, &device_info, nullptr, &device), "vkCreateDevice");
+    if (uniform_index)
+      std::cout << "FEATURE sampled_dynamic_query=1 sampled_dynamic_query2=1 sampled_dynamic_enabled=1"
+                   " sampled_nonuniform=0 runtime_array=0 partially_bound=0 variable_count=0"
+                   " storage_dynamic=0 uniform_buffer_dynamic=0" << std::endl;
     vkGetDeviceQueue(device, family, 0, &queue);
     create_as = proc<PFN_vkCreateAccelerationStructureKHR>("vkCreateAccelerationStructureKHR");
     destroy_as = proc<PFN_vkDestroyAccelerationStructureKHR>("vkDestroyAccelerationStructureKHR");
@@ -394,6 +419,7 @@ public:
       array_mode = true;
       array_length = std::stoul(length);
       array_index = std::stoul(std::getenv("VENTUS_TEXTURE_ARRAY_INDEX"));
+      initial_array_index = array_index;
       array_binding = std::stoul(std::getenv("VENTUS_TEXTURE_ARRAY_BINDING"));
     }
     if (separate) types[2] = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
@@ -437,6 +463,11 @@ public:
     VkPipelineLayoutCreateInfo pipeline_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pipeline_info.setLayoutCount = sampler_layout ? 2 : 1;
     pipeline_info.pSetLayouts = layouts;
+    const VkPushConstantRange selectors{VK_SHADER_STAGE_RAYGEN_BIT_KHR, 0, 16};
+    if (uniform_index) {
+      pipeline_info.pushConstantRangeCount = 1;
+      pipeline_info.pPushConstantRanges = &selectors;
+    }
     check(vkCreatePipelineLayout(device, &pipeline_info, nullptr, &pipeline_layout), "create pipeline layout");
     VkPipelineShaderStageCreateInfo stages[2]{};
     VkRayTracingShaderGroupCreateInfoKHR groups[2]{};
@@ -534,10 +565,32 @@ public:
     std::cout << "LIFECYCLE free_reallocate=1 reset_reallocate=1 failed_allocate_null=1" << std::endl;
   }
 
+  void select_array_index(unsigned case_number, bool multi) {
+    if (!uniform_index) return;
+    // Phase 6 repeats phase 5 without descriptor writes or selector changes.
+    const unsigned selector_case = case_number - (multi && case_number % 8 == 6 ? 1U : 0U);
+    array_index = (initial_array_index + selector_case) % array_length;
+    ++index_counts[array_index];
+  }
+
+  void print_uniform_profile() {
+    if (!uniform_index) return;
+    std::cout << "UNIFORM pipelines=1";
+    for (unsigned i = 0; i < array_length; ++i)
+      std::cout << " index" << i << '=' << index_counts[i];
+    std::cout << std::endl;
+  }
+
   void bind_descriptors() {
     const VkDescriptorSet sets[]{descriptor_set, sampler_set};
     vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
         pipeline_layout, 0, sampler_set ? 2 : 1, sets, 0, nullptr);
+    if (uniform_index) {
+      const unsigned pushed_index = std::getenv("VENTUS_TEXTURE_INJECT_INDEX_MISMATCH") ? 0 : array_index;
+      const std::array<std::uint32_t, 4> selectors{pushed_index, array_length - 1 - pushed_index, 0, 0};
+      vkCmdPushConstants(command, pipeline_layout, VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                         0, sizeof(selectors), selectors.data());
+    }
   }
 
   void image_descriptor(VkDescriptorSet set, VkDescriptorType type, unsigned binding,
@@ -1031,6 +1084,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
           for (unsigned filter_index = 0; filter_index < (min_mag ? 8U : 2U); ++filter_index) {
             if (border_mode && u_mode!=AddressMode::ClampToBorder && v_mode!=AddressMode::ClampToBorder) continue;
             if (cases == limit) goto finished;
+            experiment.select_array_index(cases, false);
             const auto mag = static_cast<Filter>(min_mag ? (filter_index / 2) % 2 : filter_index);
             const auto min = static_cast<Filter>(min_mag ? filter_index % 2 : filter_index);
             const bool linear = mip_linear || (min_mag && filter_index >= 4);
@@ -1147,6 +1201,7 @@ finished:
     if (!query_csv) throw std::runtime_error("cannot write query CSV");
   }
   experiment.array_lifecycle_checks();
+  experiment.print_uniform_profile();
   loaded_libraries();
   std::cout << "PROFILE separate=" << experiment.separate
             << " descriptor_sets=" << (experiment.sampler_set ? 2 : 1)
@@ -1288,6 +1343,7 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
           const auto sampler_b = experiment.sampler(sampling_b,range_b,sampling_b.mip_filter == MipFilter::Linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
           for (unsigned phase = 0; phase < phases.size(); ++phase) {
             if (cases == limit) goto multi_finished;
+            experiment.select_array_index(cases, true);
             const bool swap_images = phase == 1 || phase == 2;
             const bool swap_samplers = phase == 2 || phase == 3;
             const bool shared_sampler = phase == 4;
@@ -1383,6 +1439,7 @@ multi_finished:
   csv.flush();
   if (!csv) throw std::runtime_error("cannot write multi-binding CSV");
   experiment.array_lifecycle_checks();
+  experiment.print_uniform_profile();
   loaded_libraries();
   std::cout << "PROFILE separate=" << experiment.separate
             << " descriptor_sets=" << (experiment.sampler_set ? 2 : 1)

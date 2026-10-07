@@ -52,13 +52,14 @@ def run(args, compiler: str) -> int:
         raise RuntimeError(f"output directory must be empty to exclude stale evidence: {output}")
     elf_dir = output / "elf"
     elf_dir.mkdir()
-    arrays = args.action in ("gpu-multi-array", "gpu-multi-array-separate", "gpu-fetch-array")
-    separate = args.action in ("gpu-separate", "gpu-fetch-separate", "gpu-multi-separate", "gpu-multi-array-separate", "gpu-fetch-array")
+    uniform = args.action in ("gpu-multi-uniform", "gpu-multi-uniform-separate", "gpu-fetch-uniform")
+    arrays = uniform or args.action in ("gpu-multi-array", "gpu-multi-array-separate", "gpu-fetch-array")
+    separate = args.action in ("gpu-separate", "gpu-fetch-separate", "gpu-multi-separate", "gpu-multi-array-separate", "gpu-fetch-array", "gpu-multi-uniform-separate", "gpu-fetch-uniform")
     linear_check = args.action == "gpu-mip-linear-check"
     min_mag = args.action == "gpu-min-mag"
     srgb = args.action in ("gpu-srgb", "gpu-srgb-values", "gpu-multi-srgb")
-    fetch_query = args.action in ("gpu-fetch-query", "gpu-fetch-swizzle", "gpu-fetch-border", "gpu-fetch-separate", "gpu-fetch-array")
-    border_mode = args.action in ("gpu-border", "gpu-fetch-border", "gpu-multi-border", "gpu-separate", "gpu-fetch-separate", "gpu-multi-separate", "gpu-multi-array", "gpu-multi-array-separate", "gpu-fetch-array")
+    fetch_query = args.action in ("gpu-fetch-query", "gpu-fetch-swizzle", "gpu-fetch-border", "gpu-fetch-separate", "gpu-fetch-array", "gpu-fetch-uniform")
+    border_mode = uniform or args.action in ("gpu-border", "gpu-fetch-border", "gpu-multi-border", "gpu-separate", "gpu-fetch-separate", "gpu-multi-separate", "gpu-multi-array", "gpu-multi-array-separate", "gpu-fetch-array", "gpu-multi-uniform-separate", "gpu-fetch-uniform")
     view_swizzle = args.action in ("gpu-swizzle", "gpu-fetch-swizzle", "gpu-multi-swizzle") or border_mode
     srgb_values = args.action == "gpu-srgb-values"
     multi_srgb = args.action == "gpu-multi-srgb"
@@ -76,14 +77,16 @@ def run(args, compiler: str) -> int:
         for name in names:
             text = text.replace(f"{name};", f"{name}[{args.array_length}];")
             text = re.sub(r"\b" + name + r"\b(?!\[|;)",
-                          name + f"[{args.array_index}]", text)
+                          name + ("[selectors.image_index]" if uniform else f"[{args.array_index}]"), text)
         if separate and not fetch_query:
             for name in ("state_a", "state_b"):
                 text = text.replace(f"{name};", f"{name}[{args.array_length}];")
                 text = re.sub(r"\b" + name + r"\b(?!\[|;)",
-                              name + f"[{args.array_length - 1 - args.array_index}]", text)
+                              name + ("[selectors.sampler_index]" if uniform else f"[{args.array_length - 1 - args.array_index}]"), text)
         if args.array_binding != 2:
             text = text.replace("binding = 2)", f"binding = {args.array_binding})")
+        if uniform:
+            text = text.replace("void main() {", "layout(push_constant, std430) uniform Selectors { uint image_index; uint sampler_index; } selectors;\nvoid main() {")
         rgen_path = output / "array.rgen"
         rgen_path.write_text(text)
     for stage in ("rgen", "rmiss"):
@@ -91,6 +94,12 @@ def run(args, compiler: str) -> int:
             subprocess.run([glslang, "-V", "--target-env", "vulkan1.2",
                             str(rgen_path if stage == "rgen" else source / "sample.rmiss"), "-o", str(output / f"sample.{stage}.spv")],
                            stdout=log, stderr=subprocess.STDOUT, check=True)
+    if uniform:
+        disassembler = shutil.which("spirv-dis")
+        if not disassembler:
+            raise RuntimeError("spirv-dis is required to retain runtime-index evidence")
+        with (output / "sample.rgen.spvasm").open("w") as stream:
+            subprocess.run([disassembler, str(output / "sample.rgen.spv")], stdout=stream, check=True)
     flags = shlex.split(subprocess.check_output(["pkg-config", "--cflags", "--libs", "vulkan"], text=True))
     executable = output / "compare"
     with (output / "compile-host.log").open("w") as log:
@@ -101,7 +110,7 @@ def run(args, compiler: str) -> int:
     env = os.environ.copy()
     # Exclude inherited alternative kernels, no-op/early-exit and debug profiles.
     for name in list(env):
-        if name.startswith("VENTUS_VK_"):
+        if name.startswith(("VENTUS_VK_", "VENTUS_TEXTURE_")):
             env.pop(name)
     env.update({
         "VK_DRIVER_FILES": str(paths["icd"]), "VK_ICD_FILENAMES": str(paths["icd"]),
@@ -118,6 +127,10 @@ def run(args, compiler: str) -> int:
         "LD_LIBRARY_PATH": ":".join([str(root / "spike/build"), str(paths["driver"].parent),
                                       str(root / "llvm/build/lib"), env.get("LD_LIBRARY_PATH", "")]),
     })
+    if uniform:
+        env["VENTUS_TEXTURE_UNIFORM_INDEX"] = "1"
+    if args.inject_index_mismatch:
+        env["VENTUS_TEXTURE_INJECT_INDEX_MISMATCH"] = "1"
     if arrays:
         env["VENTUS_TEXTURE_ARRAY_LENGTH"] = str(args.array_length)
         env["VENTUS_TEXTURE_ARRAY_INDEX"] = str(args.array_index)
@@ -141,9 +154,10 @@ def run(args, compiler: str) -> int:
             "projected": "textureProjLod(source, vec3(requests.uv[i], 2), 0.0)",
         }
         variants = {name: shader_source.replace(original, value) for name, value in variants.items()}
-        variants["dynamic-descriptor-array"] = shader_source.replace("sampler2D source;", "sampler2D source[2];").replace(original, "textureLod(source[i & 1u], requests.uv[i], 0.0)")
-        variants["dynamic-separate-image-array"] = shader_source.replace("uniform sampler2D source;", "uniform texture2D source[2];\nlayout(set = 0, binding = 6) uniform sampler state;").replace(original, "textureLod(sampler2D(source[i & 1u], state), requests.uv[i], 0.0)")
-        variants["nonuniform-descriptor-array"] = shader_source.replace("#version 460", "#version 460\n#extension GL_EXT_nonuniform_qualifier : require").replace("sampler2D source;", "sampler2D source[2];").replace(original, "textureLod(source[nonuniformEXT(i & 1u)], requests.uv[i], 0.0)")
+        nonuniform_source = shader_source.replace("#version 460", "#version 460\n#extension GL_EXT_nonuniform_qualifier : require")
+        variants["nonuniform-descriptor-array"] = nonuniform_source.replace("sampler2D source;", "sampler2D source[2];").replace(original, "textureLod(source[nonuniformEXT(i & 1u)], requests.uv[i], 0.0)")
+        variants["nonuniform-separate-image-array"] = nonuniform_source.replace("uniform sampler2D source;", "uniform texture2D source[2];\nlayout(set = 0, binding = 6) uniform sampler state;").replace(original, "textureLod(sampler2D(source[nonuniformEXT(i & 1u)], state), requests.uv[i], 0.0)")
+        variants["nonuniform-sampler-array"] = nonuniform_source.replace("uniform sampler2D source;", "uniform texture2D source;\nlayout(set = 0, binding = 6) uniform sampler state[2];").replace(original, "textureLod(sampler2D(source, state[nonuniformEXT(i & 1u)]), requests.uv[i], 0.0)")
         for name, value in variants.items():
             path = output / f"reject-{name}.rgen"
             path.write_text(value)
@@ -184,7 +198,10 @@ def run(args, compiler: str) -> int:
     if not summary:
         errors.append("numeric summary is missing")
     if arrays:
-        for field, expected in (("array_length", args.array_length), ("array_index", args.array_index),
+        final_case = args.case_limit - 1
+        selector_case = final_case - int(multi and final_case % 8 == 6)
+        final_index = (args.array_index + selector_case) % args.array_length if uniform else args.array_index
+        for field, expected in (("array_length", args.array_length), ("array_index", final_index),
                                 ("array_binding", args.array_binding)):
             if resources.get(field) != str(expected):
                 errors.append(f"array resource profile {field} mismatch")
@@ -192,6 +209,33 @@ def run(args, compiler: str) -> int:
             errors.append("array descriptor free/reset/reallocation checks missing")
         if multi and args.array_length > 1 and args.case_limit >= 5 and int(resources.get("element_copies", "0")) == 0:
             errors.append("descriptor element copy was not exercised")
+    uniform_profile = {}
+    if uniform:
+        expected_feature = "FEATURE sampled_dynamic_query=1 sampled_dynamic_query2=1 sampled_dynamic_enabled=1 sampled_nonuniform=0 runtime_array=0 partially_bound=0 variable_count=0 storage_dynamic=0 uniform_buffer_dynamic=0"
+        if expected_feature not in text:
+            errors.append("F09 feature query/enable boundary missing")
+        uniform_match = re.search(r"^UNIFORM (.+)$", text, re.MULTILINE)
+        uniform_profile = dict(item.split("=", 1) for item in uniform_match[1].split()) if uniform_match else {}
+        llvm_text = "\n".join(path.read_text() for path in elf_dir.glob("*.emit.ll"))
+        spirv_text = (output / "sample.rgen.spvasm").read_text()
+        uniform_profile["dynamic_spirv"] = bool(re.search(r"OpAccessChain .* %source(?:_[ab])? %\w+", spirv_text) and
+                                                 "OpVariable %_ptr_PushConstant_Selectors PushConstant" in spirv_text)
+        uniform_profile["dynamic_llvm"] = bool(re.search(r"shl i32 %\w+, 7", llvm_text) and
+                                                re.search(r"mul i32 %\w+, 80", llvm_text))
+        uniform_profile["elf_count"] = len(elf_paths)
+        if not uniform_profile["dynamic_spirv"] or (args.array_length > 1 and not uniform_profile["dynamic_llvm"]):
+            errors.append("retained SPIR-V/LLVM lacks runtime descriptor-index evidence")
+        if len(elf_paths) != 1:
+            errors.append("uniform dispatches must reuse exactly one retained ELF")
+        if uniform_profile.get("pipelines") != "1":
+            errors.append("runtime indices must share one compiled pipeline")
+        index_counts = [0] * args.array_length
+        for case in range(args.case_limit):
+            selector_case = case - int(multi and case % 8 == 6)
+            index_counts[(args.array_index + selector_case) % args.array_length] += 1
+        for i, count in enumerate(index_counts):
+            if uniform_profile.get(f"index{i}") != str(count):
+                errors.append(f"runtime index {i} coverage mismatch")
     if checks_only:
         expected_libraries = {paths["mesa"].resolve()}
     if not expected_libraries.issubset(set(libraries)):
@@ -269,23 +313,25 @@ def run(args, compiler: str) -> int:
     else:
         profile = "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag"
     if arrays:
-        profile += "; fixed descriptor arrays with compile-time image/sampler indices and element updates/copies"
+        profile += "; fixed descriptor arrays with " + ("runtime dispatch-uniform push-constant" if uniform else "compile-time") + " image/sampler indices and element updates/copies"
     if separate:
         profile += "; sampled image in set0, sampler in set1 bindings6/7; samplerless layout for fetch/query"
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
         "profile": profile,
         "resource_profile": resources,
+        "uniform_profile": uniform_profile,
         "array_profile": {"binding": args.array_binding, "length": args.array_length, "image_index": args.array_index,
                           "sampler_index": args.array_length - 1 - args.array_index} if arrays else None,
         "rgen_source_sha256": digest(rgen_path),
         "readback": "direct SSBO and GLSL buffer-reference stores to coherent host-visible buffers",
         "summary": summary, "errors": errors, "timeout": timeout,
-        "injected_mismatch": args.inject_mismatch, "checked_frontier": checked_frontier,
+        "injected_mismatch": args.inject_mismatch,
+        "injected_index_mismatch": args.inject_index_mismatch, "checked_frontier": checked_frontier,
         "injected_query_mismatch": args.inject_query_mismatch,
         "command": command,
         "runtime_environment": {name: value for name, value in env.items()
-                                if name.startswith(("VENTUS_VK_", "VK_DRIVER_", "VK_ICD_"))},
+                                if name.startswith(("VENTUS_VK_", "VENTUS_TEXTURE_", "VK_DRIVER_", "VK_ICD_"))},
         "loaded_libraries": [str(path) for path in libraries],
         "binary_sha256": {name: digest(path) for name, path in paths.items()},
         "source_sha256": {name: digest(source / name) for name in

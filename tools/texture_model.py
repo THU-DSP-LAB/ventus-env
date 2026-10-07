@@ -23,6 +23,11 @@ def main() -> int:
     parser.add_argument("--array-binding", type=int, choices=(2, 12), default=2)
     parser.add_argument("--array-length", type=int, choices=(1, 2, 4), default=4)
     parser.add_argument("--array-index", type=int, default=None)
+    parser.add_argument("--cube", action="store_true", help="sample a six-face Cube view with explicit LOD")
+    parser.add_argument("--cube-count", type=int, choices=(1,2), default=1, help="number of cubes stored as layer planes; shader view selects one cube")
+    parser.add_argument("--cube-base-layer", type=int, help="explicit start of the six-plane cube view (may be nonmultiple of six)")
+    parser.add_argument("--inject-cube-seam-mismatch", action="store_true", help="cube negative control: oracle intentionally clamps taps to one face")
+    parser.add_argument("--inject-cube-direction-mismatch", action="store_true", help="cube negative control: shader uses a constant +Z direction")
     parser.add_argument("--image-layers", type=int, choices=(1,2,4), help="2D array image layer profile, independent of descriptor array length")
     parser.add_argument("--linear-image", action="store_true", help="use LINEAR sampled array images and check mapped subresource layouts")
     parser.add_argument("--single-layer-view", action="store_true", help="sample a 2D view of one layer of the array image")
@@ -45,6 +50,12 @@ def main() -> int:
     parser.add_argument("--inject-mismatch", action="store_true", help="gpu checker negative control; must fail")
     parser.add_argument("--inject-query-mismatch", action="store_true", help="fetch/query checker negative control; must fail")
     args = parser.parse_args()
+    if args.cube and (args.action in ("test","demo","gpu","gpu-checks","gpu-srgb-values") or args.action.startswith("gpu-fetch") or args.image_layers is not None or args.single_layer_view or args.linear_image or args.gradients or args.offset is not None):
+        parser.error("cube requires a mip-capable sampling GPU profile; array/gradient/offset/fetch options are separate")
+    if args.cube_base_layer is not None and (not args.cube or args.cube_base_layer<0 or args.cube_base_layer+6>args.cube_count*6):
+        parser.error("cube-base-layer must select six planes within the cube image")
+    if (args.cube_count!=1 or args.inject_cube_direction_mismatch or args.inject_cube_seam_mismatch) and not args.cube:
+        parser.error("cube-count/direction mismatch require cube")
     if args.image_layers is not None and args.action in ("test","demo","gpu-checks","gpu","gpu-srgb-values"):
         parser.error("image-layers requires a mip-capable sampling/fetch GPU profile")
     if args.linear_image and args.image_layers is None:
@@ -85,7 +96,7 @@ def main() -> int:
         args.case_limit = maximum
     if args.case_limit < 1 or args.case_limit > maximum or args.timeout <= 0:
         parser.error("case-limit exceeds selected profile and timeout must be positive")
-    if args.inject_query_mismatch and (args.action not in ("gpu-fetch-query", "gpu-fetch-swizzle", "gpu-fetch-border", "gpu-fetch-separate", "gpu-fetch-array", "gpu-fetch-uniform", "gpu-fetch-nonuniform") or args.inject_mismatch):
+    if args.inject_query_mismatch and ((args.action not in ("gpu-fetch-query", "gpu-fetch-swizzle", "gpu-fetch-border", "gpu-fetch-separate", "gpu-fetch-array", "gpu-fetch-uniform", "gpu-fetch-nonuniform") and not (args.cube and not args.action.startswith("gpu-multi"))) or args.inject_mismatch):
         parser.error("inject-query-mismatch requires a fetch/query profile and excludes inject-mismatch")
     if args.action.startswith("gpu"):
         if args.sanitize:

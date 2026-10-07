@@ -65,6 +65,7 @@ struct Texture {
   VkImageView view;
   VkDeviceMemory memory;
   unsigned layers = 1;
+  bool cube_view = false;
   bool array_view = false;
   bool linear = false;
 };
@@ -299,19 +300,57 @@ public:
     return result;
   }
 
+  static bool cube() { return std::getenv("VENTUS_TEXTURE_CUBE_COUNT") != nullptr; }
+  static unsigned cube_count() { const auto text=std::getenv("VENTUS_TEXTURE_CUBE_COUNT");return text ? static_cast<unsigned>(std::stoul(text)) : 1; }
   static bool image_array() { return std::getenv("VENTUS_TEXTURE_IMAGE_LAYERS") != nullptr; }
   static unsigned image_layers() {
     const auto text = std::getenv("VENTUS_TEXTURE_IMAGE_LAYERS");
-    return text ? static_cast<unsigned>(std::stoul(text)) : 1;
+    return cube() ? 6*cube_count() : text ? static_cast<unsigned>(std::stoul(text)) : 1;
   }
   static bool array_sampling() { return image_array() && !std::getenv("VENTUS_TEXTURE_SINGLE_LAYER_VIEW"); }
   static View layer_view(View view, unsigned width, unsigned height, unsigned extra = 0) {
-    if (image_array()) {
+    if (cube()) {
+      const auto text=std::getenv("VENTUS_TEXTURE_CUBE_BASE_LAYER");
+      view.base_layer=text ? static_cast<unsigned>(std::stoul(text)) : ((view.base_mip+width+height+extra)%cube_count())*6;
+      view.layer_count=6;
+    } else if (image_array()) {
       view.base_layer = (view.base_mip + width + height + extra) % image_layers();
       view.layer_count = array_sampling() ? image_layers() - view.base_layer : 1;
     }
     return view;
   }
+  static std::array<float,3> cube_direction(unsigned i,bool second=false) {
+    if (second) i=(i*7+23)%64;
+    if (i==54) return {1,1,0};
+    if (i==55) return {1,0,1};
+    if (i==56) return {0,1,1};
+    if (i==57) return {1,std::nextafter(1.f,0.f),0};
+    if (i==58) return {1,std::nextafter(1.f,2.f),0};
+    if (i==59) return {std::numeric_limits<float>::max(),0,-std::numeric_limits<float>::max()};
+    if (i==60) return {std::numeric_limits<float>::denorm_min(),0,std::numeric_limits<float>::denorm_min()};
+    if (i>=61) return i==61 ? std::array<float,3>{1,.96875f,.96875f} : i==62 ? std::array<float,3>{-.96875f,1,.96875f} : std::array<float,3>{.96875f,-.96875f,-1};
+    static const std::array<std::array<float,2>,9> uv{{{0,0},{-.75f,.25f},{.5f,-.5f},{-.96875f,.5f},{.96875f,-.25f},{.25f,-.96875f},{-.5f,.96875f},{-1,-1},{1,1}}};
+    const auto a=uv[i%9][0],b=uv[i%9][1];
+    switch(i/9) {
+    case 0:return {1,-b,-a};case 1:return {-1,-b,a};case 2:return {a,1,b};
+    case 3:return {a,-1,-b};case 4:return {a,-b,1};default:return {-a,-b,-1};
+    }
+  }
+  static std::array<double,3> cube_model_direction(unsigned i,bool second=false) {
+    const auto d=cube_direction(i,second);return {d[0],d[1],d[2]};
+  }
+
+  static Result cube_reference(const Image &image,View view,Sampling state,std::array<double,3> direction,double lod,LodRange range) {
+    auto result=sample_cube_lod(image,view,state,direction,lod,range);
+    if (std::getenv("VENTUS_TEXTURE_INJECT_CUBE_SEAM_MISMATCH")) {
+      state.address_u=state.address_v=AddressMode::ClampToEdge;
+      auto clamp=sample_lod(image,view,state,result.input_u,result.input_v,lod,range,{},result.cube_face);
+      clamp.from_cube=true;clamp.cube_face=result.cube_face;clamp.input_direction=direction;
+      return clamp;
+    }
+    return result;
+  }
+
   static float layer_request(unsigned i, bool second = false) {
     static const std::array<float,16> values{-100,0,0.25f,0.5f,std::nextafter(0.5f,1.f),
       0.75f,1,1.5f,std::nextafter(1.5f,2.f),1.75f,2,2.5f,
@@ -328,6 +367,7 @@ public:
     info.mipLevels = levels;
     const bool sampled = usage & VK_IMAGE_USAGE_SAMPLED_BIT;
     info.arrayLayers = sampled ? image_layers() : 1;
+    info.flags = sampled && cube() ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
     info.samples = VK_SAMPLE_COUNT_1_BIT;
     info.tiling = sampled && std::getenv("VENTUS_TEXTURE_LINEAR_IMAGE") ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL;
     info.usage = usage;
@@ -336,6 +376,7 @@ public:
     texture.linear = info.tiling == VK_IMAGE_TILING_LINEAR;
     texture.layers = info.arrayLayers;
     texture.array_view = sampled && array_sampling();
+    texture.cube_view = sampled && cube();
     check(vkCreateImage(device, &info, nullptr, &texture.handle), "create image");
     VkMemoryRequirements requirements{};
     vkGetImageMemoryRequirements(device, texture.handle, &requirements);
@@ -343,7 +384,7 @@ public:
     check(vkBindImageMemory(device, texture.handle, texture.memory, 0), "bind image");
     VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     view.image = texture.handle;
-    view.viewType = texture.array_view ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    view.viewType = texture.cube_view ? VK_IMAGE_VIEW_TYPE_CUBE : texture.array_view ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
     view.format = format;
     const auto range = sampled ? layer_view(View{base, count},width,height) : View{base,count};
     view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, base, count, range.base_layer, range.layer_count};
@@ -355,7 +396,7 @@ public:
   Texture additional_view(Texture image, VkFormat format, View range) {
     VkImageViewCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     info.image = image.handle;
-    info.viewType = image.array_view ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    info.viewType = image.cube_view ? VK_IMAGE_VIEW_TYPE_CUBE : image.array_view ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
     info.format = format;
     info.components = vk_mapping(range.components);
     info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, range.base_mip, range.level_count, range.base_layer, range.layer_count};
@@ -598,6 +639,15 @@ public:
   }
 
   static std::vector<std::array<float,4>> gradient_inputs(const std::vector<std::array<float,4>> &requests, bool multi = false) {
+    if (cube()) {
+      std::vector<std::array<float,4>> packed;
+      for (unsigned i=0;i<requests.size();++i) {
+        const auto a=cube_direction(i),b=cube_direction(i,true);
+        packed.push_back({a[0],a[1],a[2],requests[i][2]});
+        if (multi) packed.push_back({b[0],b[1],b[2],requests[i][3]});
+      }
+      return packed;
+    }
     if (!gradients() && !(multi && array_sampling())) return requests;
     std::vector<std::array<float,4>> packed;
     for (unsigned i=0;i<requests.size();++i) {
@@ -960,6 +1010,12 @@ void image_view_checks(Experiment &experiment, unsigned &images, unsigned &views
   image_check("storage-array",changed,false);
   changed=info;changed.arrayLayers=2;changed.usage|=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
   image_check("attachment-array",changed,false);
+  changed=info;changed.extent={8,8,1};changed.flags=VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;changed.arrayLayers=6;
+  image_check("cube-six-faces",changed,true);
+  changed.arrayLayers=12;image_check("cube-twelve-planes",changed,true);
+  changed.arrayLayers=5;image_check("cube-fewer-than-six",changed,false);
+  changed.arrayLayers=6;changed.usage|=VK_IMAGE_USAGE_STORAGE_BIT;image_check("cube-storage",changed,false);
+  changed.usage=info.usage|VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;image_check("cube-attachment",changed,false);
   auto texture = experiment.texture(8,4,info.format,info.usage,4,0,4);
   VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   view.image = texture.handle; view.viewType = VK_IMAGE_VIEW_TYPE_2D; view.format = info.format;
@@ -999,6 +1055,26 @@ void image_view_checks(Experiment &experiment, unsigned &images, unsigned &views
   other=view;other.subresourceRange.layerCount=4;view_check("layer-range-outside-image",other,false);
   other=view;other.viewType=VK_IMAGE_VIEW_TYPE_2D;view_check("2d-multiple-layers",other,false);
   vkDestroyImage(experiment.device,array,nullptr);
+  VkImage cube=VK_NULL_HANDLE,unflagged=VK_NULL_HANDLE;
+  changed=info;changed.extent={8,8,1};changed.arrayLayers=12;
+  check(vkCreateImage(experiment.device,&changed,nullptr,&unflagged),"create unflagged square array");
+  view.image=unflagged;view.viewType=VK_IMAGE_VIEW_TYPE_CUBE;
+  view.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,4,0,6};
+  view_check("cube-view-missing-create-flag",view,false);
+  vkDestroyImage(experiment.device,unflagged,nullptr);
+  changed.flags=VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+  check(vkCreateImage(experiment.device,&changed,nullptr,&cube),"create cube range fixture");
+  view.image=cube;view_check("cube-first-six",view,true);
+  other=view;other.subresourceRange.baseArrayLayer=6;view_check("cube-second-six",other,true);
+  other=view;other.subresourceRange.baseArrayLayer=1;view_check("cube-offset-six",other,true);
+  other=view;other.subresourceRange.baseArrayLayer=6;other.subresourceRange.layerCount=VK_REMAINING_ARRAY_LAYERS;
+  view_check("cube-remaining-six",other,true);
+  other=view;other.subresourceRange.layerCount=5;view_check("cube-wrong-face-count",other,false);
+  other=view;other.subresourceRange.layerCount=VK_REMAINING_ARRAY_LAYERS;view_check("cube-remaining-twelve",other,false);
+  other=view;other.viewType=VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;other.subresourceRange.layerCount=12;view_check("cube-array-view",other,false);
+  other=view;other.subresourceRange.baseArrayLayer=7;view_check("cube-range-outside-image",other,false);
+  vkDestroyImage(experiment.device,cube,nullptr);
+
 
 }
 
@@ -1009,7 +1085,8 @@ int profile_checks(const char *rgen, const char *rmiss, int bad_count, char **ba
   VkPhysicalDeviceProperties properties{};
   vkGetPhysicalDeviceProperties(baseline.physical, &properties);
   if (properties.limits.minTexelOffset != min_texel_offset ||
-      properties.limits.maxTexelOffset != max_texel_offset)
+      properties.limits.maxTexelOffset != max_texel_offset ||
+      properties.limits.maxImageDimensionCube != 16384)
     throw std::runtime_error("advertised texel offset limits disagree with software profile");
   sampler_checks(baseline, samplers);
   image_view_checks(baseline, images, views);
@@ -1031,7 +1108,7 @@ int profile_checks(const char *rgen, const char *rmiss, int bad_count, char **ba
     std::cout << "CHECK shader=" << bad_shaders[i] << " result=rejected" << std::endl;
   }
   loaded_libraries();
-  std::cout << "CHECKS samplers=" << samplers << " shaders=" << shaders << " images=" << images << " views=" << views << " limits=2 baseline=pass errors=0" << std::endl;
+  std::cout << "CHECKS samplers=" << samplers << " shaders=" << shaders << " images=" << images << " views=" << views << " limits=3 baseline=pass errors=0" << std::endl;
   return 0;
 }
 
@@ -1092,7 +1169,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
         bool separate = false) {
   Experiment experiment;
   experiment.initialize();
-  const unsigned format_checks = srgb || fetch_query || view_swizzle ? srgb_format_checks(experiment) : 0;
+  const unsigned format_checks = srgb || fetch_query || view_swizzle || Experiment::cube() ? srgb_format_checks(experiment) : 0;
   experiment.empty_tlas();
   experiment.setup_pipeline(rgen, rmiss, false, separate, separate && fetch_query);
   auto uv = requests();
@@ -1127,7 +1204,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   const auto gradient_inputs=Experiment::gradient_inputs(mip_inputs);
   const unsigned input_stride=Experiment::gradients() ? 32 : mips ? 16 : 8;
   auto inputs = experiment.buffer(uv.size() * input_stride, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-  std::memcpy(inputs.map, Experiment::gradients() ? static_cast<const void *>(gradient_inputs.data()) :
+  std::memcpy(inputs.map, (Experiment::gradients() || Experiment::cube()) ? static_cast<const void *>(gradient_inputs.data()) :
       mips ? static_cast<const void *>(mip_inputs.data()) : static_cast<const void *>(uv.data()), uv.size() * input_stride);
   const unsigned output_floats=fetch_query && Experiment::array_sampling() ? 12 : 8;
   auto direct = experiment.buffer(uv.size() * output_floats * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -1144,7 +1221,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   experiment.submit();
   std::ofstream csv(csv_path);
   if (!csv) throw std::runtime_error("cannot open numeric result CSV");
-  csv << "case,path,width,height,format,address_u,address_v,mag_filter,min_filter,selected_filter,sampler_lod,request,u,v,input_lod,view_base,view_count,selected_mip,mip_upper,mip_weight,mip_filter,view_mapping,border_color,sampler_bias,footprint_squared,derived_lod,gradient_v,gradient_dyu,gradient_dyv,channel,reference,gpu,abs_error,input_layer,view_base_layer,view_layer_count,selected_layer\n";
+  csv << "case,path,width,height,format,address_u,address_v,mag_filter,min_filter,selected_filter,sampler_lod,request,u,v,input_lod,view_base,view_count,selected_mip,mip_upper,mip_weight,mip_filter,view_mapping,border_color,sampler_bias,footprint_squared,derived_lod,gradient_v,gradient_dyu,gradient_dyv,channel,reference,gpu,abs_error,input_layer,view_base_layer,view_layer_count,selected_layer,direction_x,direction_y,direction_z,cube_face\n";
   csv << std::setprecision(10);
   unsigned cases = 0;
   std::uint64_t samples = 0, components = 0, mismatches = 0, markers_failed = 0, buffer_failed = 0;
@@ -1153,7 +1230,8 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   std::array<unsigned,9> mapping_counts{};
   std::array<unsigned,3> border_counts{};
   std::ofstream query_csv;
-  if (fetch_query) {
+  const bool query_mode=fetch_query || Experiment::cube();
+  if (query_mode) {
     query_csv.open(std::string(csv_path) + ".queries.csv");
     if (!query_csv) throw std::runtime_error("cannot open query CSV");
     query_csv << "case,path,request,lod,view_base,view_count,property,expected,actual\n";
@@ -1167,6 +1245,12 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
       {16384,1,15,0,15,{0,1000}}, {16384,1,15,13,VK_REMAINING_MIP_LEVELS,{0,1000}}} : std::vector<Config>{
       {1,1,1,0,1,{0,0}}, {1,5,1,0,1,{0,0}}, {5,1,1,0,1,{0,0}},
       {3,5,1,0,1,{0,0}}, {4,4,1,0,1,{0,0}}};
+  if (Experiment::cube()) configurations={
+    {5,5,3,0,3,{0,1000}},{5,5,3,1,VK_REMAINING_MIP_LEVELS,{0,1000}},
+    {8,8,4,0,4,{.75,1.75}},{8,8,4,1,2,{2,2}},
+    {2,2,2,0,2,{0,.5}},{2,2,2,1,1,{0,1000}},
+    {1,1,1,0,1,{2,2}},{3,3,2,1,1,{0,1000}},
+    {16,16,5,0,5,{0,1000}},{16,16,5,3,VK_REMAINING_MIP_LEVELS,{0,1000}}};
   if (Experiment::gradients()) configurations[0]={8,8,4,0,4,{0,1000}};
   const unsigned total_cases = border_mode ? configurations.size()*4*7*8*3 :
       configurations.size() * (min_mag ? 144 : 36) * (fetch_query || view_swizzle ? 2 : 1);
@@ -1348,14 +1432,14 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                 lane_view = element_views[selected];
                 lane_view.components = mappings[(mapping_index + selected) % mappings.size()];
               }
-              const auto reference = fetch_query ? texel_fetch(image,lane_view,static_cast<int32_t>(uv[i][0]),
+              const auto reference = Experiment::cube() ? Experiment::cube_reference(image,sampled_view,sampling,Experiment::cube_model_direction(i),mip_inputs[i][2],config.range) : fetch_query ? texel_fetch(image,lane_view,static_cast<int32_t>(uv[i][0]),
                   static_cast<int32_t>(uv[i][1]),static_cast<int32_t>(mip_inputs[i][2]),Experiment::texel_offset(),static_cast<int32_t>(mip_inputs[i][3])) :
                   Experiment::gradients() ? sample_grad(image,sampled_view,sampling,uv[i][0],uv[i][1],
                       {mip_inputs[i][2],mip_inputs[i][3]},{Experiment::gradient_request(i)[2],Experiment::gradient_request(i)[3]},config.range,Experiment::texel_offset(),Experiment::array_sampling() ? Experiment::layer_request(i) : 0) :
                   sample_lod(image, sampled_view, sampling, uv[i][0], uv[i][1], mips ? mip_inputs[i][2] : 0, config.range,Experiment::texel_offset(),Experiment::array_sampling() ? Experiment::layer_request(i) : 0);
-              if (fetch_query) {
+              if (query_mode) {
                 if (values[i*output_floats+4]!=73) ++markers_failed;
-                const auto size=texture_size(image,lane_view,static_cast<int32_t>(mip_inputs[i][2]));
+                const auto size=texture_size(image,lane_view,Experiment::cube() ? static_cast<int32_t>(i%lane_view.level_count) : static_cast<int32_t>(mip_inputs[i][2]));
                 const std::array<uint32_t,4> expected{size[0],size[1],texture_query_levels(image,lane_view),lane_view.layer_count};
                 for (unsigned q=0;q<(Experiment::array_sampling() ? 4U : 3U);++q) {
                   if (values[i*output_floats+(q==3 ? 8 : 5+q)]!=static_cast<float>(expected[q])) ++query_failed;
@@ -1396,7 +1480,8 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                     << ',' << (mips ? mip_inputs[i][3] : 0)
                     << ',' << (Experiment::gradients() ? Experiment::gradient_request(i)[2] : 0)
                     << ',' << (Experiment::gradients() ? Experiment::gradient_request(i)[3] : 0) << ',' << c << ',' << reference.rgba[c] << ',' << value << ',' << error
-                    << ',' << reference.input_layer << ',' << lane_view.base_layer << ',' << lane_view.layer_count << ',' << reference.layer << '\n';
+                    << ',' << reference.input_layer << ',' << lane_view.base_layer << ',' << lane_view.layer_count << ',' << reference.layer
+                    << ',' << reference.input_direction[0] << ',' << reference.input_direction[1] << ',' << reference.input_direction[2] << ',' << reference.cube_face << '\n';
                 ++components;
               }
               ++samples;
@@ -1413,7 +1498,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
 finished:
   csv.flush();
   if (!csv) throw std::runtime_error("cannot write numeric result CSV");
-  if (fetch_query) {
+  if (query_mode) {
     query_csv.flush();
     if (!query_csv) throw std::runtime_error("cannot write query CSV");
   }
@@ -1503,7 +1588,7 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
               unsigned limit, bool inject_mismatch, bool mip_linear, bool min_mag, bool srgb, bool view_swizzle, bool border_mode, bool separate = false) {
   Experiment experiment;
   experiment.initialize();
-  const unsigned format_checks = srgb || view_swizzle ? srgb_format_checks(experiment) : 0;
+  const unsigned format_checks = srgb || view_swizzle || Experiment::cube() ? srgb_format_checks(experiment) : 0;
   experiment.empty_tlas();
   experiment.setup_pipeline(rgen, rmiss, true, separate);
   auto uv = requests();
@@ -1543,6 +1628,10 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
                               pair == 1 ? 3 : 4, srgb ? Format::RGBA8_SRGB : Format::RGBA8_UNORM);
     auto image_b = mip_fixture(pair == 1 ? 5 : 3, pair == 1 ? 1 : 5, 3,
                               srgb && pair == 1 ? Format::BGRA8_SRGB : Format::BGRA8_UNORM);
+    if (Experiment::cube()) {
+      image_a=mip_fixture(pair==1 ? 4 : 8,pair==1 ? 4 : 8,pair==1 ? 3 : 4,srgb ? Format::RGBA8_SRGB : Format::RGBA8_UNORM);
+      image_b=mip_fixture(pair==1 ? 5 : 4,pair==1 ? 5 : 4,3,srgb && pair==1 ? Format::BGRA8_SRGB : Format::BGRA8_UNORM);
+    }
     const auto original_a = image_a.data;
     View view_a{pair == 2 ? 0U : 1U, pair == 1 ? 2U : pair == 2 ? 4U : 3U};
     View view_b{pair == 2 ? 2U : 0U, pair == 2 ? 2U : pair == 1 ? 3U : 2U};
@@ -1614,14 +1703,14 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
                   // sampler_descriptor writes at the inverse array index.
                   experiment.descriptors(odd ? b.texture : a.texture,
                       odd ? selected_sampler_b : selected_sampler_a,
-                      carrier,inputs,direct,output_address,uv.size(),(Experiment::gradients() || Experiment::array_sampling()) ? 32 : 16,64);
+                      carrier,inputs,direct,output_address,uv.size(),(Experiment::gradients() || Experiment::array_sampling() || Experiment::cube()) ? 32 : 16,64);
                   experiment.secondary_descriptor(odd ? a.texture : b.texture,
                       odd ? selected_sampler_a : selected_sampler_b);
                 }
                 experiment.array_index = base_index;
               } else {
                 experiment.descriptors(a.texture,selected_sampler_a,
-                    carrier,inputs,direct,output_address,uv.size(),(Experiment::gradients() || Experiment::array_sampling()) ? 32 : 16,64);
+                    carrier,inputs,direct,output_address,uv.size(),(Experiment::gradients() || Experiment::array_sampling() || Experiment::cube()) ? 32 : 16,64);
                 experiment.secondary_descriptor(b.texture,selected_sampler_b);
               }
             }
@@ -1670,12 +1759,12 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
                   (experiment.array_length - 1 - sampler_b_index) % 2 : index_b % 2);
               const MultiResource &lane_a = flip_a ? b : a;
               const MultiResource &lane_b = flip_b ? a : b;
-              auto ra = Experiment::gradients() ? sample_grad(*lane_a.image,lane_a.view,flip_sa ? state_b : state_a,
+              auto ra = Experiment::cube() ? Experiment::cube_reference(*lane_a.image,lane_a.view,flip_sa ? state_b : state_a,Experiment::cube_model_direction(i),request[2],flip_sa ? clamp_b : clamp_a) : Experiment::gradients() ? sample_grad(*lane_a.image,lane_a.view,flip_sa ? state_b : state_a,
                   request[0],request[1],{request[2],request[3]},
                   {Experiment::gradient_request(i)[2],Experiment::gradient_request(i)[3]},flip_sa ? clamp_b : clamp_a,Experiment::texel_offset(),Experiment::array_sampling() ? Experiment::layer_request(i) : 0) :
                   sample_lod(*lane_a.image,lane_a.view,flip_sa ? state_b : state_a,
                   request[0],request[1],request[2],flip_sa ? clamp_b : clamp_a,Experiment::texel_offset(),Experiment::array_sampling() ? Experiment::layer_request(i) : 0);
-              auto rb = Experiment::gradients() ? sample_grad(*lane_b.image,lane_b.view,flip_sb ? state_a : state_b,
+              auto rb = Experiment::cube() ? Experiment::cube_reference(*lane_b.image,lane_b.view,flip_sb ? state_a : state_b,Experiment::cube_model_direction(i,true),request[3],flip_sb ? clamp_a : clamp_b) : Experiment::gradients() ? sample_grad(*lane_b.image,lane_b.view,flip_sb ? state_a : state_b,
                   request[1],request[0],{request[3],request[2]},
                   {Experiment::gradient_request(i)[3],Experiment::gradient_request(i)[2]},flip_sb ? clamp_a : clamp_b,Experiment::texel_offset(),Experiment::array_sampling() ? Experiment::layer_request(i,true) : 0) :
                   sample_lod(*lane_b.image,lane_b.view,flip_sb ? state_a : state_b,

@@ -18,7 +18,7 @@ python3 tools/texture_model.py demo
 
 | 功能 | 行为 |
 | --- | --- |
-| Image | 2D / 2D array、单 sample；完整或部分传统 mip 链，层数不随 mip 改变 |
+| Image | 2D / 2D array / Cube、单 sample；完整或部分传统 mip 链，层数不随 mip 改变 |
 | 格式 | RGBA8/BGRA8 UNORM 或 sRGB；RGBA 浮点结果，sRGB RGB 在过滤前解码，alpha 保持 UNORM |
 | 存储 | 各 mip 独立 offset、width、height、row/layer pitch；允许行/层填充和非零偏移 |
 | 寻址 | U/V 独立的 repeat、mirrored repeat、clamp-to-edge、clamp-to-border |
@@ -31,12 +31,13 @@ python3 tools/texture_model.py demo
 | Offset | sample/fetch 的常量 signed 二维 texel offset，分量 [-8,7]；每个访问 mip 独立应用，不改变 LOD 或过滤权重 |
 | 整数读取/查询 | 合法整数坐标 `texel_fetch`；相对 View 的 `texture_size`、`texture_array_size`、`texture_query_levels`；不使用 sampler |
 | Layer/View | 独立 base layer/count；采样 layer 相对 view，以 ties-to-even 取整并 clamp，层间不插值；fetch 使用合法整数 layer |
-| Trace | layer 与 view 范围、下/上 mip、跨级权重、输入 UV/LOD、受限后的相对 LOD；每个 tap 的绝对 mip、坐标、偏移、合并权重和颜色 |
+| Cube | `sample_cube_lod`：六个方形 face，方向映射、nearest face clamp、bilinear 跨边与角点过滤；`texture_cube_size` 查询二维尺寸 |
+| Trace | cube direction/face、layer 与 view 范围、下/上 mip、跨级权重、输入 UV/LOD、受限后的相对 LOD；每个 tap 的绝对 mip、坐标、偏移、合并权重和颜色 |
 | 多资源 | 不依赖全局采样状态，可交替采样不同 Image 和 Sampling 对象 |
 
 `sample_level` 在指定的 image 绝对 mip 内用 `mag_filter` 采样，它是直接指定级别与级内过滤的 helper，不进行 LOD/min/mag 选择。`sample_lod` 的 LOD 则相对 View；例如 `{base_mip=1, level_count=2}` 的 LOD 0 访问 image mip 1。每个 mip 的尺寸按 `max(1, previous/2)` 递减；可不提供后续级别，但不能在 1×1 之后继续追加重复 mip。
 
-当前尚无隐式导数、压缩、比较过滤、cube/3D 或模型的 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
+当前尚无隐式导数、压缩、比较过滤、3D 或模型的 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
 
 ## 计算规则与数值边界
 
@@ -56,7 +57,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 ## 验证
 
-测试包含十六组，普通和 ASan/UBSan 模式目前均通过 3,248,351 项检查；包含独立 bias 与显式梯度 oracle：
+测试包含十七组，普通和 ASan/UBSan 模式目前均通过 9,709,300 项检查；包含独立 bias 与显式梯度 oracle：
 
 1. 手算四点平均、非对称插值、repeat 接缝和 mirror/clamp 边缘。
 2. 负坐标、texel 边界两侧、精确边界、负零和巨大有限坐标。
@@ -77,6 +78,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 15. 常量二维 sample/fetch offset 的独立延伸 texel oracle、正负范围端点、1×1/非二次幂/mip/view、min-mag/bias/sRGB、过滤权重不变与合法最终 fetch 坐标；非法 offset、坐标上溢及极小负 UV 边界。
 
 16. Array layer 的独立颜色/地址 oracle：1/2/4 层、全部格式、行/层填充、mip/layer view 子范围、半整数及相邻浮点值、极值 clamp、host 舍入模式独立性、sample/grad/fetch/query、无跨层过滤与非法 backing。
+17. Cube 的独立几何 oracle：六 face、12 条边的双向朝向、八角点、preferred 主轴 ties、跨 face virtual tap、角点三面平均；12 plane 的 view base layer 0/1/6、非二次幂/mip、格式/过滤/bias/swizzle、方向缩放和无效输入。
 
 独立对照以 long double 在虚拟延伸图像上枚举 nearest 区间或 tent kernel，逐个真实 texel 累积贡献；不调用模型的坐标归约、四点选择或寻址函数。精确样例和 UNORM 解码做相应精确比较；过滤测试的每分量绝对误差上限为 `2e-7`，适用于该模型的 float 输出，不能直接当成未来 TMU 精度要求。
 
@@ -467,3 +469,27 @@ Sample 的 layer 坐标不归一化：相对 view 先 roundTiesToEven，再 clam
 
 
 E04 最终隔离/主目录共 44 个 GPU 命令（40 正向、4 预期失败反例）；正向零差异，最大颜色误差 `1.192092896e-7`。选层反例分别检出 3,072/4,008 差异；61 项支持范围/limits 检查、Mesa unit 与原 any-hit 图像均通过。源码和构建产物前后哈希一致；加入 LINEAR 查询、收紧数组 usage 前的中途验收和 smoke 不计入最终结论。证据 `artifacts/texture_model/image-array-implementation/verification.json`；下一项为 Cube 的方向/face/接缝规则。
+
+
+## E05 Cube 纹理
+
+```sh
+python3 tools/texture_model.py gpu-min-mag --cube
+python3 tools/texture_model.py gpu-srgb --cube --lod-bias 0.5
+python3 tools/texture_model.py gpu-min-mag --cube --cube-count 2 --cube-base-layer 1
+python3 tools/texture_model.py gpu-multi-nonuniform-separate --cube --cube-count 2 --array-length 4
+python3 tools/texture_model.py gpu-min-mag --cube --case-limit 8 --inject-cube-direction-mismatch
+python3 tools/texture_model.py gpu-min-mag --cube --case-limit 8 --inject-cube-seam-mismatch
+```
+
+`--cube-count 2` 创建含 12 个 plane 的 image，每个 shader view 仍是单 Cube（六 plane），不是 CubeArray。默认 view 从第 0/6 plane 开始，也可用 `--cube-base-layer` 测试合法的非六倍数起点，例如 1；base layer 与 base mip 独立。Cube-compatible image 必须为方形、至少六层、sampled/transfer usage；view 必须恰好六层。descriptor 数组长度与 image plane 数量仍是两种不同的索引。
+
+Face 顺序为 +X、-X、+Y、-Y、+Z、-Z。有限非零方向先选择绝对值最大分量，精确 ties 使用 Vulkan preferred `Z > Y > X`；按标准 face 坐标表得到 UV。Nearest 在选中 face clamp，忽略 sampler U/V 的 repeat/border 状态；bilinear 的边外 tap 通过整数朝向映射到相邻 face。两个轴都越界的 corner tap 使用三个 incident face 的角点 texel 平均，再进入原 bilinear 权重。此选择遵循 [Vulkan-Docs v1.4.328 Cube Map Face Selection 与 Cube Map Edge Handling](https://github.com/KhronosGroup/Vulkan-Docs/blob/v1.4.328/chapters/textures.adoc) 的 preferred/recommended 规则；规范也允许部分替代 tie/corner 方法，本实验固定上述确定行为。
+
+每个 mip 分别执行 face 内/跨 face 过滤，然后复用 bias、sampler clamp、min/mag、view clamp 与 mip filter。sRGB 在各 tap 过滤前解码，view swizzle 仍在颜色采样结果上应用。`textureSize` 返回当前 view mip 的宽、高；`textureQueryLevels` 返回 view 级数。这些查询不依赖 sampler。无 Cube `texelFetch`、Grad、Offset、CubeArray、projector、shadow/gather 或隐式导数；Cube 数值输入为有限非零 binary32 方向。模型内使用 double 投影和独立高精度几何 oracle，不声明所有浮点边界的 bit-identical。
+
+复用 E04 的 96B 资源元素、16B binding directory、24B plane/mip record，索引为 `face*viewMipCount+relativeMip`；没有新 texture intrinsic 或 ISA。Mesa NIR→LLVM 转换直接产生投影、face/邻面选择、地址计算和普通 load/浮点运算。实际 Shader 是 `samplerCube` / `textureCube` 与标准 `textureLod`，multi/separate/descriptor-array/nonuniform 路径沿用已有资源选择。
+
+两个负向命令都应返回 1：direction 反例把 shader 方向固定为 +Z，模型保留原请求；seam 反例故意把比较端改成错误的 face 内 clamp oracle，实际 shader 与正确模型代码保持正常，验证比较器能检出接缝颜色差异。`--inject-query-mismatch` 还可在单 Cube profile 检查属性比较器。
+
+E05 完整隔离/主目录验收共 41 个 GPU 命令（36 正向、5 预期失败反例），正向零差异，最大颜色误差 `1.788139343e-7`，保持既定 `1e-6` 上限。方向反例检出 3,840 差异，单/多 Cube 接缝反例检出 1,696/6,560 差异，查询反例精确检出 1 项。17 组、9,709,300 host 检查在普通/ASan/UBSan 模式通过；78 项范围检查、隔离/主目录 Mesa unit 和原 any-hit exact SHA 均通过，源码/库前后哈希一致。Mesa 本地提交 `af324cf`，LLVM/Spike 未改。证据 `artifacts/texture_model/cube-implementation/verification.json`；smoke 不计入最终验收。下一项 E06 3D 纹理。

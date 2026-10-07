@@ -143,8 +143,68 @@ void swizzle_result(Result &result, ComponentMapping mapping) {
   for (auto &tap : result.taps) tap.color = swizzle(tap.color, mapping);
 }
 
+// Orthonormal face frames from Vulkan's face-coordinate table.
+using CubeAxis = std::array<int,3>;
+constexpr std::array<CubeAxis,6> cube_n{{{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}}};
+constexpr std::array<CubeAxis,6> cube_u{{{0,0,-1},{0,0,1},{1,0,0},{1,0,0},{1,0,0},{-1,0,0}}};
+constexpr std::array<CubeAxis,6> cube_v{{{0,-1,0},{0,-1,0},{0,0,1},{0,0,-1},{0,-1,0},{0,-1,0}}};
+int dot(CubeAxis a, CubeAxis b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+double dot(std::array<double,3> a, CubeAxis b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+
+void validate_cube(const Image &image, View view) {
+  validate(image);
+  validate_view(image,view);
+  require(view.layer_count==6,"Cube view needs exactly six faces");
+  for (const auto &level : image.levels)
+    require(level.width==level.height,"Cube mip must be square");
+}
+
+struct CubeEdge { unsigned face,x,y; };
+CubeEdge cube_edge(unsigned face, bool horizontal, bool high, unsigned varying, unsigned n) {
+  CubeAxis normal=horizontal ? cube_u[face] : cube_v[face];
+  if (!high) for (auto &component : normal) component=-component;
+  unsigned neighbor=0;
+  while (neighbor<6 && cube_n[neighbor]!=normal) ++neighbor;
+  require(neighbor<6,"invalid Cube face basis");
+  const auto varying_axis=horizontal ? cube_v[face] : cube_u[face];
+  auto coordinate=[&](CubeAxis axis) {
+    const int fixed=dot(cube_n[face],axis), orientation=dot(varying_axis,axis);
+    if (fixed) return fixed>0 ? n-1 : 0U;
+    require(orientation!=0,"invalid Cube edge orientation");
+    return orientation>0 ? varying : n-1-varying;
+  };
+  return {neighbor,coordinate(cube_u[neighbor]),coordinate(cube_v[neighbor])};
+}
+
+std::vector<Tap> cube_read(const Image &image, unsigned mip, unsigned base,
+                           unsigned face, std::int64_t x, std::int64_t y, double weight) {
+  const auto &level=image.levels[mip];
+  const auto n=level.width;
+  const bool outside_x=x<0 || x>=n, outside_y=y<0 || y>=n;
+  const auto cx=static_cast<unsigned>(std::clamp(x,std::int64_t{0},static_cast<std::int64_t>(n-1)));
+  const auto cy=static_cast<unsigned>(std::clamp(y,std::int64_t{0},static_cast<std::int64_t>(n-1)));
+  std::vector<Tap> taps;
+  auto add=[&](unsigned target,unsigned tx,unsigned ty,double w) {
+    auto plane=level;plane.offset+=(base+target)*plane.layer_pitch;
+    auto tap=read_at(image,plane,tx,ty,w);
+    tap.raw_x=x;tap.raw_y=y;tap.mip=mip;tap.layer=base+target;
+    taps.push_back(tap);
+  };
+  if (outside_x && outside_y) {
+    const auto across_x=cube_edge(face,true,x>=n,cy,n);
+    const auto across_y=cube_edge(face,false,y>=n,cx,n);
+    add(face,cx,cy,weight/3);
+    add(across_x.face,across_x.x,across_x.y,weight/3);
+    add(across_y.face,across_y.x,across_y.y,weight/3);
+  } else if (outside_x || outside_y) {
+    const auto across=cube_edge(face,outside_x,outside_x ? x>=n : y>=n,outside_x ? cy : cx,n);
+    add(across.face,across.x,across.y,weight);
+  } else add(face,cx,cy,weight);
+  return taps;
+}
+
 Result sample_validated(const Image &image, std::uint32_t mip,
-                        const Sampling &sampling, double u, double v, Filter filter, TexelOffset offset, std::uint32_t layer) {
+                        const Sampling &sampling, double u, double v, Filter filter, TexelOffset offset, std::uint32_t layer, bool cube = false, std::uint32_t cube_base = 0) {
   require(std::isfinite(u) && std::isfinite(v), "UV must be finite");
   check_mode(sampling.address_u);
   check_mode(sampling.address_v);
@@ -153,8 +213,10 @@ Result sample_validated(const Image &image, std::uint32_t mip,
   auto level = image.levels[mip];
   level.offset += layer * level.layer_pitch;
   check_offset(offset);
-  const double x = reduce(u, sampling.address_u, offset[0] != 0) * level.width;
-  const double y = reduce(v, sampling.address_v, offset[1] != 0) * level.height;
+  const double x = (cube ? u : reduce(u, sampling.address_u, offset[0] != 0)) * level.width;
+  const double y = (cube ? v : reduce(v, sampling.address_v, offset[1] != 0)) * level.height;
+  Sampling lookup=sampling;
+  if (cube) lookup.address_u=lookup.address_v=AddressMode::ClampToEdge;
   Result result;
   result.mip = mip;
   result.mip_upper = mip;
@@ -164,7 +226,7 @@ Result sample_validated(const Image &image, std::uint32_t mip,
   result.filter = filter;
   result.texel_offset = offset;
   if (filter == Filter::Nearest) {
-    result.taps.push_back(read(image, level, sampling,
+    result.taps.push_back(read(image, level, lookup,
                               static_cast<std::int64_t>(std::floor(x)) + offset[0],
                               static_cast<std::int64_t>(std::floor(y)) + offset[1], 1));
     result.rgba = result.taps[0].color;
@@ -180,11 +242,17 @@ Result sample_validated(const Image &image, std::uint32_t mip,
   const auto iy = static_cast<std::int64_t>(fy) + offset[1];
   const double a = sx - fx;
   const double b = sy - fy;
-  result.taps = {read(image, level, sampling, ix, iy, (1 - a) * (1 - b)),
-                 read(image, level, sampling, ix + 1, iy, a * (1 - b)),
-                 read(image, level, sampling, ix, iy + 1, (1 - a) * b),
-                 read(image, level, sampling, ix + 1, iy + 1, a * b)};
-  for (auto &tap : result.taps) { tap.mip = mip; tap.layer = layer; }
+  auto add=[&](std::int64_t tx,std::int64_t ty,double weight) {
+    if (cube) {
+      auto taps=cube_read(image,mip,cube_base,layer-cube_base,tx,ty,weight);
+      result.taps.insert(result.taps.end(),taps.begin(),taps.end());
+    } else {
+      auto tap=read(image,level,sampling,tx,ty,weight);
+      tap.mip=mip;tap.layer=layer;result.taps.push_back(tap);
+    }
+  };
+  add(ix,iy,(1-a)*(1-b));add(ix+1,iy,a*(1-b));
+  add(ix,iy+1,(1-a)*b);add(ix+1,iy+1,a*b);
   for (unsigned c = 0; c < 4; ++c) {
     double value = 0;
     for (const auto &tap : result.taps)
@@ -238,8 +306,8 @@ Result sample_level(const Image &image, std::uint32_t mip,
   return sample_validated(image, mip, sampling, u, v, sampling.mag_filter, offset, layer);
 }
 
-Result sample_lod(const Image &image, View view, const Sampling &sampling,
-                  double u, double v, double lod, LodRange range, TexelOffset offset, double layer) {
+static Result sample_lod_impl(const Image &image, View view, const Sampling &sampling,
+                  double u, double v, double lod, LodRange range, TexelOffset offset, double layer, bool cube) {
   validate(image);
   check_filters(sampling);
   validate_view(image, view);
@@ -279,13 +347,13 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
               sampling.mip_filter == MipFilter::Linear, "unsupported mip filter");
   const bool linear = sampling.mip_filter == MipFilter::Linear;
   const auto selected = static_cast<std::uint32_t>(low + (!linear && relative - low > 0.5));
-  Result result = sample_validated(image, view.base_mip + selected, sampling, u, v, filter, offset, selected_layer);
+  Result result = sample_validated(image, view.base_mip + selected, sampling, u, v, filter, offset, selected_layer, cube, view.base_layer);
   if (linear) {
     result.mip_upper = view.base_mip + std::min(selected + 1, view.level_count - 1);
     result.mip_weight = relative - low;
     // Exact integer/end LODs retain the first sample without needless reads.
     if (result.mip_weight > 0 && result.mip_upper != result.mip) {
-      auto upper = sample_validated(image, result.mip_upper, sampling, u, v, filter, offset, selected_layer);
+      auto upper = sample_validated(image, result.mip_upper, sampling, u, v, filter, offset, selected_layer, cube, view.base_layer);
       for (unsigned c = 0; c < 4; ++c)
         result.rgba[c] = static_cast<float>((1 - result.mip_weight) * result.rgba[c] +
                                            result.mip_weight * upper.rgba[c]);
@@ -302,6 +370,35 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
   result.clamped_lod = relative;
   swizzle_result(result, view.components);
   return result;
+}
+
+Result sample_lod(const Image &image, View view, const Sampling &sampling,
+                  double u,double v,double lod,LodRange range,TexelOffset offset,double layer) {
+  return sample_lod_impl(image,view,sampling,u,v,lod,range,offset,layer,false);
+}
+
+Result sample_cube_lod(const Image &image,View view,const Sampling &sampling,
+                       std::array<double,3> direction,double lod,LodRange range) {
+  validate_cube(image,view);
+  for (double component : direction)
+    require(std::isfinite(component) && std::abs(component)<=std::numeric_limits<float>::max(),
+            "Cube direction must be finite binary32");
+  unsigned axis=0;
+  if (std::abs(direction[1])>=std::abs(direction[0])) axis=1;
+  if (std::abs(direction[2])>=std::abs(direction[axis])) axis=2;
+  const auto major=std::abs(direction[axis]);
+  require(major>0,"Cube direction must be nonzero");
+  const unsigned face=2*axis+(direction[axis]<0);
+  const double u=(dot(direction,cube_u[face])/major+1)*0.5;
+  const double v=(dot(direction,cube_v[face])/major+1)*0.5;
+  auto result=sample_lod_impl(image,view,sampling,u,v,lod,range,{},face,true);
+  result.from_cube=true;result.input_direction=direction;result.cube_face=face;
+  return result;
+}
+
+std::array<std::uint32_t,2> texture_cube_size(const Image &image,View view,std::int32_t lod) {
+  validate_cube(image,view);
+  return texture_size(image,view,lod);
 }
 
 Result sample_grad(const Image &image, View view, const Sampling &sampling,

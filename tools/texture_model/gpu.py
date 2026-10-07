@@ -152,12 +152,26 @@ def run(args, compiler: str) -> int:
             text = text.replace("requests.uv[i].xy", "vec3(requests.uv[i].xy, "+layer+")")
         rgen_path = output / "image-array.rgen"
         rgen_path.write_text(text)
+    if args.cube:
+        text = rgen_path.read_text().replace("sampler2D", "samplerCube").replace("texture2D", "textureCube")
+        if multi:
+            text = text.replace("requests.uv_lod[i].xy", "vec3(0,0,1)" if args.inject_cube_direction_mismatch else "requests.uv_lod[2*i].xyz")
+            text = text.replace("requests.uv_lod[i].yx", "vec3(0,0,1)" if args.inject_cube_direction_mismatch else "requests.uv_lod[2*i+1].xyz")
+            text = text.replace("requests.uv_lod[i].z", "requests.uv_lod[2*i].w").replace("requests.uv_lod[i].w", "requests.uv_lod[2*i+1].w")
+        else:
+            text = text.replace("requests.uv[i].xy", "vec3(0,0,1)" if args.inject_cube_direction_mismatch else "requests.uv[i].xyz")
+            text = text.replace("requests.uv[i].z", "requests.uv[i].w")
+            query_image = "samplerCube(source, state)" if separate else "source"
+            text = text.replace("vec4 marker = vec4(float(completion), 123, 456, 789);",
+                f"int view_levels = textureQueryLevels({query_image});\n    ivec2 query_size = textureSize({query_image}, int(i % uint(view_levels)));\n    vec4 marker = vec4(float(completion), vec2(query_size), float(view_levels));")
+        rgen_path = output / "cube.rgen"
+        rgen_path.write_text(text)
     for stage in ("rgen", "rmiss"):
         with (output / f"compile-{stage}.log").open("w") as log:
             subprocess.run([glslang, "-V", "--target-env", "vulkan1.2",
                             str(rgen_path if stage == "rgen" else source / "sample.rmiss"), "-o", str(output / f"sample.{stage}.spv")],
                            stdout=log, stderr=subprocess.STDOUT, check=True)
-    if uniform or args.gradients or args.offset is not None or image_array:
+    if uniform or args.gradients or args.offset is not None or image_array or args.cube:
         disassembler = shutil.which("spirv-dis")
         if not disassembler:
             raise RuntimeError("spirv-dis is required to retain runtime-index evidence")
@@ -190,6 +204,12 @@ def run(args, compiler: str) -> int:
         "LD_LIBRARY_PATH": ":".join([str(root / "spike/build"), str(paths["driver"].parent),
                                       str(root / "llvm/build/lib"), env.get("LD_LIBRARY_PATH", "")]),
     })
+    if args.inject_cube_seam_mismatch:
+        env["VENTUS_TEXTURE_INJECT_CUBE_SEAM_MISMATCH"] = "1"
+    if args.cube:
+        env["VENTUS_TEXTURE_CUBE_COUNT"] = str(args.cube_count)
+        if args.cube_base_layer is not None:
+            env["VENTUS_TEXTURE_CUBE_BASE_LAYER"] = str(args.cube_base_layer)
     if args.linear_image:
         env["VENTUS_TEXTURE_LINEAR_IMAGE"] = "1"
     if image_array:
@@ -242,6 +262,8 @@ def run(args, compiler: str) -> int:
         variants["nested-descriptor-array"] = shader_source.replace("sampler2D source;", "sampler2D source[2][2];").replace(original, "textureLod(source[0][1], requests.uv[i], 0.0)")
         variants["dynamic-storage-image-array"] = nonuniform_source.replace("image2D carrier;", "image2D carrier[2];").replace("imageStore(carrier,", "imageStore(carrier[nonuniformEXT(i & 1u)],")
         variants["storage-image-layer-array"] = shader_source.replace("image2D carrier;", "image2DArray carrier;").replace("imageStore(carrier, ivec2(i, 0),", "imageStore(carrier, ivec3(i, 0, 0),")
+        variants["cube-gradients"] = shader_source.replace("sampler2D source;", "samplerCube source;").replace(original,"textureGrad(source, vec3(requests.uv[i],1), vec3(1), vec3(1))")
+        variants["cube-array-sampling"] = shader_source.replace("sampler2D source;", "samplerCubeArray source;").replace(original,"textureLod(source, vec4(requests.uv[i],1,0), 0.0)")
         for name, value in variants.items():
             path = output / f"reject-{name}.rgen"
             path.write_text(value)
@@ -351,7 +373,7 @@ def run(args, compiler: str) -> int:
     if not checked_frontier or not elf_paths:
         errors.append("checked, retained V5 ELF evidence is missing")
     if checks_only:
-        if summary.get("limits") != "2" or summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "20" or summary.get("errors") != "0" or summary.get("images") != "13" or summary.get("views") != "17":
+        if summary.get("limits") != "3" or summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "20" or summary.get("errors") != "0" or summary.get("images") != "18" or summary.get("views") != "26":
             errors.append("profile rejection checks incomplete")
     else:
         if summary.get("cases") != str(args.case_limit):
@@ -362,7 +384,7 @@ def run(args, compiler: str) -> int:
             errors.append("numeric coverage counts are incomplete")
         if (srgb or view_swizzle) and summary.get("format_checks") != "18":
             errors.append("sRGB/UNORM format feature and unsupported usage checks incomplete")
-        if fetch_query and (summary.get("format_checks") != "18" or
+        if (fetch_query or (args.cube and not multi)) and (summary.get("format_checks") != "18" or
                             summary.get("query_components") != str(args.case_limit * 64 * (8 if array_sampling else 6)) or
                             summary.get("query_failed") != "0"):
             errors.append("fetch/query format coverage or exact property comparison failed")
@@ -428,11 +450,20 @@ def run(args, compiler: str) -> int:
         profile += "; explicit isotropic 2D gradients scaled by view base dimensions; sampler bias/clamp; ordinary LLVM arithmetic and texel loads"
     if args.offset is not None:
         profile += "; constant signed texel offsets[-8,7] before integer addressing in each accessed mip"
+    if args.cube:
+        if not re.search(r"OpTypeImage .* Cube 0 0 0 1 Unknown", (output / "sample.rgen.spvasm").read_text()):
+            errors.append("Cube SPIR-V image type evidence missing")
+        profile += "; six-face Cube, preferred Z/Y/X tie, seamless edges and three-corner average, explicit LOD"
     if image_array:
         profile += "; 2D image layers with independent view layer subrange; " + ("single-layer 2D view" if args.single_layer_view else "array sample RNE/clamp and integer fetch/query")
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
         "profile": profile,
+        "cube": args.cube,
+        "cube_count": args.cube_count,
+        "cube_base_layer": args.cube_base_layer,
+        "injected_cube_direction_mismatch": args.inject_cube_direction_mismatch,
+        "injected_cube_seam_mismatch": args.inject_cube_seam_mismatch,
         "image_layers": args.image_layers,
         "linear_image": args.linear_image,
         "single_layer_view": args.single_layer_view,

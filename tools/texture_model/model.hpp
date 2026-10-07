@@ -103,6 +103,9 @@ struct Result {
   double input_lod = 0;
   double sampler_lod = 0;
   double clamped_lod = 0;
+  bool from_cube = false;
+  std::array<double,3> input_direction{};
+  std::uint32_t cube_face = 0;
   bool from_gradients = false;
   double footprint_squared = 0;
   Filter filter = Filter::Nearest;
@@ -123,6 +126,13 @@ Result sample_level(const Image &image, std::uint32_t mip,
 Result sample_lod(const Image &image, View view, const Sampling &sampling,
                   double u, double v, double lod, LodRange range = {},
                   TexelOffset offset = {}, double layer = 0);
+// Six square layer planes in a Cube view, face order +X,-X,+Y,-Y,+Z,-Z.
+// Finite nonzero binary32 direction; preferred Z>Y>X major ties. Bilinear
+// crosses face edges; a corner tap averages all three incident face corners.
+Result sample_cube_lod(const Image &image, View view, const Sampling &sampling,
+                       std::array<double,3> direction, double lod, LodRange range = {});
+std::array<std::uint32_t,2> texture_cube_size(const Image &image, View view, std::int32_t lod);
+
 // Explicit normalized binary32 coordinate derivatives, isotropic Euclidean
 // footprint at view base dimensions. Zero footprint selects the lower clamp.
 Result sample_grad(const Image &image, View view, const Sampling &sampling,

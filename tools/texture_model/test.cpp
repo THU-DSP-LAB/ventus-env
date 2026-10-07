@@ -914,6 +914,205 @@ void clamp_to_border() {
   rejected([&]{sample_lod(solid,{0,1},state,0,0,0);},"unknown border color");
 }
 
+
+using Direction=std::array<double,3>;
+// Independent explicit Cartesian face equations, not the model's face frames.
+Direction oracle_face_direction(unsigned f,double a,double b) {
+  switch (f) {
+  case 0:return {1,-b,-a};case 1:return {-1,-b,a};
+  case 2:return {a,1,b};case 3:return {a,-1,-b};
+  case 4:return {a,-b,1};default:return {-a,-b,-1};
+  }
+}
+struct OracleProjection { unsigned face;long double u,v; };
+OracleProjection oracle_project(Direction r) {
+  const long double x=r[0],y=r[1],z=r[2],ax=std::abs(x),ay=std::abs(y),az=std::abs(z);
+  unsigned face;long double a,b,major;
+  if (az>=ax && az>=ay) {face=z<0 ? 5 : 4;major=az;a=z<0 ? -x : x;b=-y;}
+  else if (ay>=ax) {face=y<0 ? 3 : 2;major=ay;a=x;b=y<0 ? -z : z;}
+  else {face=x<0 ? 1 : 0;major=ax;a=x<0 ? z : -z;b=-y;}
+  return {face,(a/major+1)/2,(b/major+1)/2};
+}
+
+Image cube_fixture(unsigned n,Format format,unsigned layers=12) {
+  Image image{format,{}, {},layers};
+  for (unsigned mip=0;;++mip) {
+    Level level{n,n,image.data.size()+7,n*4ULL+3};level.layer_pitch=n*level.row_pitch+5;
+    image.data.resize(level.offset+layers*level.layer_pitch,0xcd);
+    for (unsigned layer=0;layer<layers;++layer) {
+      auto plane=level;plane.offset+=layer*level.layer_pitch;
+      for (unsigned y=0;y<n;++y) for (unsigned x=0;x<n;++x)
+        put(image,plane,x,y,{static_cast<std::uint8_t>(x*37+y*71+layer*67+mip*47+5),
+                            static_cast<std::uint8_t>(x*89+y*11+layer*101+mip*66+23),
+                            static_cast<std::uint8_t>(x*13+y*53+layer*43+mip*85+251),
+                            static_cast<std::uint8_t>(x*31+y*29+layer*79+mip*104+19)});
+    }
+    image.levels.push_back(level);if (n==1) break;n=std::max(1U,n/2);
+  }
+  return image;
+}
+
+using WideColor=std::array<long double,4>;
+WideColor cube_pixel_oracle(const Image &image,unsigned mip,unsigned layer,unsigned x,unsigned y) {
+  const auto &level=image.levels[mip];
+  const auto byte=level.offset+layer*level.layer_pitch+y*level.row_pitch+x*4;
+  WideColor color{};
+  for (unsigned c=0;c<4;++c) {
+    const unsigned channel=is_bgra(image.format) && (c==0 || c==2) ? 2-c : c;
+    const long double e=image.data[byte+channel]/255.0L;
+    color[c]=is_srgb(image.format) && c<3 ? (e<=0.04045L ? e/12.92L : std::pow((e+0.055L)/1.055L,2.4L)) : e;
+  }
+  return color;
+}
+
+Color cube_level_oracle(const Image &image,View view,unsigned mip,Filter filter,Direction direction) {
+  const auto projection=oracle_project(direction);
+  const int n=image.levels[mip].width;
+  const long double px=projection.u*n,py=projection.v*n;
+  WideColor color{};
+  auto projected_pixel=[&](Direction ray,unsigned face) {
+    // Incident corner rays have exact +/-1 coordinates; force the requested
+    // incident axis above the other two only to select its face.
+    const unsigned axis=face/2;
+    ray[axis]*=1.000000000001;
+    const auto p=oracle_project(ray);
+    expect(p.face==face,"independent incident corner face");
+    return cube_pixel_oracle(image,mip,view.base_layer+face,
+        std::clamp(static_cast<int>(p.u*n),0,n-1),std::clamp(static_cast<int>(p.v*n),0,n-1));
+  };
+  for (int y=-1;y<=n;++y) for (int x=-1;x<=n;++x) {
+    long double w;
+    if (filter==Filter::Nearest) w=(px>=x && px<x+1 && py>=y && py<y+1) ? 1 : 0;
+    else w=std::max(0.0L,1-std::abs(px-(x+0.5L)))*std::max(0.0L,1-std::abs(py-(y+0.5L)));
+    if (!w) continue;
+    WideColor pixel{};
+    const bool outside_x=x<0 || x>=n,outside_y=y<0 || y>=n;
+    if (filter==Filter::Nearest || (!outside_x && !outside_y))
+      pixel=cube_pixel_oracle(image,mip,view.base_layer+projection.face,std::clamp(x,0,n-1),std::clamp(y,0,n-1));
+    else if (outside_x && outside_y) {
+      // Geometric corner is shared by the signed X, Y and Z faces.
+      const auto corner=oracle_face_direction(projection.face,x<0 ? -1 : 1,y<0 ? -1 : 1);
+      for (unsigned axis=0;axis<3;++axis) {
+        const auto value=projected_pixel(corner,2*axis+(corner[axis]<0));
+        for (unsigned c=0;c<4;++c) pixel[c]+=value[c]/3;
+      }
+    } else {
+      // Reproject the virtual texel center onto the adjacent cube plane.
+      // Integer texel selection agrees with the exact topological edge map;
+      // the model uses integer face-frame orientations instead.
+      const auto ray=oracle_face_direction(projection.face,2*(x+0.5)/n-1,2*(y+0.5)/n-1);
+      const auto adjacent=oracle_project(ray);
+      pixel=cube_pixel_oracle(image,mip,view.base_layer+adjacent.face,
+          std::clamp(static_cast<int>(adjacent.u*n),0,n-1),std::clamp(static_cast<int>(adjacent.v*n),0,n-1));
+    }
+    for (unsigned c=0;c<4;++c) color[c]+=w*pixel[c];
+  }
+  return {static_cast<float>(color[0]),static_cast<float>(color[1]),static_cast<float>(color[2]),static_cast<float>(color[3])};
+}
+
+Color cube_lod_oracle(const Image &image,View view,Sampling state,Direction direction,double lod,LodRange range) {
+  const double biased=state.lod_bias==0 ? lod : static_cast<double>(static_cast<float>(lod)+static_cast<float>(state.lod_bias));
+  const double lambda=std::clamp(biased,range.min,range.max);
+  const auto filter=lambda<=0 ? state.mag_filter : state.min_filter;
+  const double level=std::clamp(lambda,0.0,static_cast<double>(view.level_count-1));
+  const auto low=static_cast<unsigned>(std::floor(level));
+  const unsigned selected=state.mip_filter==MipFilter::Linear ? low : low+(level-low>0.5);
+  auto a=cube_level_oracle(image,view,view.base_mip+selected,filter,direction);
+  if (state.mip_filter==MipFilter::Linear) {
+    const auto b=cube_level_oracle(image,view,view.base_mip+std::min(low+1,view.level_count-1),filter,direction);
+    for (unsigned c=0;c<4;++c) a[c]=static_cast<float>((1-(level-low))*a[c]+(level-low)*b[c]);
+  }
+  return mapped_oracle(a,view.components);
+}
+
+void cube_sampling() {
+  auto solid=cube_fixture(1,Format::RGBA8_UNORM,6);
+  const std::array<Bytes,6> faces{{{255,0,0,255},{0,255,0,255},{0,0,255,255},
+                                 {255,255,0,255},{0,255,255,255},{255,255,255,255}}};
+  for (unsigned face=0;face<6;++face) {
+    auto plane=solid.levels[0];plane.offset+=face*plane.layer_pitch;put(solid,plane,0,0,faces[face]);
+  }
+  View full{0,1,{},0,6};
+  Sampling linear{AddressMode::Repeat,AddressMode::ClampToBorder,Filter::Bilinear};
+  expect_color(sample_cube_lod(solid,full,linear,{1,0,1},0).rgba,{.5f,.5f,.5f,1},"Cube edge mixes its two incident faces");
+  expect_color(sample_cube_lod(solid,full,linear,{1,1,1},0).rgba,{1.f/3,1.f/3,2.f/3,1},"Cube corner averages three faces before bilinear");
+  expect_color(sample_cube_lod(solid,full,{}, {1,1,1},0).rgba,{0,1,1,1},"nearest Cube corner stays on preferred Z face",0);
+  for (unsigned axis=0;axis<3;++axis) for (int sign : {-1,1}) {
+    Direction d{};d[axis]=sign;
+    const auto r=sample_cube_lod(solid,full,{},d,0);
+    expect(r.cube_face==2*axis+(sign<0) && r.layer==r.cube_face,"Cube axis face ordering");
+  }
+  for (int sx : {-1,1}) for (int sy : {-1,1}) for (int sz : {-1,1}) {
+    Direction d{static_cast<double>(sx),static_cast<double>(sy),static_cast<double>(sz)};
+    const auto r=sample_cube_lod(solid,full,linear,d,0);
+    expect(r.cube_face==4+(sz<0),"Cube preferred Z corner tie");
+    std::array<double,6> face_weights{};
+    for (const auto &tap:r.taps) {expect(!tap.border,"Cube ignores sampler border");face_weights[tap.layer]+=tap.weight;}
+    for (unsigned axis=0;axis<3;++axis) expect(std::abs(face_weights[2*axis+(d[axis]<0)]-1.0/3)<1e-14,"corner has equal three-face contribution");
+    expect_color(r.rgba,cube_level_oracle(solid,full,0,Filter::Bilinear,d),"all eight Cube corners independent geometry");
+  }
+  for (unsigned face=0;face<6;++face) for (unsigned edge=0;edge<4;++edge) {
+    const auto d=oracle_face_direction(face,edge<2 ? (edge ? 1 : -1) : 0,edge>=2 ? (edge==3 ? 1 : -1) : 0);
+    expect_color(sample_cube_lod(solid,full,linear,d,0).rgba,cube_level_oracle(solid,full,0,Filter::Bilinear,d),"all twelve Cube edges from both incident faces");
+  }
+  std::vector<Direction> directions;
+  for (unsigned face=0;face<6;++face)
+    for (auto ab:std::array<std::array<double,2>,9>{{{0,0},{-.75,.25},{.5,-.5},{-1,.5},{1,-.25},{.25,-1},{-.5,1},{-1,-1},{1,1}}})
+      directions.push_back(oracle_face_direction(face,ab[0],ab[1]));
+  for (unsigned face=0;face<6;++face) {
+    directions.push_back(oracle_face_direction(face,-.96875,.5));
+    directions.push_back(oracle_face_direction(face,.96875,-.25));
+    directions.push_back(oracle_face_direction(face,.25,-.96875));
+    directions.push_back(oracle_face_direction(face,-.5,.96875));
+    directions.push_back(oracle_face_direction(face,-.96875,-.96875));
+    directions.push_back(oracle_face_direction(face,.96875,.96875));
+  }
+  directions.push_back({1,1,0});directions.push_back({1,0,1});directions.push_back({0,1,1});
+  directions.push_back({1,std::nextafter(1.f,0.f),0});directions.push_back({1,std::nextafter(1.f,2.f),0});
+  directions.push_back({std::numeric_limits<float>::max(),0,-std::numeric_limits<float>::max()});
+  directions.push_back({std::numeric_limits<float>::denorm_min(),0,std::numeric_limits<float>::denorm_min()});
+  for (auto format : {Format::RGBA8_UNORM,Format::BGRA8_UNORM,Format::RGBA8_SRGB,Format::BGRA8_SRGB}) {
+    const auto image=cube_fixture(5,format);
+    for (unsigned base_mip=0;base_mip<3;++base_mip) for (unsigned base_layer : {0U,1U,6U}) {
+      View view{base_mip,3-base_mip,{Component::A,Component::R,Component::One,Component::B},base_layer,6};
+      const auto size=texture_cube_size(image,view,0);
+      expect(size[0]==image.levels[base_mip].width && size[1]==size[0],"Cube size uses view mip without layer axis");
+      for (unsigned filters=0;filters<4;++filters) for (auto mip : {MipFilter::Nearest,MipFilter::Linear})
+        for (double bias : {-1.0,0.0,.5}) for (double lod : {-100.0,0.0,.5,1.25,100.0}) {
+          Sampling state{AddressMode::ClampToBorder,AddressMode::MirroredRepeat,static_cast<Filter>(filters&1),static_cast<Filter>(filters>>1),mip};state.lod_bias=bias;
+          for (const auto &d:directions) {
+            const auto r=sample_cube_lod(image,view,state,d,lod,{.25,1.75});
+            expect_color(r.rgba,cube_lod_oracle(image,view,state,d,lod,{.25,1.75}),"independent Cube geometry/filter/mip/sRGB/view/bias oracle");
+            expect(r.from_cube && r.layer==view.base_layer+r.cube_face,"Cube trace selected face and absolute layer");
+            double total=0;
+            for (const auto &tap:r.taps) {
+              expect(!tap.border && tap.layer>=base_layer && tap.layer<base_layer+6,"Cube taps stay within selected cube view");
+              const auto &level=image.levels[tap.mip];
+              expect(tap.byte_offset==level.offset+tap.layer*level.layer_pitch+tap.y*level.row_pitch+tap.x*4,"Cube trace address includes target face");
+              total+=tap.weight;
+            }
+            expect(std::abs(total-1)<1e-13,"Cube trace weights sum to one");
+          }
+        }
+    }
+  }
+  const auto image=cube_fixture(5,Format::RGBA8_UNORM);
+  View view{0,3,{},6,6};
+  for (const auto &d:directions) {
+    Direction scaled=d;for (auto &c:scaled)c*=2;
+    if (std::any_of(scaled.begin(),scaled.end(),[](double c){return std::abs(c)>std::numeric_limits<float>::max();})) continue;
+    expect_color(sample_cube_lod(image,view,linear,d,.25).rgba,sample_cube_lod(image,view,linear,scaled,.25).rgba,"Cube positive direction scaling invariance",0);
+  }
+  rejected([&]{sample_cube_lod(image,view,{}, {0,-0.,0},0);},"zero Cube direction");
+  rejected([&]{sample_cube_lod(image,view,{}, {1,std::numeric_limits<double>::infinity(),0},0);},"infinite Cube direction");
+  rejected([&]{sample_cube_lod(image,view,{}, {1,std::numeric_limits<double>::quiet_NaN(),0},0);},"NaN Cube direction");
+  rejected([&]{sample_cube_lod(image,{0,3,{},0,5},{},{1,0,0},0);},"Cube view not six faces");
+  rejected([&]{sample_cube_lod(image,{0,3,{},7,6},{},{1,0,0},0);},"Cube view outside layers");
+  auto rectangular=array_image(6,Format::RGBA8_UNORM);
+  rejected([&]{sample_cube_lod(rectangular,{0,3,{},0,6},{},{1,0,0},0);},"rectangular Cube mip");
+  rejected([&]{texture_cube_size(image,view,3);},"Cube query invalid relative mip");
+}
+
 void invalid_inputs() {
   const auto image = four_colors();
   for (double invalid : {std::numeric_limits<double>::infinity(),
@@ -968,7 +1167,7 @@ void invalid_inputs() {
 } // namespace
 
 int main() {
-  const std::array<std::pair<const char *, void (*)()>, 16> suites{{
+  const std::array<std::pair<const char *, void (*)()>, 17> suites{{
       {"hand-calculated filtering and seams", hand_calculated},
       {"negative UV, boundaries and huge finite UV", negative_and_boundary_coordinates},
       {"all 256 UNORM values in both formats", all_unorm_values},
@@ -979,6 +1178,7 @@ int main() {
       {"explicit 2D gradients and independent Euclidean oracle", explicit_gradients},
       {"constant sample/fetch offsets and independent texel oracle", texel_offsets},
       {"2D image array layer storage/view/selection oracle", image_array_layers},
+      {"Cube face/edge/corner independent geometric oracle", cube_sampling},
       {"independent min/mag selection before view clamp", min_mag},
       {"sRGB decoding before filtering and unchanged alpha", srgb},
       {"integer texel fetch and view-relative property queries", fetch_and_queries},

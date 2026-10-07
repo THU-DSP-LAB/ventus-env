@@ -119,12 +119,21 @@ def run(args, compiler: str) -> int:
         text = text.replace("uint i = gl_LaunchIDEXT.x;", "uint i = gl_LaunchIDEXT.x;" + declaration)
         rgen_path = output / "gradients.rgen"
         rgen_path.write_text(text)
+    if args.offset is not None:
+        vector = [0,0] if args.inject_offset_mismatch else args.offset
+        operand = f"ivec2({vector[0]}, {vector[1]})"
+        text, count = re.subn(r"(textureLod|textureGrad|texelFetch)\((.*)\)(?=;)",
+            lambda match: match[1] + "Offset(" + match[2] + ", " + operand + ")", rgen_path.read_text())
+        if count != (2 if multi else 1):
+            raise RuntimeError("offset shader transformation did not cover each texture operation")
+        rgen_path = output / "offset.rgen"
+        rgen_path.write_text(text)
     for stage in ("rgen", "rmiss"):
         with (output / f"compile-{stage}.log").open("w") as log:
             subprocess.run([glslang, "-V", "--target-env", "vulkan1.2",
                             str(rgen_path if stage == "rgen" else source / "sample.rmiss"), "-o", str(output / f"sample.{stage}.spv")],
                            stdout=log, stderr=subprocess.STDOUT, check=True)
-    if uniform or args.gradients:
+    if uniform or args.gradients or args.offset is not None:
         disassembler = shutil.which("spirv-dis")
         if not disassembler:
             raise RuntimeError("spirv-dis is required to retain runtime-index evidence")
@@ -161,6 +170,8 @@ def run(args, compiler: str) -> int:
         env["VENTUS_TEXTURE_GRADIENTS"] = "1"
         if args.constant_gradient is not None:
             env["VENTUS_TEXTURE_CONSTANT_GRADIENT"] = ",".join(map(str,args.constant_gradient))
+    if args.offset is not None:
+        env["VENTUS_TEXTURE_OFFSET"] = ",".join(map(str,args.offset))
     env["VENTUS_TEXTURE_LOD_BIAS"] = str(args.lod_bias)
     if args.inject_bias_mismatch:
         env["VENTUS_TEXTURE_INJECT_BIAS_MISMATCH"] = "1"
@@ -186,13 +197,15 @@ def run(args, compiler: str) -> int:
         shader_source = (source / "sample.rgen").read_text()
         original = "textureLod(source, requests.uv[i], 0.0)"
         variants = {
-            "offset": "textureLodOffset(source, requests.uv[i], 0.0, ivec2(1, 0))",
+            "shadow-lod": "vec4(textureLod(source, vec3(requests.uv[i], 0.5), 0.0))",
 
             "gather": "textureGather(source, requests.uv[i])",
-            "texel-fetch-offset": "texelFetchOffset(source, ivec2(0), 0, ivec2(1, 0))",
+            "array-sampling": "textureLod(source, vec3(requests.uv[i], 0), 0.0)",
             "projected": "textureProjLod(source, vec3(requests.uv[i], 2), 0.0)",
         }
         variants = {name: shader_source.replace(original, value) for name, value in variants.items()}
+        variants["shadow-lod"] = variants["shadow-lod"].replace("sampler2D source;", "sampler2DShadow source;")
+        variants["array-sampling"] = variants["array-sampling"].replace("sampler2D source;", "sampler2DArray source;")
         variants["shadow-gradients"] = shader_source.replace("sampler2D source;", "sampler2DShadow source;").replace(original,
             "vec4(textureGrad(source, vec3(requests.uv[i], 0.5), vec2(1), vec2(1)))")
         nonuniform_source = shader_source.replace("#version 460", "#version 460\n#extension GL_EXT_nonuniform_qualifier : require")
@@ -241,7 +254,7 @@ def run(args, compiler: str) -> int:
     if args.gradients:
         spirv_gradient = (output / "sample.rgen.spvasm").read_text()
         gradient_ir = "\n".join(path.read_text() for path in elf_dir.glob("*.emit.ll"))
-        if not re.search(r"OpImageSampleExplicitLod .* Grad ", spirv_gradient) or "fdiv float" not in gradient_ir:
+        if not re.search(r"OpImageSampleExplicitLod .*\bGrad\b", spirv_gradient) or "fdiv float" not in gradient_ir:
             errors.append("SPIR-V Grad or software footprint/log2 arithmetic evidence missing")
     if arrays:
         final_case = args.case_limit - 1
@@ -255,6 +268,9 @@ def run(args, compiler: str) -> int:
             errors.append("array descriptor free/reset/reallocation checks missing")
         if multi and not nonuniform and args.array_length > 1 and args.case_limit >= 5 and int(resources.get("element_copies", "0")) == 0:
             errors.append("descriptor element copy was not exercised")
+    if args.offset is not None:
+        if not re.search(r"OpImage(?:SampleExplicitLod|Fetch) .*\bConstOffset\b", (output / "sample.rgen.spvasm").read_text()):
+            errors.append("actual sampling/fetch SPIR-V ConstOffset evidence missing")
     uniform_profile = {}
     if uniform:
         expected_feature = f"FEATURE sampled_dynamic_query=1 sampled_dynamic_query2=1 sampled_dynamic_enabled=1 sampled_nonuniform_query=1 sampled_nonuniform_enabled={int(nonuniform)} runtime_array=0 partially_bound=0 variable_count=0 storage_dynamic=0 uniform_buffer_dynamic=0 sampled_native=0 implicit_divergent_lod=0"
@@ -302,7 +318,7 @@ def run(args, compiler: str) -> int:
     if not checked_frontier or not elf_paths:
         errors.append("checked, retained V5 ELF evidence is missing")
     if checks_only:
-        if summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "20" or summary.get("errors") != "0" or summary.get("images") != "8" or summary.get("views") != "10":
+        if summary.get("limits") != "2" or summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "20" or summary.get("errors") != "0" or summary.get("images") != "8" or summary.get("views") != "10":
             errors.append("profile rejection checks incomplete")
     else:
         if summary.get("cases") != str(args.case_limit):
@@ -377,9 +393,13 @@ def run(args, compiler: str) -> int:
         profile += "; sampled image in set0, sampler in set1 bindings6/7; samplerless layout for fetch/query"
     if args.gradients:
         profile += "; explicit isotropic 2D gradients scaled by view base dimensions; sampler bias/clamp; ordinary LLVM arithmetic and texel loads"
+    if args.offset is not None:
+        profile += "; constant signed texel offsets[-8,7] before integer addressing in each accessed mip"
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
         "profile": profile,
+        "texel_offset": args.offset,
+        "injected_offset_mismatch": args.inject_offset_mismatch,
         "explicit_gradients": args.gradients,
         "constant_gradient": args.constant_gradient,
         "gradient_color_tolerance": 4e-6 if args.gradients else None,

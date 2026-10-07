@@ -22,6 +22,8 @@ enum class MipFilter { Nearest, Linear };
 enum class Component { Identity, Zero, One, R, G, B, A };
 using ComponentMapping = std::array<Component, 4>;
 using Color = std::array<float, 4>;
+using TexelOffset = std::array<std::int32_t, 2>;
+inline constexpr std::int32_t min_texel_offset = -8, max_texel_offset = 7;
 
 struct Level {
   std::uint32_t width;
@@ -97,6 +99,7 @@ struct Result {
   bool from_gradients = false;
   double footprint_squared = 0;
   Filter filter = Filter::Nearest;
+  TexelOffset texel_offset{0, 0};
   std::vector<Tap> taps;
 };
 
@@ -104,22 +107,24 @@ struct Result {
 void validate(const Image &image);
 // Direct single-level helper uses mag_filter; min/mip selection needs sample_lod.
 Result sample_level(const Image &image, std::uint32_t mip,
-                    const Sampling &sampling, double u, double v);
+                    const Sampling &sampling, double u, double v, TexelOffset offset = {});
 // Explicit LOD is relative to the view. Mip-nearest uses Vulkan's preferred
 // tie rule (an exact half chooses the lower mip). Mip-linear blends adjacent
 // levels after sampler/view clamps. Sampler bias precedes both clamps;
 // zero bias preserves the original double-precision LOD helper behavior.
 Result sample_lod(const Image &image, View view, const Sampling &sampling,
-                  double u, double v, double lod, LodRange range = {});
+                  double u, double v, double lod, LodRange range = {},
+                  TexelOffset offset = {});
 // Explicit normalized binary32 coordinate derivatives, isotropic Euclidean
 // footprint at view base dimensions. Zero footprint selects the lower clamp.
 Result sample_grad(const Image &image, View view, const Sampling &sampling,
                    double u, double v, std::array<double,2> dx,
-                   std::array<double,2> dy, LodRange range = {});
+                   std::array<double,2> dy, LodRange range = {},
+                   TexelOffset offset = {});
 // Integer operations use relative view LOD and never consult a sampler.
 // Coordinates and LOD must be in range; invalid input throws.
 Result texel_fetch(const Image &image, View view, std::int32_t x,
-                   std::int32_t y, std::int32_t lod);
+                   std::int32_t y, std::int32_t lod, TexelOffset offset = {});
 std::array<std::uint32_t, 2> texture_size(const Image &image, View view,
                                           std::int32_t lod);
 std::uint32_t texture_query_levels(const Image &image, View view);

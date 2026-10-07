@@ -28,6 +28,7 @@ python3 tools/texture_model.py demo
 | 显式梯度 | `sample_grad` / `textureGrad`：有限 binary32 二维 dx/dy，以 view 基础级尺寸计算各向同性 LOD；再使用已有 bias/clamp/min-mag/mip/filter |
 | Mip 过滤 | nearest（精确半整数选择较低一级）或 linear（相邻两级混合）；与级内过滤独立 |
 | View swizzle | IDENTITY、R/G/B/A、ZERO/ONE；解码后通道置换/重复或浮点常量；适用于 sample/fetch |
+| Offset | sample/fetch 的常量 signed 二维 texel offset，分量 [-8,7]；每个访问 mip 独立应用，不改变 LOD 或过滤权重 |
 | 整数读取/查询 | 合法整数坐标 `texel_fetch`；相对 View 的 `texture_size`、`texture_query_levels`；不使用 sampler |
 | Trace | 下/上 mip、跨级权重、输入 UV/LOD、受限后的相对 LOD；每个 tap 的绝对 mip、坐标、偏移、合并权重和颜色 |
 | 多资源 | 不依赖全局采样状态，可交替采样不同 Image 和 Sampling 对象 |
@@ -54,7 +55,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 ## 验证
 
-测试包含十四组，普通和 ASan/UBSan 模式目前均通过 1,435,261 项检查；包含独立 bias 与显式梯度 oracle：
+测试包含十五组，普通和 ASan/UBSan 模式目前均通过 2,357,491 项检查；包含独立 bias 与显式梯度 oracle：
 
 1. 手算四点平均、非对称插值、repeat 接缝和 mirror/clamp 边缘。
 2. 负坐标、texel 边界两侧、精确边界、负零和巨大有限坐标。
@@ -71,6 +72,8 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 13. 非零 bias 的独立 LOD oracle，正负/端点/非法值及 clamp/filter 顺序。
 14. 显式二维梯度的独立 `hypot/log2` oracle，view 基础尺寸、dx/dy 分别主导、旋转/负梯度、零/极小/巨大有限梯度、精确半级和相邻浮点值。
+
+15. 常量二维 sample/fetch offset 的独立延伸 texel oracle、正负范围端点、1×1/非二次幂/mip/view、min-mag/bias/sRGB、过滤权重不变与合法最终 fetch 坐标；非法 offset、坐标上溢及极小负 UV 边界。
 
 独立对照以 long double 在虚拟延伸图像上枚举 nearest 区间或 tent kernel，逐个真实 texel 累积贡献；不调用模型的坐标归约、四点选择或寻址函数。精确样例和 UNORM 解码做相应精确比较；过滤测试的每分量绝对误差上限为 `2e-7`，适用于该模型的 float 输出，不能直接当成未来 TMU 精度要求。
 
@@ -416,3 +419,23 @@ GPU 的 q 限制为 `[2^-32,2^60]`，即基础 LOD `[-16,30]`；等价性依赖�
 当前不提供 implicit derivatives、quad/helper/divergence、各向异性、projector、shadow 或其他维度的梯度采样。
 
 E02 最终隔离/主目录验收共 43 个 GPU 命令（38 正向、5 预期失败反例），正向零差异，最大误差 `1.192092896e-7`；忽略梯度反例分别检出 2,240/2,088 差异。Mesa unit、46 项范围检查与原 any-hit 均通过。证据：`artifacts/texture_model/gradient-implementation/verification.json`。LLVM 配套提交 `88d9b6874ef0` 修正严格 divergent FP 规则被 fallback 抢先匹配；目录 89 项中 71 PASS/18 既有失败名称，未引入新失败。
+
+## E03 常量二维 offset
+
+```sh
+python3 tools/texture_model.py gpu-min-mag --offset 1 -1
+python3 tools/texture_model.py gpu-border --offset -8 7
+python3 tools/texture_model.py gpu-multi-nonuniform-separate --gradients --offset 7 -8 --array-length 4
+python3 tools/texture_model.py gpu-fetch-nonuniform --offset -8 7 --array-length 4
+python3 tools/texture_model.py gpu-min-mag --offset 1 -1 --case-limit 8 --inject-offset-mismatch
+```
+
+最后一项把 shader offset 改成零，参考模型保持真实 offset，必须返回 1 并检测颜色差异。sample/fetch 使用标准 `textureLodOffset`、`textureGradOffset` 和 `texelFetchOffset`，对应 SPIR-V `ConstOffset` / 既有 NIR `nir_tex_src_offset`。Mesa 只接受常量二维 `[-8,7]`，设备同时报告 `minTexelOffset=-8` / `maxTexelOffset=7`；没有开启 runtime Offset、gather、projector 或新 intrinsic/ISA。纹理和描述符布局不变。
+
+Offset 按每个访问 mip 的 texel 单位生效，随后进行 wrap/clamp/border；mip-linear 的两级分别使用各自尺寸，不把 offset 当成固定的 normalized UV 偏移。数学上整数平移与 floor 可交换：实现先算原始整数 tap 和权重，再平移整数 tap，避免极小负坐标或边界邻值被浮点加法吞掉。参考模型 `sample_level/sample_lod/sample_grad/texel_fetch` 增加可选 `TexelOffset`，Trace 保存实际 offset。它不是 sampler 状态。
+
+Clamp 模式的提前 UV 截断拓宽到安全的 `[-9,10]`（仅非零 offset 分量），保证 `[-8,7]` 范围内可移回图像的坐标不被提前截断，巨大坐标仍安全地进入边缘/border。周期性寻址保留小的有符号 UV，修正参考模型提前加周期使极小负值舍入到边界的问题；GPU 先前已有同样保护。
+
+Fetch 对最终整数坐标做合法性验证，不使用 sampler；实验输入构造为 `target-offset`，使每个 sampled view 的最终 fetch 坐标合法。查询尺寸/级数不使用 offset。不支持/不合法状态继续拒绝；范围检查同时验证设备两项 offset limits。
+
+E03 最终共 42 个 GPU 命令（37 正向、5 预期失败反例），正向零差异，最大颜色误差 `1.192092896e-7`；忽略 offset 反例检出 1,768/6,088 差异。48 项范围/limits 检查、隔离/主目录 Mesa unit 和原 any-hit 通过。证据 `artifacts/texture_model/offset-implementation/verification.json`。

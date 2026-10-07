@@ -33,13 +33,26 @@ Color border_color(BorderColor color) {
   return {0,0,0,0};
 }
 
+void check_offset(TexelOffset offset) {
+  for (auto value : offset)
+    require(value >= min_texel_offset && value <= max_texel_offset, "texel offset outside [-8,7]");
+}
+
 // Reduce before multiplying by image dimensions or converting to an integer.
 // This avoids undefined float-to-integer conversions for huge finite UVs.
-double reduce(double value, AddressMode mode) {
+double reduce(double value, AddressMode mode, bool offset = false) {
+  // With an offset, coordinates outside [0,1] may reach an interior texel.
+  // These wider safe bounds preserve every [-8,7] offset even for 1x1.
+  if (offset && (mode == AddressMode::ClampToEdge || mode == AddressMode::ClampToBorder))
+    return std::clamp(value, -9.0, 10.0);
   if (mode == AddressMode::ClampToEdge)
     return std::clamp(value, 0.0, 1.0);
   if (mode == AddressMode::ClampToBorder)
     return std::clamp(value, -1.0, 2.0);
+  // Preserve small signed coordinates before adding a period. A tiny
+  // negative value plus 1 rounds onto the next nearest-texel boundary.
+  if (value > -2.0 && value < 2.0)
+    return value;
   const double period = mode == AddressMode::Repeat ? 1.0 : 2.0;
   double reduced = std::fmod(value, period);
   if (reduced < 0)
@@ -128,24 +141,26 @@ void swizzle_result(Result &result, ComponentMapping mapping) {
 }
 
 Result sample_validated(const Image &image, std::uint32_t mip,
-                        const Sampling &sampling, double u, double v, Filter filter) {
+                        const Sampling &sampling, double u, double v, Filter filter, TexelOffset offset) {
   require(std::isfinite(u) && std::isfinite(v), "UV must be finite");
   check_mode(sampling.address_u);
   check_mode(sampling.address_v);
   require(mip < image.levels.size(), "mip index out of range");
   const auto &level = image.levels[mip];
-  const double x = reduce(u, sampling.address_u) * level.width;
-  const double y = reduce(v, sampling.address_v) * level.height;
+  check_offset(offset);
+  const double x = reduce(u, sampling.address_u, offset[0] != 0) * level.width;
+  const double y = reduce(v, sampling.address_v, offset[1] != 0) * level.height;
   Result result;
   result.mip = mip;
   result.mip_upper = mip;
   result.input_u = u;
   result.input_v = v;
   result.filter = filter;
+  result.texel_offset = offset;
   if (filter == Filter::Nearest) {
     result.taps.push_back(read(image, level, sampling,
-                              static_cast<std::int64_t>(std::floor(x)),
-                              static_cast<std::int64_t>(std::floor(y)), 1));
+                              static_cast<std::int64_t>(std::floor(x)) + offset[0],
+                              static_cast<std::int64_t>(std::floor(y)) + offset[1], 1));
     result.rgba = result.taps[0].color;
     result.taps[0].mip = mip;
     return result;
@@ -154,8 +169,8 @@ Result sample_validated(const Image &image, std::uint32_t mip,
   const double sy = y - 0.5;
   const double fx = std::floor(sx);
   const double fy = std::floor(sy);
-  const auto ix = static_cast<std::int64_t>(fx);
-  const auto iy = static_cast<std::int64_t>(fy);
+  const auto ix = static_cast<std::int64_t>(fx) + offset[0];
+  const auto iy = static_cast<std::int64_t>(fy) + offset[1];
   const double a = sx - fx;
   const double b = sy - fy;
   result.taps = {read(image, level, sampling, ix, iy, (1 - a) * (1 - b)),
@@ -203,14 +218,14 @@ void validate(const Image &image) {
 }
 
 Result sample_level(const Image &image, std::uint32_t mip,
-                    const Sampling &sampling, double u, double v) {
+                    const Sampling &sampling, double u, double v, TexelOffset offset) {
   validate(image);
   check_filters(sampling);
-  return sample_validated(image, mip, sampling, u, v, sampling.mag_filter);
+  return sample_validated(image, mip, sampling, u, v, sampling.mag_filter, offset);
 }
 
 Result sample_lod(const Image &image, View view, const Sampling &sampling,
-                  double u, double v, double lod, LodRange range) {
+                  double u, double v, double lod, LodRange range, TexelOffset offset) {
   validate(image);
   check_filters(sampling);
   validate_view(image, view);
@@ -244,13 +259,13 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
               sampling.mip_filter == MipFilter::Linear, "unsupported mip filter");
   const bool linear = sampling.mip_filter == MipFilter::Linear;
   const auto selected = static_cast<std::uint32_t>(low + (!linear && relative - low > 0.5));
-  Result result = sample_validated(image, view.base_mip + selected, sampling, u, v, filter);
+  Result result = sample_validated(image, view.base_mip + selected, sampling, u, v, filter, offset);
   if (linear) {
     result.mip_upper = view.base_mip + std::min(selected + 1, view.level_count - 1);
     result.mip_weight = relative - low;
     // Exact integer/end LODs retain the first sample without needless reads.
     if (result.mip_weight > 0 && result.mip_upper != result.mip) {
-      auto upper = sample_validated(image, result.mip_upper, sampling, u, v, filter);
+      auto upper = sample_validated(image, result.mip_upper, sampling, u, v, filter, offset);
       for (unsigned c = 0; c < 4; ++c)
         result.rgba[c] = static_cast<float>((1 - result.mip_weight) * result.rgba[c] +
                                            result.mip_weight * upper.rgba[c]);
@@ -270,7 +285,7 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
 
 Result sample_grad(const Image &image, View view, const Sampling &sampling,
                    double u, double v, std::array<double,2> dx,
-                   std::array<double,2> dy, LodRange range) {
+                   std::array<double,2> dy, LodRange range, TexelOffset offset) {
   validate(image);
   validate_view(image, view);
   const auto &base=image.levels[view.base_mip];
@@ -290,7 +305,7 @@ Result sample_grad(const Image &image, View view, const Sampling &sampling,
       0.5*std::log2(static_cast<double>(squared));
   const double lod=std::isfinite(derived) ? static_cast<float>(derived) :
       (squared==0 ? -std::numeric_limits<float>::max() : std::numeric_limits<float>::max());
-  Result result=sample_lod(image,view,sampling,u,v,lod,range);
+  Result result=sample_lod(image,view,sampling,u,v,lod,range,offset);
   result.from_gradients=true;
   result.footprint_squared=squared;
   result.input_lod=derived;
@@ -313,17 +328,20 @@ std::array<std::uint32_t, 2> texture_size(const Image &image, View view,
 }
 
 Result texel_fetch(const Image &image, View view, std::int32_t x,
-                   std::int32_t y, std::int32_t lod) {
+                   std::int32_t y, std::int32_t lod, TexelOffset offset) {
+  check_offset(offset);
   const auto size = texture_size(image, view, lod);
-  require(x >= 0 && y >= 0 && static_cast<std::uint32_t>(x) < size[0] &&
-              static_cast<std::uint32_t>(y) < size[1], "integer coordinate outside mip");
+  const std::int64_t final_x = static_cast<std::int64_t>(x) + offset[0];
+  const std::int64_t final_y = static_cast<std::int64_t>(y) + offset[1];
+  require(final_x >= 0 && final_y >= 0 && final_x < size[0] && final_y < size[1], "integer coordinate outside mip");
   Result result;
   result.mip = result.mip_upper = view.base_mip + lod;
-  auto tap = read_at(image, image.levels[result.mip], x, y, 1);
+  auto tap = read_at(image, image.levels[result.mip], final_x, final_y, 1);
   tap.mip = result.mip;
   result.rgba = tap.color;
   result.taps.push_back(tap);
   result.input_lod = lod;
+  result.texel_offset = offset;
   swizzle_result(result, view.components);
   return result;
 }

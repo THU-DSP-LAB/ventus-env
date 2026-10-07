@@ -77,11 +77,11 @@ Image four_colors(Format format = Format::RGBA8_UNORM) {
 // nearest-cell or tent-kernel contributions. Unlike the model, this does not
 // reduce UV, select four taps, or use modular mirrored addressing.
 std::vector<long double> axis_weights(unsigned n, long double u,
-                                      AddressMode mode, Filter filter) {
+                                      AddressMode mode, Filter filter, int offset = 0) {
   std::vector<long double> weights(n);
-  const long double position = u * n;
+  const long double position = u * n + offset;
   // Randomized inputs stay within [-3,3]; leave ample room for their kernels.
-  for (int cell = -5 * static_cast<int>(n); cell <= 5 * static_cast<int>(n); ++cell) {
+  for (int cell = -5 * static_cast<int>(n) - 8; cell <= 5 * static_cast<int>(n) + 8; ++cell) {
     long double weight;
     if (filter == Filter::Nearest)
       weight = position >= cell && position < cell + 1 ? 1 : 0;
@@ -112,10 +112,10 @@ std::vector<long double> axis_weights(unsigned n, long double u,
   return weights;
 }
 
-Color oracle(const Image &image, unsigned mip, Sampling sampling, double u, double v) {
+Color oracle(const Image &image, unsigned mip, Sampling sampling, double u, double v, TexelOffset offset = {}) {
   const auto &level = image.levels[mip];
-  const auto wx = axis_weights(level.width, u, sampling.address_u, sampling.mag_filter);
-  const auto wy = axis_weights(level.height, v, sampling.address_v, sampling.mag_filter);
+  const auto wx = axis_weights(level.width, u, sampling.address_u, sampling.mag_filter, offset[0]);
+  const auto wy = axis_weights(level.height, v, sampling.address_v, sampling.mag_filter, offset[1]);
   std::array<long double, 4> total{};
   long double coverage_x=0,coverage_y=0;
   for (auto weight : wx) coverage_x+=weight;
@@ -328,7 +328,7 @@ Color mapped_oracle(Color color, ComponentMapping mapping) {
 }
 
 Color lod_oracle(const Image &image, View view, Sampling sampling,
-                 double u, double v, double lod, LodRange range) {
+                 double u, double v, double lod, LodRange range, TexelOffset offset = {}) {
   long double position = lod;
   if (position < range.min) position = range.min;
   if (position > range.max) position = range.max;
@@ -341,7 +341,7 @@ Color lod_oracle(const Image &image, View view, Sampling sampling,
         ? std::max(0.0L, 1 - std::abs(position - level))
         : (position > level - 0.5L && position <= level + 0.5L ? 1.0L : 0.0L);
     if (!weight) continue;
-    const auto color = mapped_oracle(oracle(image, view.base_mip + level, sampling, u, v),view.components);
+    const auto color = mapped_oracle(oracle(image, view.base_mip + level, sampling, u, v, offset),view.components);
     for (unsigned c = 0; c < 4; ++c) total[c] += weight * color[c];
   }
   return {static_cast<float>(total[0]), static_cast<float>(total[1]),
@@ -432,6 +432,61 @@ void explicit_gradients() {
       (axis<2 ? x[axis] : y[axis-2])=bad;
       rejected([&]{sample_grad(image,{0,3},{},0,0,x,y);},"invalid explicit gradient component");
     }
+}
+
+void texel_offsets() {
+  auto colors = four_colors();
+  Sampling edge{AddressMode::ClampToEdge, AddressMode::ClampToEdge, Filter::Nearest};
+  expect_color(sample_level(colors,0,edge,-0.25,0.25,{1,0}).rgba,red,"outside UV plus offset reaches first texel");
+  expect_color(sample_level(colors,0,edge,1.25,0.25,{-1,0}).rgba,green,"outside UV plus negative offset reaches last texel");
+  Sampling border=edge; border.address_u=AddressMode::ClampToBorder;
+  expect_color(sample_level(colors,0,border,-100,0.25,{1,0}).rgba,Color{},"far negative stays border after positive offset");
+  Sampling repeat;
+  expect_color(sample_level(colors,0,repeat,-std::numeric_limits<float>::denorm_min(),0.25,{1,0}).rgba,red,"integer offset preserves tiny negative nearest boundary");
+  for (auto format : {Format::RGBA8_UNORM,Format::BGRA8_UNORM,Format::RGBA8_SRGB,Format::BGRA8_SRGB}) {
+    auto image=mip_image(); image.format=format;
+    for (unsigned m=0;m<image.levels.size();++m) {
+      const auto &level=image.levels[m];
+      for (unsigned y=0;y<level.height;++y) for (unsigned x=0;x<level.width;++x)
+        put(image,level,x,y,{static_cast<uint8_t>(x*37+y*71+m*53),static_cast<uint8_t>(x*89+y*11+m*97),
+                           static_cast<uint8_t>(x*13+y*53+m*127),static_cast<uint8_t>(19+x*31+y*29+m*17)});
+    }
+    for (auto u : {AddressMode::Repeat,AddressMode::MirroredRepeat,AddressMode::ClampToEdge,AddressMode::ClampToBorder})
+      for (auto v : {AddressMode::Repeat,AddressMode::MirroredRepeat,AddressMode::ClampToEdge,AddressMode::ClampToBorder})
+        for (auto mag : {Filter::Nearest,Filter::Bilinear}) for (auto min : {Filter::Nearest,Filter::Bilinear})
+          for (auto mip : {MipFilter::Nearest,MipFilter::Linear})
+            for (auto view : {View{0,3},View{1,2}})
+              for (auto offset : {TexelOffset{-8,7},TexelOffset{7,-8},TexelOffset{1,-1},TexelOffset{0,0},TexelOffset{2,2},TexelOffset{-1,0}})
+                for (double bias : {-0.5,0.5}) for (double lod : {-1.,0.5,0.75,1.5,4.})
+                  for (auto uv : {std::array<double,2>{-2.5,1.25},std::array<double,2>{0.31,0.73},std::array<double,2>{1.5,-0.25}}) {
+                    Sampling state{u,v,mag,min,mip}; state.lod_bias=bias;
+                    state.border_color=BorderColor::OpaqueWhite;
+                    const LodRange range{0,2};
+                    const auto actual=sample_lod(image,view,state,uv[0],uv[1],lod,range,offset);
+                    expect_color(actual.rgba,lod_oracle(image,view,state,uv[0],uv[1],static_cast<float>(lod)+static_cast<float>(bias),range,offset),"independent per-mip texel offset oracle");
+                    expect(actual.texel_offset==offset,"offset trace operand");
+                  }
+    for (auto offset : {TexelOffset{-8,7},TexelOffset{7,-8},TexelOffset{0,0}})
+      for (int lod=0;lod<3;++lod) {
+        const auto size=texture_size(image,{0,3},lod);
+        for (int x : {0,static_cast<int>(size[0])-1}) for (int y : {0,static_cast<int>(size[1])-1})
+          expect_color(texel_fetch(image,{0,3},x-offset[0],y-offset[1],lod,offset).rgba,
+                       texel_fetch(image,{0,3},x,y,lod).rgba,"fetch offset final legal coordinate",0);
+      }
+    Sampling state{AddressMode::MirroredRepeat,AddressMode::ClampToBorder,Filter::Bilinear,MipFilter::Linear};
+    const auto g=sample_grad(image,{0,3},state,0.31,0.73,{0.3,0.2},{-0.1,0.4});
+    const auto shifted=sample_grad(image,{0,3},state,0.31,0.73,{0.3,0.2},{-0.1,0.4},{0,1000},{7,-8});
+    expect(g.footprint_squared==shifted.footprint_squared && g.mip==shifted.mip && g.mip_weight==shifted.mip_weight,"offset does not alter gradient LOD");
+    expect_color(shifted.rgba,lod_oracle(image,{0,3},state,0.31,0.73,static_cast<float>(shifted.input_lod),{0,1000},{7,-8}),"gradient offset independent texel oracle");
+  }
+  for (auto bad : {TexelOffset{-9,0},TexelOffset{0,8},TexelOffset{INT32_MAX,0},TexelOffset{0,INT32_MIN}}) {
+    rejected([&]{sample_level(colors,0,{},0,0,bad);},"invalid level offset");
+    rejected([&]{sample_lod(colors,{0,1},{},0,0,0,{},bad);},"invalid LOD offset");
+    rejected([&]{sample_grad(colors,{0,1},{},0,0,{0,0},{0,0},{},bad);},"invalid gradient offset");
+    rejected([&]{texel_fetch(colors,{0,1},0,0,0,bad);},"invalid fetch offset");
+  }
+  rejected([&]{texel_fetch(colors,{0,1},0,0,0,{-1,0});},"fetch final coordinate invalid");
+  rejected([&]{texel_fetch(colors,{0,1},INT32_MAX,0,0,{7,0});},"fetch offset overflow cannot become legal");
 }
 
 void mip_linear() {
@@ -830,7 +885,7 @@ void invalid_inputs() {
 } // namespace
 
 int main() {
-  const std::array<std::pair<const char *, void (*)()>, 14> suites{{
+  const std::array<std::pair<const char *, void (*)()>, 15> suites{{
       {"hand-calculated filtering and seams", hand_calculated},
       {"negative UV, boundaries and huge finite UV", negative_and_boundary_coordinates},
       {"all 256 UNORM values in both formats", all_unorm_values},
@@ -839,6 +894,7 @@ int main() {
       {"mip-linear/trilinear independent oracle and trace", mip_linear},
       {"sampler LOD bias before clamp/filter/view", lod_bias},
       {"explicit 2D gradients and independent Euclidean oracle", explicit_gradients},
+      {"constant sample/fetch offsets and independent texel oracle", texel_offsets},
       {"independent min/mag selection before view clamp", min_mag},
       {"sRGB decoding before filtering and unchanged alpha", srgb},
       {"integer texel fetch and view-relative property queries", fetch_and_queries},

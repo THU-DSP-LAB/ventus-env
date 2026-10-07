@@ -527,6 +527,19 @@ public:
     miss = {base + stride, stride, stride};
   }
 
+  static TexelOffset texel_offset() {
+    if (const char *text=std::getenv("VENTUS_TEXTURE_OFFSET")) {
+      char *end=nullptr;
+      const long x=std::strtol(text,&end,10);
+      if (!end || *end!=',') throw std::runtime_error("invalid texel offset");
+      const long y=std::strtol(end+1,&end,10);
+      if (!end || *end!='\0' || x < -8 || x > 7 || y < -8 || y > 7)
+        throw std::runtime_error("texel offset outside [-8,7]");
+      return {static_cast<int32_t>(x),static_cast<int32_t>(y)};
+    }
+    return {};
+  }
+
   static bool gradients() { return std::getenv("VENTUS_TEXTURE_GRADIENTS")!=nullptr; }
 
   static std::array<float,4> gradient_request(unsigned i) {
@@ -932,6 +945,11 @@ int profile_checks(const char *rgen, const char *rmiss, int bad_count, char **ba
   unsigned samplers = 0, shaders = 0, images = 0, views = 0;
   Experiment baseline;
   baseline.initialize();
+  VkPhysicalDeviceProperties properties{};
+  vkGetPhysicalDeviceProperties(baseline.physical, &properties);
+  if (properties.limits.minTexelOffset != min_texel_offset ||
+      properties.limits.maxTexelOffset != max_texel_offset)
+    throw std::runtime_error("advertised texel offset limits disagree with software profile");
   sampler_checks(baseline, samplers);
   image_view_checks(baseline, images, views);
   baseline.setup_pipeline(rgen, rmiss);
@@ -952,7 +970,7 @@ int profile_checks(const char *rgen, const char *rmiss, int bad_count, char **ba
     std::cout << "CHECK shader=" << bad_shaders[i] << " result=rejected" << std::endl;
   }
   loaded_libraries();
-  std::cout << "CHECKS samplers=" << samplers << " shaders=" << shaders << " images=" << images << " views=" << views << " baseline=pass errors=0" << std::endl;
+  std::cout << "CHECKS samplers=" << samplers << " shaders=" << shaders << " images=" << images << " views=" << views << " limits=2 baseline=pass errors=0" << std::endl;
   return 0;
 }
 
@@ -1015,6 +1033,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   experiment.empty_tlas();
   experiment.setup_pipeline(rgen, rmiss, false, separate, separate && fetch_query);
   auto uv = requests();
+  if (std::getenv("VENTUS_TEXTURE_OFFSET")) uv[0] = {-std::numeric_limits<float>::denorm_min(), 0.25f};
   if (sweep) {
     uv.clear();
     for (unsigned i=0;i<256;++i) uv.push_back({(i+0.5f)/256,0.5f});
@@ -1104,7 +1123,8 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
           const unsigned group=i/view.level_count;
           const unsigned x=group<4 ? ((group&1) ? level.width-1 : 0) : (i*37)%level.width;
           const unsigned y=group<4 ? ((group&2) ? level.height-1 : 0) : (i*17)%level.height;
-          uv[i]={static_cast<float>(x),static_cast<float>(y)};
+          uv[i]={static_cast<float>(static_cast<int>(x)-Experiment::texel_offset()[0]),
+                 static_cast<float>(static_cast<int>(y)-Experiment::texel_offset()[1])};
           mip_inputs[i]={uv[i][0],uv[i][1],static_cast<float>(lod),0};
         }
         std::memcpy(inputs.map,mip_inputs.data(),mip_inputs.size()*sizeof(mip_inputs[0]));
@@ -1198,7 +1218,8 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                 const View &selected = element_views[(i + base_index) % experiment.array_length];
                 const unsigned lod = i % selected.level_count;
                 const auto &level = image.levels[selected.base_mip + lod];
-                uv[i] = {static_cast<float>((i * 37) % level.width),static_cast<float>((i * 17) % level.height)};
+                uv[i] = {static_cast<float>(static_cast<int>((i * 37) % level.width)-Experiment::texel_offset()[0]),
+                         static_cast<float>(static_cast<int>((i * 17) % level.height)-Experiment::texel_offset()[1])};
                 mip_inputs[i] = {uv[i][0],uv[i][1],static_cast<float>(lod),0};
               }
               std::memcpy(inputs.map,mip_inputs.data(),mip_inputs.size()*sizeof(mip_inputs[0]));
@@ -1262,10 +1283,10 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                 lane_view.components = mappings[(mapping_index + selected) % mappings.size()];
               }
               const auto reference = fetch_query ? texel_fetch(image,lane_view,static_cast<int32_t>(uv[i][0]),
-                  static_cast<int32_t>(uv[i][1]),static_cast<int32_t>(mip_inputs[i][2])) :
+                  static_cast<int32_t>(uv[i][1]),static_cast<int32_t>(mip_inputs[i][2]),Experiment::texel_offset()) :
                   Experiment::gradients() ? sample_grad(image,sampled_view,sampling,uv[i][0],uv[i][1],
-                      {mip_inputs[i][2],mip_inputs[i][3]},{Experiment::gradient_request(i)[2],Experiment::gradient_request(i)[3]},config.range) :
-                  sample_lod(image, sampled_view, sampling, uv[i][0], uv[i][1], mips ? mip_inputs[i][2] : 0, config.range);
+                      {mip_inputs[i][2],mip_inputs[i][3]},{Experiment::gradient_request(i)[2],Experiment::gradient_request(i)[3]},config.range,Experiment::texel_offset()) :
+                  sample_lod(image, sampled_view, sampling, uv[i][0], uv[i][1], mips ? mip_inputs[i][2] : 0, config.range,Experiment::texel_offset());
               if (fetch_query) {
                 if (values[i*8+4]!=73) ++markers_failed;
                 const auto size=texture_size(image,lane_view,static_cast<int32_t>(mip_inputs[i][2]));
@@ -1394,7 +1415,8 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
   const unsigned format_checks = srgb || view_swizzle ? srgb_format_checks(experiment) : 0;
   experiment.empty_tlas();
   experiment.setup_pipeline(rgen, rmiss, true, separate);
-  const auto uv = requests();
+  auto uv = requests();
+  if (std::getenv("VENTUS_TEXTURE_OFFSET")) uv[0] = {-std::numeric_limits<float>::denorm_min(), 0.25f};
   const std::array<float, 16> lods{-10,0,0.49f,0.5f,std::nextafter(0.5f,1.f),0.51f,
       1,1.49f,1.5f,std::nextafter(1.5f,2.f),1.51f,2,2.5f,3,10,1000};
   std::vector<std::array<float, 4>> request_data;
@@ -1554,14 +1576,14 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
               const MultiResource &lane_b = flip_b ? a : b;
               auto ra = Experiment::gradients() ? sample_grad(*lane_a.image,lane_a.view,flip_sa ? state_b : state_a,
                   request[0],request[1],{request[2],request[3]},
-                  {Experiment::gradient_request(i)[2],Experiment::gradient_request(i)[3]},flip_sa ? clamp_b : clamp_a) :
+                  {Experiment::gradient_request(i)[2],Experiment::gradient_request(i)[3]},flip_sa ? clamp_b : clamp_a,Experiment::texel_offset()) :
                   sample_lod(*lane_a.image,lane_a.view,flip_sa ? state_b : state_a,
-                  request[0],request[1],request[2],flip_sa ? clamp_b : clamp_a);
+                  request[0],request[1],request[2],flip_sa ? clamp_b : clamp_a,Experiment::texel_offset());
               auto rb = Experiment::gradients() ? sample_grad(*lane_b.image,lane_b.view,flip_sb ? state_a : state_b,
                   request[1],request[0],{request[3],request[2]},
-                  {Experiment::gradient_request(i)[3],Experiment::gradient_request(i)[2]},flip_sb ? clamp_a : clamp_b) :
+                  {Experiment::gradient_request(i)[3],Experiment::gradient_request(i)[2]},flip_sb ? clamp_a : clamp_b,Experiment::texel_offset()) :
                   sample_lod(*lane_b.image,lane_b.view,flip_sb ? state_a : state_b,
-                  request[1],request[0],request[3],flip_sb ? clamp_a : clamp_b);
+                  request[1],request[0],request[3],flip_sb ? clamp_a : clamp_b,Experiment::texel_offset());
               if (experiment.nonuniform_index) {
                 ++experiment.lane_invocations;
                 ++experiment.lane_mixes;

@@ -23,6 +23,8 @@ def main() -> int:
     parser.add_argument("--array-binding", type=int, choices=(2, 12), default=2)
     parser.add_argument("--array-length", type=int, choices=(1, 2, 4), default=4)
     parser.add_argument("--array-index", type=int, default=None)
+    parser.add_argument("--offset", type=int, nargs=2, help="constant signed texel offset.xy in [-8,7] for sampling/fetch")
+    parser.add_argument("--inject-offset-mismatch", action="store_true", help="offset negative control: replace shader offset with zero")
     parser.add_argument("--constant-gradient", type=float, nargs=4, help="use compile-time dx.xy and dy.xy derivatives instead of the per-invocation gradient corpus")
     parser.add_argument("--gradients", action="store_true", help="use explicit 2D textureGrad with per-invocation gradient corpus in sampling GPU profiles")
     parser.add_argument("--inject-gradient-mismatch", action="store_true", help="gradient negative control: replace shader gradients with zero")
@@ -39,6 +41,10 @@ def main() -> int:
     parser.add_argument("--inject-mismatch", action="store_true", help="gpu checker negative control; must fail")
     parser.add_argument("--inject-query-mismatch", action="store_true", help="fetch/query checker negative control; must fail")
     args = parser.parse_args()
+    if args.offset is not None and (args.action in ("test","demo","gpu-checks","gpu-srgb-values") or any(v < -8 or v > 7 for v in args.offset)):
+        parser.error("offset requires a sampling/fetch GPU profile and two integers in [-8,7]")
+    if args.inject_offset_mismatch and (not args.offset or args.offset==[0,0] or args.action.startswith("gpu-fetch")):
+        parser.error("inject-offset-mismatch requires a nonzero sampling offset")
     if args.constant_gradient is not None and (not args.gradients or any(not math.isfinite(v) or abs(v)>3.4028234663852886e38 for v in args.constant_gradient)):
         parser.error("constant-gradient requires gradients and four finite binary32 values")
     if args.inject_gradient_mismatch and args.constant_gradient==[0,0,0,0]:

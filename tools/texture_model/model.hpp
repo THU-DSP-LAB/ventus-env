@@ -44,6 +44,9 @@ struct Sampling {
   Filter min_filter = Filter::Nearest;
   MipFilter mip_filter = MipFilter::Nearest;
   BorderColor border_color = BorderColor::TransparentBlack;
+  // E01 finite sampler bias profile. Nonzero bias uses a binary32 LOD sum.
+  double lod_bias = 0;
+  static constexpr double max_lod_bias = 16;
 
   Sampling() = default;
   // Existing equal-filter call sites retain their meaning.
@@ -102,7 +105,8 @@ Result sample_level(const Image &image, std::uint32_t mip,
                     const Sampling &sampling, double u, double v);
 // Explicit LOD is relative to the view. Mip-nearest uses Vulkan's preferred
 // tie rule (an exact half chooses the lower mip). Mip-linear blends adjacent
-// levels after sampler/view clamps; no LOD bias is modeled.
+// levels after sampler/view clamps. Sampler bias precedes both clamps;
+// zero bias preserves the original double-precision LOD helper behavior.
 Result sample_lod(const Image &image, View view, const Sampling &sampling,
                   double u, double v, double lod, LodRange range = {});
 // Integer operations use relative view LOD and never consult a sampler.

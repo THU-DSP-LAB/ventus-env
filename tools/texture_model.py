@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 import shutil
 import subprocess
@@ -22,6 +23,8 @@ def main() -> int:
     parser.add_argument("--array-binding", type=int, choices=(2, 12), default=2)
     parser.add_argument("--array-length", type=int, choices=(1, 2, 4), default=4)
     parser.add_argument("--array-index", type=int, default=None)
+    parser.add_argument("--lod-bias", type=float, default=0, help="finite sampler bias in [-16,16]; multi profiles use opposite biases for the two samplers")
+    parser.add_argument("--inject-bias-mismatch", action="store_true", help="bias negative control: give GPU samplers zero bias while oracle retains requested bias")
     parser.add_argument("--sanitize", action="store_true", help="enable address/UB sanitizers")
     parser.add_argument("--cxx", default="c++", help="host C++17 compiler executable")
     parser.add_argument("--mesa-build", type=Path, help="local Mesa build directory for gpu")
@@ -33,6 +36,10 @@ def main() -> int:
     parser.add_argument("--inject-mismatch", action="store_true", help="gpu checker negative control; must fail")
     parser.add_argument("--inject-query-mismatch", action="store_true", help="fetch/query checker negative control; must fail")
     args = parser.parse_args()
+    if not math.isfinite(args.lod_bias) or abs(args.lod_bias)>16:
+        parser.error("lod-bias must be finite and in [-16,16]")
+    if args.inject_bias_mismatch and (args.lod_bias==0 or args.action in ("test","demo","gpu-checks") or args.action.startswith("gpu-fetch")):
+        parser.error("inject-bias-mismatch requires nonzero bias and a sampling GPU profile")
     if args.array_index is None:
         args.array_index = args.array_length - 1
     if not 0 <= args.array_index < args.array_length:

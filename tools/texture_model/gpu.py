@@ -142,6 +142,9 @@ def run(args, compiler: str) -> int:
         "LD_LIBRARY_PATH": ":".join([str(root / "spike/build"), str(paths["driver"].parent),
                                       str(root / "llvm/build/lib"), env.get("LD_LIBRARY_PATH", "")]),
     })
+    env["VENTUS_TEXTURE_LOD_BIAS"] = str(args.lod_bias)
+    if args.inject_bias_mismatch:
+        env["VENTUS_TEXTURE_INJECT_BIAS_MISMATCH"] = "1"
     if uniform:
         env["VENTUS_TEXTURE_UNIFORM_INDEX"] = "1"
     if nonuniform:
@@ -238,7 +241,7 @@ def run(args, compiler: str) -> int:
         uniform_profile["dynamic_spirv"] = bool(re.search(r"OpAccessChain .* %source(?:_[ab])? %\w+", spirv_text) and
                                                  "OpVariable %_ptr_PushConstant_Selectors PushConstant" in spirv_text)
         uniform_profile["dynamic_llvm"] = bool(re.search(r"shl i32 %\w+, 7", llvm_text) and
-                                                re.search(r"mul i32 %\w+, 80", llvm_text))
+                                                re.search(r"mul i32 %\w+, 88", llvm_text))
         uniform_profile["elf_count"] = len(elf_paths)
         if nonuniform:
             uniform_profile["nonuniform_spirv"] = "OpCapability SampledImageArrayNonUniformIndexing" in spirv_text and "NonUniform" in spirv_text
@@ -273,7 +276,7 @@ def run(args, compiler: str) -> int:
     if not checked_frontier or not elf_paths:
         errors.append("checked, retained V5 ELF evidence is missing")
     if checks_only:
-        if summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "14" or summary.get("errors") != "0" or summary.get("images") != "8" or summary.get("views") != "10":
+        if summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "20" or summary.get("errors") != "0" or summary.get("images") != "8" or summary.get("views") != "10":
             errors.append("profile rejection checks incomplete")
     else:
         if summary.get("cases") != str(args.case_limit):
@@ -349,6 +352,8 @@ def run(args, compiler: str) -> int:
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
         "profile": profile,
+        "sampler_lod_bias": args.lod_bias,
+        "injected_bias_mismatch": args.inject_bias_mismatch,
         "resource_profile": resources,
         "uniform_profile": uniform_profile,
         "array_profile": {"binding": args.array_binding, "length": args.array_length, "image_index": args.array_index,

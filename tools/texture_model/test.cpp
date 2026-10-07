@@ -348,6 +348,44 @@ Color lod_oracle(const Image &image, View view, Sampling sampling,
           static_cast<float>(total[2]), static_cast<float>(total[3])};
 }
 
+void lod_bias() {
+  const auto solid = mip_image();
+  Sampling state;
+  state.lod_bias = 1;
+  expect_color(sample_lod(solid,{0,3},state,0.3,0.7,0).rgba,green,"sampler bias applies to explicit Lod");
+  state.lod_bias = -1;
+  expect_color(sample_lod(solid,{0,3},state,0.3,0.7,1).rgba,red,"negative bias before clamp");
+  state.lod_bias = 0.5;
+  state.mip_filter = MipFilter::Linear;
+  expect_color(sample_lod(solid,{0,3},state,0.3,0.7,0).rgba,{0.5,0.5,0,1},"bias before mip weights");
+  expect_color(sample_lod(solid,{1,2},state,0.3,0.7,0).rgba,{0,0.5,0.5,1},"bias is relative to view");
+  state.lod_bias = 1;
+  expect_color(sample_lod(solid,{0,3},state,0.3,0.7,0,{0,0.25}).rgba,{0.75,0.25,0,1},"sampler clamp after bias");
+  const std::array<float,11> lods{-100,-1,-0.f,0.f,0.25f,0.5f,std::nextafter(0.5f,1.f),1,1.5f,2,100};
+  for (auto bias : {-16.f,-1.f,-0.5f,-0.f,0.f,0.25f,0.5f,1.f,16.f})
+    for (auto view : {View{0,3},View{1,2},View{1,1}})
+      for (auto mip : {MipFilter::Nearest,MipFilter::Linear})
+        for (auto mag : {Filter::Nearest,Filter::Bilinear})
+          for (auto min : {Filter::Nearest,Filter::Bilinear})
+            for (auto range : {LodRange{0,1000},LodRange{0.75,1.75},LodRange{2,2}})
+              for (float lod : lods) {
+                Sampling sampling{AddressMode::Repeat,AddressMode::ClampToEdge,mag,min,mip};
+                sampling.lod_bias=bias;
+                // Explicit binary32 input addition, followed by a separate
+                // per-level weighted-color oracle rather than sample_lod.
+                const double position=static_cast<float>(lod+bias);
+                auto r=sample_lod(solid,view,sampling,0.3,0.7,lod,range);
+                expect_color(r.rgba,lod_oracle(solid,view,sampling,0.3,0.7,position,range),"independent bias level oracle");
+                const auto expected=std::clamp(position,range.min,range.max);
+                expect(r.sampler_lod==expected,"biased lambda diagnostic");
+                expect(r.filter==(expected>0 ? min : mag),"bias changes min/mag before view clamp");
+              }
+  for (double bad : {std::numeric_limits<double>::quiet_NaN(),std::numeric_limits<double>::infinity(),-std::numeric_limits<double>::infinity(),16.01,-16.01}) {
+    state.lod_bias=bad;
+    rejected([&]{sample_lod(solid,{0,3},state,0,0,0);},"invalid sampler bias");
+  }
+}
+
 void mip_linear() {
   auto solid = mip_image();
   Sampling state{AddressMode::Repeat, AddressMode::ClampToEdge,
@@ -744,13 +782,14 @@ void invalid_inputs() {
 } // namespace
 
 int main() {
-  const std::array<std::pair<const char *, void (*)()>, 12> suites{{
+  const std::array<std::pair<const char *, void (*)()>, 13> suites{{
       {"hand-calculated filtering and seams", hand_calculated},
       {"negative UV, boundaries and huge finite UV", negative_and_boundary_coordinates},
       {"all 256 UNORM values in both formats", all_unorm_values},
       {"3600 independent-oracle samples and properties", randomized_oracle},
       {"explicit LOD, view ranges and multiple images", lod_and_views},
       {"mip-linear/trilinear independent oracle and trace", mip_linear},
+      {"sampler LOD bias before clamp/filter/view", lod_bias},
       {"independent min/mag selection before view clamp", min_mag},
       {"sRGB decoding before filtering and unchanged alpha", srgb},
       {"integer texel fetch and view-relative property queries", fetch_and_queries},

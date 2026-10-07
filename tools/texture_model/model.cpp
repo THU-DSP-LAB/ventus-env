@@ -223,7 +223,14 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
   require(std::isfinite(range.min) && std::isfinite(range.max) &&
               range.min >= 0 && range.min <= range.max,
           "invalid LOD range");
-  const double clamped = std::clamp(lod, range.min, range.max);
+  require(std::isfinite(sampling.lod_bias) &&
+              std::abs(sampling.lod_bias) <= Sampling::max_lod_bias,
+          "invalid sampler LOD bias");
+  // Match the software GPU binary32 addition at mip/filter boundaries. Keep
+  // the original zero-bias high-precision helper for existing callers.
+  const double biased = sampling.lod_bias == 0 ? lod :
+      static_cast<double>(static_cast<float>(lod) + static_cast<float>(sampling.lod_bias));
+  const double clamped = std::clamp(biased, range.min, range.max);
   // Vulkan chooses min/mag using lambda after sampler clamp, before view
   // availability and mip rounding. Even a one-level view can be minified.
   const Filter filter = clamped <= 0 ? sampling.mag_filter : sampling.min_filter;

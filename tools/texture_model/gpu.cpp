@@ -527,6 +527,11 @@ public:
     miss = {base + stride, stride, stride};
   }
 
+  static float requested_bias() {
+    const char *text=std::getenv("VENTUS_TEXTURE_LOD_BIAS");
+    return text ? std::stof(text) : 0;
+  }
+
   VkSampler sampler(Sampling sampling, LodRange range = {0, 0},
                     VkSamplerMipmapMode mode = VK_SAMPLER_MIPMAP_MODE_NEAREST) {
     const VkSamplerAddressMode modes[]{VK_SAMPLER_ADDRESS_MODE_REPEAT,
@@ -542,6 +547,7 @@ public:
     info.addressModeU = modes[static_cast<unsigned>(sampling.address_u)];
     info.addressModeV = modes[static_cast<unsigned>(sampling.address_v)];
     info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    info.mipLodBias = std::getenv("VENTUS_TEXTURE_INJECT_BIAS_MISMATCH") ? 0 : sampling.lod_bias;
     info.minLod = range.min;
     info.maxLod = range.max;
     info.borderColor = colors[static_cast<unsigned>(sampling.border_color)];
@@ -813,7 +819,13 @@ void sampler_checks(Experiment &experiment, unsigned &count) {
   changed = base; changed.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; changed.borderColor=VK_BORDER_COLOR_INT_OPAQUE_BLACK; verify("integer-border-u", changed, false);
   changed = base; changed.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; changed.borderColor=static_cast<VkBorderColor>(99); verify("invalid-border-v", changed, false);
   changed = base; changed.addressModeV = VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE; verify("mirror-clamp-v", changed, false);
-  changed = base; changed.mipLodBias = 0.5f; verify("bias", changed, false);
+  changed = base; changed.mipLodBias = 0.5f; verify("bias", changed, true);
+  changed = base; changed.mipLodBias = -0.5f; verify("negative-bias",changed,true);
+  VkPhysicalDeviceProperties properties{};
+  vkGetPhysicalDeviceProperties(experiment.physical,&properties);
+  if (properties.limits.maxSamplerLodBias!=Sampling::max_lod_bias) throw std::runtime_error("sampler bias limit mismatch");
+  for (float bias : {-16.f,16.f}) { changed=base; changed.mipLodBias=bias; verify("bias-limit",changed,true); }
+  for (float bias : {-16.01f,16.01f,std::numeric_limits<float>::infinity()}) { changed=base; changed.mipLodBias=bias; verify("bad-bias",changed,false); }
   changed = base; changed.mipLodBias = std::numeric_limits<float>::quiet_NaN(); verify("nan-bias", changed, false);
   changed = base; changed.compareEnable = VK_TRUE; verify("comparison", changed, false);
   changed = base; changed.anisotropyEnable = VK_TRUE; verify("anisotropy", changed, false);
@@ -1005,7 +1017,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   experiment.submit();
   std::ofstream csv(csv_path);
   if (!csv) throw std::runtime_error("cannot open numeric result CSV");
-  csv << "case,path,width,height,format,address_u,address_v,mag_filter,min_filter,selected_filter,sampler_lod,request,u,v,input_lod,view_base,view_count,selected_mip,mip_upper,mip_weight,mip_filter,view_mapping,border_color,channel,reference,gpu,abs_error\n";
+  csv << "case,path,width,height,format,address_u,address_v,mag_filter,min_filter,selected_filter,sampler_lod,request,u,v,input_lod,view_base,view_count,selected_mip,mip_upper,mip_weight,mip_filter,view_mapping,border_color,sampler_bias,channel,reference,gpu,abs_error\n";
   csv << std::setprecision(10);
   unsigned cases = 0;
   std::uint64_t samples = 0, components = 0, mismatches = 0, markers_failed = 0, buffer_failed = 0;
@@ -1128,6 +1140,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
             const bool linear = mip_linear || (min_mag && filter_index >= 4);
             Sampling sampling{u_mode, v_mode, mag, min, linear ? MipFilter::Linear : MipFilter::Nearest};
             sampling.border_color=static_cast<BorderColor>(border_index);
+            sampling.lod_bias=Experiment::requested_bias();
             auto sampler = experiment.samplerless ? VK_NULL_HANDLE : experiment.sampler(sampling, config.range, linear || (mips && !min_mag && view.level_count == 1) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
             View sampled_view=view;
             const unsigned mapping_index=border_mode && border_index==1 && !fetch_query ? cases%2 : cases%mappings.size();
@@ -1244,7 +1257,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                     << ',' << (mips ? mip_inputs[i][2] : 0) << ',' << lane_view.base_mip << ',' << lane_view.level_count << ',' << reference.mip
                     << ',' << reference.mip_upper << ',' << reference.mip_weight << ',' << static_cast<int>(sampling.mip_filter)
                     << ',' << packed_mapping(lane_view.components)
-                    << ',' << static_cast<unsigned>(sampling.border_color)
+                    << ',' << static_cast<unsigned>(sampling.border_color) << ',' << sampling.lod_bias
                     << ',' << c << ',' << reference.rgba[c] << ',' << value << ',' << error << '\n';
                 ++components;
               }
@@ -1352,7 +1365,7 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
   experiment.submit();
   std::ofstream csv(csv_path);
   if (!csv) throw std::runtime_error("cannot open multi-binding CSV");
-  csv << "case,pair,phase,path,output,resource_a,resource_b,view_a_base,view_b_base,mip_a,mip_b,mip_a_upper,mip_b_upper,mip_weight_a,mip_weight_b,request,u,v,lod_a,lod_b,address_a_u,address_a_v,mag_filter_a,min_filter_a,selected_filter_a,mip_filter_a,min_lod_a,max_lod_a,address_b_u,address_b_v,mag_filter_b,min_filter_b,selected_filter_b,mip_filter_b,min_lod_b,max_lod_b,channel,reference,gpu,abs_error,active_a,active_b,image_index_a,image_index_b,sampler_index_a,sampler_index_b\n";
+  csv << "case,pair,phase,path,output,resource_a,resource_b,view_a_base,view_b_base,mip_a,mip_b,mip_a_upper,mip_b_upper,mip_weight_a,mip_weight_b,request,u,v,lod_a,lod_b,address_a_u,address_a_v,mag_filter_a,min_filter_a,selected_filter_a,mip_filter_a,min_lod_a,max_lod_a,address_b_u,address_b_v,mag_filter_b,min_filter_b,selected_filter_b,mip_filter_b,min_lod_b,max_lod_b,channel,reference,gpu,abs_error,active_a,active_b,image_index_a,image_index_b,sampler_index_a,sampler_index_b,bias_a,bias_b\n";
   csv << std::setprecision(10);
   unsigned cases = 0;
   std::array<unsigned, 8> phase_counts{};
@@ -1405,6 +1418,8 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
             sampling_b.border_color=static_cast<BorderColor>((pair+2)%3);
           }
           const LodRange range_a{0,1000}, range_b{0.75,1.75};
+          sampling_a.lod_bias=Experiment::requested_bias();
+          sampling_b.lod_bias=-Experiment::requested_bias();
           const auto sampler_a = experiment.sampler(sampling_a,range_a,sampling_a.mip_filter == MipFilter::Linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
           const auto sampler_b = experiment.sampler(sampling_b,range_b,sampling_b.mip_filter == MipFilter::Linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
           for (unsigned phase = 0; phase < phases.size(); ++phase) {
@@ -1532,7 +1547,9 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
                         << ',' << (experiment.nonuniform_index ? index_a : experiment.array_index)
                         << ',' << (experiment.nonuniform_index ? index_b : experiment.array_index)
                         << ',' << (experiment.separate ? (experiment.nonuniform_index ? sampler_a_index : experiment.array_length - 1 - experiment.array_index) : (experiment.nonuniform_index ? index_a : experiment.array_index))
-                        << ',' << (experiment.separate ? (experiment.nonuniform_index ? sampler_b_index : experiment.array_length - 1 - experiment.array_index) : (experiment.nonuniform_index ? index_b : experiment.array_index)) << '\n';
+                        << ',' << (experiment.separate ? (experiment.nonuniform_index ? sampler_b_index : experiment.array_length - 1 - experiment.array_index) : (experiment.nonuniform_index ? index_b : experiment.array_index))
+                        << ',' << (flip_sa ? state_b : state_a).lod_bias
+                        << ',' << (flip_sb ? state_a : state_b).lod_bias << '\n';
                     ++components;
                   }
                   if (output < 2) ++samples;

@@ -24,7 +24,7 @@ python3 tools/texture_model.py demo
 | 寻址 | U/V 独立的 repeat、mirrored repeat、clamp-to-edge、clamp-to-border |
 | Texel 过滤 | nearest 或 bilinear；独立 minFilter/magFilter，按 sampler clamp 后的 LOD 选择 |
 | Border color | 核心 float transparent black/opaque black/opaque white，逐 tap 替换后过滤；opaque black 采样仅覆盖 identity view |
-| LOD | 显式有限值；sampler 范围限制后映射至 view 的可访问 mip |
+| LOD | 显式有限值；非零 sampler bias 先做 binary32 加法，再限制到 sampler/view 范围；bias 范围为 [-16,16] |
 | Mip 过滤 | nearest（精确半整数选择较低一级）或 linear（相邻两级混合）；与级内过滤独立 |
 | View swizzle | IDENTITY、R/G/B/A、ZERO/ONE；解码后通道置换/重复或浮点常量；适用于 sample/fetch |
 | 整数读取/查询 | 合法整数坐标 `texel_fetch`；相对 View 的 `texture_size`、`texture_query_levels`；不使用 sampler |
@@ -33,7 +33,7 @@ python3 tools/texture_model.py demo
 
 `sample_level` 在指定的 image 绝对 mip 内用 `mag_filter` 采样，它是直接指定级别与级内过滤的 helper，不进行 LOD/min/mag 选择。`sample_lod` 的 LOD 则相对 View；例如 `{base_mip=1, level_count=2}` 的 LOD 0 访问 image mip 1。每个 mip 的尺寸按 `max(1, previous/2)` 递减；可不提供后续级别，但不能在 1×1 之后继续追加重复 mip。
 
-当前没有 LOD bias、导数、压缩、比较过滤、layer array 或 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
+当前尚无导数、压缩、比较过滤、layer array 或 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
 
 ## 计算规则与数值边界
 
@@ -53,7 +53,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 ## 验证
 
-测试包含十二组，普通和 ASan/UBSan 模式目前均通过 1,375,170 项检查：
+测试包含十三组，普通和 ASan/UBSan 模式目前均通过 1,417,963 项检查，新增独立 bias oracle、正负范围、view/clamp/filter 顺序及非法 bias 检查：
 
 1. 手算四点平均、非对称插值、repeat 接缝和 mirror/clamp 边缘。
 2. 负坐标、texel 边界两侧、精确边界、负零和巨大有限坐标。
@@ -375,3 +375,20 @@ F01–F09累计回归、40项范围检查、unit/host和原图通过。规范、
 命令及数值证据见 `artifacts/texture_model/nonuniform-index-implementation/verification.json`。
 F01–F10在既定RV32 Spike软件profile中累计完成；这不冻结TMU接口或声明
 完整Vulkan/RV64/RTL一致性。LLVM backend/Spike/ISA未改，18项既有LLVM失败未处理。
+
+## E01：sampler LOD bias（2026-10-07）
+
+沿用现有 GPU profiles，并使用 `--lod-bias` 指定 sampler 状态。例如：
+
+```sh
+python3 tools/texture_model.py gpu-min-mag --lod-bias 0.5
+python3 tools/texture_model.py gpu-multi-nonuniform-separate --lod-bias -1 --array-length 4
+python3 tools/texture_model.py gpu-fetch-border --lod-bias 16
+python3 tools/texture_model.py gpu-min-mag --lod-bias 1 --case-limit 8 --inject-bias-mismatch
+```
+
+Multi profiles 的两个 sampler 使用相反 bias，交换、共享及逐 lane 索引后仍按实际 sampler 计算 oracle；CSV 保存每个采样所用的 bias。`--inject-bias-mismatch` 让 GPU sampler 使用零 bias 而 oracle 保留指定 bias，必须返回 1。Fetch profiles 验证采样状态不影响整数读取和查询；separate fetch 仍不绑定 sampler。
+
+依据 Vulkan-Docs v1.4.328 的 LOD Operation，sampler bias 参与显式 Lod 采样，先于 sampler clamp、min/mag 判定和 view/mip 选择。GPU 输入 bias 为有限 binary32，`maxSamplerLodBias` 查询值为 16。资源元素在偏移 80 追加 bias，大小从 80 扩为 88 字节；binding 目录、24 字节 mip 表和 texel 存储不变。旧阶段的 80 字节描述保留为历史记录。
+
+E01 同时暴露了 LLVM 的 uniform FP scalar pattern 优先级问题：混合 vector fallback 抢先选择，随后产生非法 VGPR→GPRF32 COPY。LLVM `a4e6dfe7f818` 提升严格 uniform 的 add/sub/mul/div pattern 优先级；新增 scalar/zero-add 回归通过，既有 mixed/vector 检查没有新增失败，Spike 与自定义编码未改。完整证据保存在 `artifacts/texture_model/bias-implementation/`；下一项是显式二维梯度 E02。

@@ -23,6 +23,27 @@ constexpr double tolerance = 1e-6; // Declared before running: float shader arit
 static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559,
               "numeric readback requires IEEE 754 binary32");
 
+const std::array<ComponentMapping,9> mappings{{{},
+    {Component::R,Component::G,Component::B,Component::A},
+    {Component::B,Component::G,Component::R,Component::A},
+    {Component::A,Component::A,Component::A,Component::A},
+    {Component::R,Component::R,Component::R,Component::R},
+    {Component::A,Component::B,Component::G,Component::R},
+    {Component::Zero,Component::One,Component::R,Component::A},
+    {Component::One,Component::Zero,Component::B,Component::G},
+    {Component::G,Component::R,Component::Zero,Component::One}}};
+
+VkComponentMapping vk_mapping(ComponentMapping mapping) {
+  return {static_cast<VkComponentSwizzle>(mapping[0]),static_cast<VkComponentSwizzle>(mapping[1]),
+          static_cast<VkComponentSwizzle>(mapping[2]),static_cast<VkComponentSwizzle>(mapping[3])};
+}
+
+unsigned packed_mapping(ComponentMapping mapping) {
+  unsigned bits=0;
+  for (unsigned c=0;c<4;++c) bits|=static_cast<unsigned>(mapping[c])<<(4*c);
+  return bits;
+}
+
 void check(VkResult result, const char *operation) {
   if (result != VK_SUCCESS)
     throw std::runtime_error(std::string(operation) + ": VkResult=" + std::to_string(result));
@@ -255,6 +276,7 @@ public:
     info.image = image.handle;
     info.viewType = VK_IMAGE_VIEW_TYPE_2D;
     info.format = format;
+    info.components = vk_mapping(range.components);
     info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, range.base_mip, range.level_count, 0, 1};
     check(vkCreateImageView(device, &info, nullptr, &image.view), "create additional image view");
     extra_views.push_back(image.view);
@@ -644,7 +666,7 @@ void image_view_checks(Experiment &experiment, unsigned &images, unsigned &views
   other = view; other.subresourceRange.baseArrayLayer = 1; view_check("layer", other, false);
   other = view; other.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY; view_check("array-view", other, false);
   other = view; other.format = VK_FORMAT_B8G8R8A8_UNORM; view_check("format-reinterpretation", other, false);
-  other = view; other.components.r = VK_COMPONENT_SWIZZLE_B; view_check("swizzle", other, false);
+  other = view; other.components.r = static_cast<VkComponentSwizzle>(99); view_check("invalid-swizzle", other, false);
   other = view; other.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT; view_check("depth-aspect", other, false);
 }
 
@@ -727,10 +749,10 @@ unsigned srgb_format_checks(Experiment &experiment) {
 int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limit,
         bool inject_mismatch, bool mips = false, bool mip_linear = false, bool min_mag = false,
         bool srgb = false, bool sweep = false, bool fetch_query = false,
-        bool inject_query_mismatch = false) {
+        bool inject_query_mismatch = false, bool view_swizzle = false) {
   Experiment experiment;
   experiment.initialize();
-  const unsigned format_checks = srgb || fetch_query ? srgb_format_checks(experiment) : 0;
+  const unsigned format_checks = srgb || fetch_query || view_swizzle ? srgb_format_checks(experiment) : 0;
   experiment.empty_tlas();
   experiment.setup_pipeline(rgen, rmiss);
   auto uv = requests();
@@ -776,12 +798,13 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   experiment.submit();
   std::ofstream csv(csv_path);
   if (!csv) throw std::runtime_error("cannot open numeric result CSV");
-  csv << "case,path,width,height,format,address_u,address_v,mag_filter,min_filter,selected_filter,sampler_lod,request,u,v,input_lod,view_base,view_count,selected_mip,mip_upper,mip_weight,mip_filter,channel,reference,gpu,abs_error\n";
+  csv << "case,path,width,height,format,address_u,address_v,mag_filter,min_filter,selected_filter,sampler_lod,request,u,v,input_lod,view_base,view_count,selected_mip,mip_upper,mip_weight,mip_filter,view_mapping,channel,reference,gpu,abs_error\n";
   csv << std::setprecision(10);
   unsigned cases = 0;
   std::uint64_t samples = 0, components = 0, mismatches = 0, markers_failed = 0, buffer_failed = 0;
   double max_error = 0;
   std::uint64_t query_components = 0, query_failed = 0;
+  std::array<unsigned,9> mapping_counts{};
   std::ofstream query_csv;
   if (fetch_query) {
     query_csv.open(std::string(csv_path) + ".queries.csv");
@@ -797,8 +820,8 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
       {16384,1,15,0,15,{0,1000}}, {16384,1,15,13,VK_REMAINING_MIP_LEVELS,{0,1000}}} : std::vector<Config>{
       {1,1,1,0,1,{0,0}}, {1,5,1,0,1,{0,0}}, {5,1,1,0,1,{0,0}},
       {3,5,1,0,1,{0,0}}, {4,4,1,0,1,{0,0}}};
-  const unsigned total_cases = configurations.size() * (min_mag ? 144 : 36) * (fetch_query ? 2 : 1);
-  const std::vector<Format> formats = fetch_query ? std::vector<Format>{Format::RGBA8_UNORM,Format::BGRA8_UNORM,Format::RGBA8_SRGB,Format::BGRA8_SRGB}
+  const unsigned total_cases = configurations.size() * (min_mag ? 144 : 36) * (fetch_query || view_swizzle ? 2 : 1);
+  const std::vector<Format> formats = fetch_query || view_swizzle ? std::vector<Format>{Format::RGBA8_UNORM,Format::BGRA8_UNORM,Format::RGBA8_SRGB,Format::BGRA8_SRGB}
       : srgb ? std::vector<Format>{Format::RGBA8_SRGB,Format::BGRA8_SRGB}
              : std::vector<Format>{Format::RGBA8_UNORM,Format::BGRA8_UNORM};
   for (auto config : configurations)
@@ -830,6 +853,12 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
       }
       auto texture = experiment.texture(size[0], size[1], vk_format(format),
                                         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, config.levels, config.base, config.count);
+      std::vector<Texture> mapped_views;
+      if (view_swizzle)
+        for (auto mapping : mappings) {
+          View mapped=view;mapped.components=mapping;
+          mapped_views.push_back(experiment.additional_view(texture,vk_format(format),mapped));
+        }
       auto staging = experiment.buffer(image.data.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
       if (mips) std::memset(staging.map, 0xee, image.data.size());
       else std::memcpy(staging.map, image.data.data(), image.data.size());
@@ -869,7 +898,10 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
             const bool linear = mip_linear || (min_mag && filter_index >= 4);
             const Sampling sampling{u_mode, v_mode, mag, min, linear ? MipFilter::Linear : MipFilter::Nearest};
             auto sampler = experiment.sampler(sampling, config.range, linear || (mips && !min_mag && view.level_count == 1) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
-            experiment.descriptors(texture, sampler, carrier, inputs, direct, output_address, uv.size(), mips ? 16 : 8);
+            View sampled_view=view;
+            if (view_swizzle) sampled_view.components=mappings[cases%mappings.size()];
+            experiment.descriptors(view_swizzle ? mapped_views[cases%mappings.size()] : texture,
+                sampler, carrier, inputs, direct, output_address, uv.size(), mips ? 16 : 8);
             auto *actual = static_cast<float *>(direct.map);
             auto *indirect_values = static_cast<float *>(indirect.map);
             std::fill(actual, actual + uv.size() * 8, std::numeric_limits<float>::quiet_NaN());
@@ -910,9 +942,9 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
             for (unsigned path = 0; path < 2; ++path) {
               auto *values = path ? indirect_values : actual;
               for (unsigned i = 0; i < uv.size(); ++i) {
-              const auto reference = fetch_query ? texel_fetch(image,view,static_cast<int32_t>(uv[i][0]),
+              const auto reference = fetch_query ? texel_fetch(image,sampled_view,static_cast<int32_t>(uv[i][0]),
                   static_cast<int32_t>(uv[i][1]),static_cast<int32_t>(mip_inputs[i][2])) :
-                  sample_lod(image, view, sampling, uv[i][0], uv[i][1], mips ? mip_inputs[i][2] : 0, config.range);
+                  sample_lod(image, sampled_view, sampling, uv[i][0], uv[i][1], mips ? mip_inputs[i][2] : 0, config.range);
               if (fetch_query) {
                 if (values[i*8+4]!=73) ++markers_failed;
                 const auto size=texture_size(image,view,static_cast<int32_t>(mip_inputs[i][2]));
@@ -950,12 +982,14 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                     << ',' << reference.sampler_lod << ',' << i << ',' << uv[i][0] << ',' << uv[i][1]
                     << ',' << (mips ? mip_inputs[i][2] : 0) << ',' << view.base_mip << ',' << view.level_count << ',' << reference.mip
                     << ',' << reference.mip_upper << ',' << reference.mip_weight << ',' << static_cast<int>(sampling.mip_filter)
+                    << ',' << packed_mapping(sampled_view.components)
                     << ',' << c << ',' << reference.rgba[c] << ',' << value << ',' << error << '\n';
                 ++components;
               }
               ++samples;
               }
             }
+            if (view_swizzle) ++mapping_counts[cases%mappings.size()];
             ++cases;
             std::cout << "CASE " << cases << "/" << std::min(limit, total_cases)
                       << " samples=" << samples << " mismatches=" << mismatches
@@ -975,7 +1009,10 @@ finished:
             << " markers_failed=" << markers_failed << " buffer_failed=" << buffer_failed << " max_abs_error=" << max_error
             << " tolerance=" << tolerance << " injected=" << inject_mismatch << " format_checks=" << format_checks
             << " query_components=" << query_components << " query_failed=" << query_failed
-            << " injected_query=" << inject_query_mismatch << std::endl;
+            << " injected_query=" << inject_query_mismatch;
+  if (view_swizzle)
+    for (unsigned m=0;m<mapping_counts.size();++m) std::cout << " mapping" << m << '=' << mapping_counts[m];
+  std::cout << std::endl;
   return cases && !mismatches && !markers_failed && !buffer_failed && !query_failed ? 0 : 1;
 }
 
@@ -1014,10 +1051,10 @@ void record_upload(Experiment &experiment, const MultiResource &resource, bool i
 }
 
 int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
-              unsigned limit, bool inject_mismatch, bool mip_linear, bool min_mag, bool srgb) {
+              unsigned limit, bool inject_mismatch, bool mip_linear, bool min_mag, bool srgb, bool view_swizzle) {
   Experiment experiment;
   experiment.initialize();
-  const unsigned format_checks = srgb ? srgb_format_checks(experiment) : 0;
+  const unsigned format_checks = srgb || view_swizzle ? srgb_format_checks(experiment) : 0;
   experiment.empty_tlas();
   experiment.setup_pipeline(rgen, rmiss, true);
   const auto uv = requests();
@@ -1055,11 +1092,13 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
     auto image_b = mip_fixture(pair == 1 ? 5 : 3, pair == 1 ? 1 : 5, 3,
                               srgb && pair == 1 ? Format::BGRA8_SRGB : Format::BGRA8_UNORM);
     const auto original_a = image_a.data;
-    const View view_a{pair == 2 ? 0U : 1U, pair == 1 ? 2U : pair == 2 ? 4U : 3U};
-    const View view_b{pair == 2 ? 2U : 0U, pair == 2 ? 2U : pair == 1 ? 3U : 2U};
+    View view_a{pair == 2 ? 0U : 1U, pair == 1 ? 2U : pair == 2 ? 4U : 3U};
+    View view_b{pair == 2 ? 2U : 0U, pair == 2 ? 2U : pair == 1 ? 3U : 2U};
+    if (view_swizzle) {view_a.components=mappings[2+pair*2];view_b.components=mappings[3+pair*2];}
     auto texture_a = experiment.texture(image_a.levels[0].width, image_a.levels[0].height,
         vk_format(image_a.format), VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         image_a.levels.size(), view_a.base_mip, view_a.level_count);
+    if (view_swizzle) texture_a=experiment.additional_view(texture_a,vk_format(image_a.format),view_a);
     auto staging_a = experiment.buffer(image_a.data.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
     MultiResource resource_a{&image_a,texture_a,staging_a,view_a};
     MultiResource resource_b{};
@@ -1069,6 +1108,7 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
       auto texture_b = experiment.texture(image_b.levels[0].width,image_b.levels[0].height,
           vk_format(image_b.format),VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
           image_b.levels.size(),view_b.base_mip,view_b.level_count);
+      if (view_swizzle) texture_b=experiment.additional_view(texture_b,vk_format(image_b.format),view_b);
       resource_b = {&image_b,texture_b,experiment.buffer(image_b.data.size(),VK_BUFFER_USAGE_TRANSFER_SRC_BIT),view_b};
     }
     experiment.begin();
@@ -1196,15 +1236,20 @@ int main(int argc, char **argv) {
   try {
     if (argc > 6 && std::string(argv[6]) == "checks")
       return profile_checks(argv[1], argv[2], argc - 7, argv + 7);
-    if (argc == 7 && (std::string(argv[6]) == "multi" || std::string(argv[6]) == "multi-linear" || std::string(argv[6]) == "multi-min-mag" || std::string(argv[6]) == "multi-srgb"))
-      return run_multi(argv[1],argv[2],argv[3],std::stoul(argv[4]),std::string(argv[5]) == "1",std::string(argv[6]) != "multi",std::string(argv[6]) == "multi-min-mag" || std::string(argv[6]) == "multi-srgb",std::string(argv[6]) == "multi-srgb");
-    const bool mip_linear = argc == 7 && std::string(argv[6]) == "mip-linear";
-    const bool srgb = argc == 7 && (std::string(argv[6]) == "srgb" || std::string(argv[6]) == "srgb-values");
-    const bool fetch_query = argc == 7 && std::string(argv[6]) == "fetch-query";
-    const bool min_mag = argc == 7 && (std::string(argv[6]) == "min-mag" || srgb || fetch_query);
-    const bool mips = argc == 7 && (std::string(argv[6]) == "mips" || mip_linear || min_mag);
-    if (argc != 6 && !mips) throw std::runtime_error("expected rgen.spv rmiss.spv numeric.csv case-limit inject-mismatch");
-    return run(argv[1], argv[2], argv[3], std::stoul(argv[4]), std::string(argv[5]) == "1", mips, mip_linear, min_mag,srgb,argc == 7 && std::string(argv[6]) == "srgb-values",fetch_query,std::string(argv[5]) == "2");
+    const std::string mode=argc==7 ? argv[6] : "";
+    if (mode=="multi" || mode=="multi-linear" || mode=="multi-min-mag" || mode=="multi-srgb" || mode=="multi-swizzle")
+      return run_multi(argv[1],argv[2],argv[3],std::stoul(argv[4]),std::string(argv[5])=="1",
+          mode!="multi",mode=="multi-min-mag" || mode=="multi-srgb" || mode=="multi-swizzle",
+          mode=="multi-srgb" || mode=="multi-swizzle",mode=="multi-swizzle");
+    const bool mip_linear=mode=="mip-linear";
+    const bool srgb=mode=="srgb" || mode=="srgb-values";
+    const bool fetch_query=mode=="fetch-query" || mode=="fetch-swizzle";
+    const bool view_swizzle=mode=="swizzle" || mode=="fetch-swizzle";
+    const bool min_mag=mode=="min-mag" || srgb || fetch_query || view_swizzle;
+    const bool mips=mode=="mips" || mip_linear || min_mag;
+    if (argc!=6 && !mips) throw std::runtime_error("expected rgen.spv rmiss.spv numeric.csv case-limit inject-mismatch");
+    return run(argv[1],argv[2],argv[3],std::stoul(argv[4]),std::string(argv[5])=="1",
+        mips,mip_linear,min_mag,srgb,mode=="srgb-values",fetch_query,std::string(argv[5])=="2",view_swizzle);
   } catch (const std::exception &error) {
     std::cerr << "FAIL " << error.what() << std::endl;
     return 1;

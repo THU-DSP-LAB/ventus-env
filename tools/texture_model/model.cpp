@@ -85,6 +85,25 @@ void validate_view(const Image &image, View view) {
   require(view.level_count > 0 && view.base_mip < image.levels.size() &&
               view.level_count <= image.levels.size() - view.base_mip,
           "view mip range outside image");
+  for (auto component : view.components)
+    require(component >= Component::Identity && component <= Component::A,
+            "unsupported view component mapping");
+}
+
+Color swizzle(Color color, ComponentMapping mapping) {
+  Color output{};
+  for (unsigned c = 0; c < 4; ++c) {
+    const auto selector = mapping[c];
+    output[c] = selector == Component::Identity ? color[c] :
+                selector == Component::Zero ? 0 : selector == Component::One ? 1 :
+                color[static_cast<unsigned>(selector) - static_cast<unsigned>(Component::R)];
+  }
+  return output;
+}
+
+void swizzle_result(Result &result, ComponentMapping mapping) {
+  result.rgba = swizzle(result.rgba, mapping);
+  for (auto &tap : result.taps) tap.color = swizzle(tap.color, mapping);
 }
 
 Result sample_validated(const Image &image, std::uint32_t mip,
@@ -212,6 +231,7 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
   result.input_lod = lod;
   result.sampler_lod = clamped;
   result.clamped_lod = relative;
+  swizzle_result(result, view.components);
   return result;
 }
 
@@ -242,6 +262,7 @@ Result texel_fetch(const Image &image, View view, std::int32_t x,
   result.rgba = tap.color;
   result.taps.push_back(tap);
   result.input_lod = lod;
+  swizzle_result(result, view.components);
   return result;
 }
 

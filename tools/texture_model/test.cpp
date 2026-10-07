@@ -300,6 +300,22 @@ void lod_and_views() {
 
 // Independent mip oracle: enumerate all view levels with a tent kernel in
 // level space, then reuse the independent spatial oracle (not sample_level).
+Color mapped_oracle(Color color, ComponentMapping mapping) {
+  Color result{};
+  for (unsigned c=0;c<4;++c) {
+    switch (mapping[c]) {
+    case Component::Identity: result[c]=color[c];break;
+    case Component::Zero: result[c]=0;break;
+    case Component::One: result[c]=1;break;
+    case Component::R: result[c]=color[0];break;
+    case Component::G: result[c]=color[1];break;
+    case Component::B: result[c]=color[2];break;
+    case Component::A: result[c]=color[3];break;
+    }
+  }
+  return result;
+}
+
 Color lod_oracle(const Image &image, View view, Sampling sampling,
                  double u, double v, double lod, LodRange range) {
   long double position = lod;
@@ -314,7 +330,7 @@ Color lod_oracle(const Image &image, View view, Sampling sampling,
         ? std::max(0.0L, 1 - std::abs(position - level))
         : (position > level - 0.5L && position <= level + 0.5L ? 1.0L : 0.0L);
     if (!weight) continue;
-    const auto color = oracle(image, view.base_mip + level, sampling, u, v);
+    const auto color = mapped_oracle(oracle(image, view.base_mip + level, sampling, u, v),view.components);
     for (unsigned c = 0; c < 4; ++c) total[c] += weight * color[c];
   }
   return {static_cast<float>(total[0]), static_cast<float>(total[1]),
@@ -563,6 +579,46 @@ void fetch_and_queries() {
     }
 }
 
+void view_swizzle() {
+  for (auto format : {Format::RGBA8_UNORM,Format::BGRA8_UNORM,
+                      Format::RGBA8_SRGB,Format::BGRA8_SRGB}) {
+    auto image=mip_image();image.format=format;
+    for (unsigned m=0;m<image.levels.size();++m) {
+      const auto &level=image.levels[m];
+      for (unsigned y=0;y<level.height;++y)
+        for (unsigned x=0;x<level.width;++x)
+          put(image,level,x,y,{static_cast<uint8_t>((10+x*41+y*17+m*67)%256),
+              static_cast<uint8_t>((128+x*13+y*59+m*97)%256),
+              static_cast<uint8_t>((221+x*37+y*7+m*31)%256),
+              static_cast<uint8_t>((57+x*97+y*23+m*11)%256)});
+    }
+    for (unsigned code=0;code<2401;++code) {
+      ComponentMapping mapping{};unsigned remaining=code;
+      for (auto &c : mapping) {c=static_cast<Component>(remaining%7);remaining/=7;}
+      View view{0,3,mapping};
+      for (auto filter : {Filter::Nearest,Filter::Bilinear})
+        for (auto mip : {MipFilter::Nearest,MipFilter::Linear}) {
+          Sampling state{AddressMode::Repeat,AddressMode::MirroredRepeat,filter,mip};
+          expect_color(sample_lod(image,view,state,-0.125,0.375,0.75).rgba,
+              lod_oracle(image,view,state,-0.125,0.375,0.75,{}),"all2401 mappings independent sample oracle");
+        }
+      view.base_mip=1;view.level_count=2;
+      expect_color(texel_fetch(image,view,0,0,0).rgba,
+          mapped_oracle(oracle(image,1,{},0.25,0.5),mapping),"all2401 mappings decoded fetch oracle");
+      const auto result=texel_fetch(image,view,0,0,0);
+      expect_color(result.taps[0].color,result.rgba,"fetch trace mapped color",0);
+      expect(texture_size(image,view,1)==std::array<uint32_t,2>{1,1} &&
+             texture_query_levels(image,view)==2,"swizzle does not affect property queries");
+      for (unsigned c=0;c<4;++c)
+        if (mapping[c]==Component::Zero || mapping[c]==Component::One)
+          expect(result.rgba[c]==(mapping[c]==Component::One ? 1 : 0),"swizzle constants exact float0/1");
+    }
+    View bad{0,3};bad.components[2]=static_cast<Component>(99);
+    rejected([&]{sample_lod(image,bad,{},0.5,0.5,0);},"unknown view component");
+    rejected([&]{texel_fetch(image,bad,0,0,0);},"fetch unknown view component");
+  }
+}
+
 void invalid_inputs() {
   const auto image = four_colors();
   for (double invalid : {std::numeric_limits<double>::infinity(),
@@ -617,7 +673,7 @@ void invalid_inputs() {
 } // namespace
 
 int main() {
-  const std::array<std::pair<const char *, void (*)()>, 10> suites{{
+  const std::array<std::pair<const char *, void (*)()>, 11> suites{{
       {"hand-calculated filtering and seams", hand_calculated},
       {"negative UV, boundaries and huge finite UV", negative_and_boundary_coordinates},
       {"all 256 UNORM values in both formats", all_unorm_values},
@@ -627,6 +683,7 @@ int main() {
       {"independent min/mag selection before view clamp", min_mag},
       {"sRGB decoding before filtering and unchanged alpha", srgb},
       {"integer texel fetch and view-relative property queries", fetch_and_queries},
+      {"view component mappings after decode for sample/fetch", view_swizzle},
       {"invalid inputs and storage arithmetic", invalid_inputs}}};
   try {
     for (const auto &suite : suites) {

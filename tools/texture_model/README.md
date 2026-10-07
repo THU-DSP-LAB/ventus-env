@@ -25,6 +25,7 @@ python3 tools/texture_model.py demo
 | Texel 过滤 | nearest 或 bilinear；独立 minFilter/magFilter，按 sampler clamp 后的 LOD 选择 |
 | LOD | 显式有限值；sampler 范围限制后映射至 view 的可访问 mip |
 | Mip 过滤 | nearest（精确半整数选择较低一级）或 linear（相邻两级混合）；与级内过滤独立 |
+| View swizzle | IDENTITY、R/G/B/A、ZERO/ONE；解码后通道置换/重复或浮点常量；适用于 sample/fetch |
 | 整数读取/查询 | 合法整数坐标 `texel_fetch`；相对 View 的 `texture_size`、`texture_query_levels`；不使用 sampler |
 | Trace | 下/上 mip、跨级权重、输入 UV/LOD、受限后的相对 LOD；每个 tap 的绝对 mip、坐标、偏移、合并权重和颜色 |
 | 多资源 | 不依赖全局采样状态，可交替采样不同 Image 和 Sampling 对象 |
@@ -51,7 +52,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 ## 验证
 
-测试包含十组，普通和 ASan/UBSan 模式目前均通过 527,509 项检查：
+测试包含十一组，普通和 ASan/UBSan 模式目前均通过 778,593 项检查：
 
 1. 手算四点平均、非对称插值、repeat 接缝和 mirror/clamp 边缘。
 2. 负坐标、texel 边界两侧、精确边界、负零和巨大有限坐标。
@@ -63,6 +64,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 8. min/mag 手算及独立 LOD oracle；四种过滤组合、两种 mip filter、零点相邻值与负零、sampler clamp、view clamp 与 mip rounding 的区别。
 9. 两种 sRGB 通道顺序、全部 256 个编码值、alpha 精确保持 UNORM、过滤前解码的手算样例，以及 sRGB/min-mag/mip/address/view 独立 oracle。
 10. 整数 fetch 的独立颜色/字节地址 oracle、与 nearest 中心读取交叉核对，合法 view 子范围的尺寸/级数、非法整数坐标和 LOD 拒绝。
+11. 四种格式的全部 2,401 种 view component mappings，独立 sample/fetch oracle、常量精确性、trace 与属性查询不变。
 
 独立对照以 long double 在虚拟延伸图像上枚举 nearest 区间或 tent kernel，逐个真实 texel 累积贡献；不调用模型的坐标归约、四点选择或寻址函数。精确样例和 UNORM 解码做相应精确比较；过滤测试的每分量绝对误差上限为 `2e-7`，适用于该模型的 float 输出，不能直接当成未来 TMU 精度要求。
 
@@ -81,6 +83,9 @@ python3 tools/texture_model.py gpu-multi-linear
 python3 tools/texture_model.py gpu-min-mag
 python3 tools/texture_model.py gpu-multi-min-mag
 python3 tools/texture_model.py gpu-fetch-query
+python3 tools/texture_model.py gpu-swizzle
+python3 tools/texture_model.py gpu-fetch-swizzle
+python3 tools/texture_model.py gpu-multi-swizzle
 python3 tools/texture_model.py gpu-srgb
 python3 tools/texture_model.py gpu-srgb-values
 python3 tools/texture_model.py gpu-multi-srgb
@@ -249,6 +254,18 @@ Vulkan sampled/transfer image 创建、同格式 identity view、mip 内存范�
 规范继续采用 Vulkan-Docs v1.4.328 的 Integer Texel Coordinate Operations 和 Image Query Instructions（`textures-integer-coordinate-operations`、`textures-queries`），颜色解码复用 F03 的 Texel Decode。没有新增 Vulkan API、ISA 或纹理字节布局。
 
 最终验收：host 普通/sanitizer 各 **10 组、527,509 检查**；`gpu-fetch-query` **2,880 配置、1,474,560 颜色分量、1,105,920 查询分量**，零差异，尺寸/级数精确一致，颜色最大误差 `2.980232239e-8`。18 项格式检查、F01–F03 和原 LOD0/mip-nearest/双 binding nearest、38 项范围检查、Mesa translation unit test 全部通过。颜色/查询负向校验分别只检测一个注入错误，原 160×96 any-hit 图像 SHA256 不变。证据汇总为 `artifacts/texture_model/fetch-query-implementation/verification.json`，保留命令、CSV、库/源码/ELF 哈希。
+
+## F05：View component swizzle
+
+2026-10-07 增加 `View.components`，四个输出分量可各自选择 IDENTITY、R/G/B/A、ZERO/ONE。R/G/B/A 是解码后的逻辑通道；例如 sRGB view 把 A 映射到 R 时，R 得到原 alpha 的 UNORM 值，不能对 alpha 补做 sRGB 解码。ONE 是精确 float 1.0，不是编码字节 1。模型的 tap/结果都记录映射后的颜色；`sample_level` 没有 View 参数，仍是 image 绝对 mip helper。
+
+软件 path 在 view 创建时检查并保存 mapping，使用每个 24 字节 mip entry 的原 reserved 字段（offset20）传递四个 Vulkan selector，每个占4 bits。80 字节 descriptor、24 字节 mip entry、F03 解码表尾和纹理字节不变。lowering 在解码/级内/跨级过滤后对结果重排或选择常量；对当前 nearest/normalized linear filter，这与规范逐 tap swizzle 的颜色结果等价。Fetch 解码后应用 mapping，size/levels 不受影响；无效整数输入仍先保护 load，最后选择零输出。Storage image 仍要求 identity view，未扩展 storage swizzle。
+
+`gpu-swizzle` 与 `gpu-fetch-swizzle` 各有 2,880 配置，四种格式和已有十组 image/view、九种寻址、八种 min/mag/mip 状态中轮转九种 mapping。包含 identity/explicit identity、RGB 交换、AAAA/RRRR 重复、alpha/RGB 互换和常量；每种 mapping 完整运行320配置。这是 GPU 的代表性 corpus，不是全部 2,401 mapping 的笛卡尔积。Host 则穷举全部 mapping。`gpu-multi-swizzle` 的432配置在 sRGB/UNORM、两种 sRGB 通道顺序及共享 image 的不同 view 上交换带不同 mapping 的描述符并更新纹理。原 view-swizzle 拒绝门禁替换为非法 selector 拒绝门禁。
+
+规范沿用 Vulkan-Docs v1.4.328 的 Sampling Operations、Component Swizzle 与 F03 Texel Decode。未来 F06 的 opaque-black border 加 nonidentity view 在未启用相应 border-color-swizzle feature 时存在未定义组合；本切片没有 border sampling，不把该限制隐藏在“全部 swizzle 已实现”的说法里。
+
+最终主目录验收：host 普通/sanitizer 各 **11组、778,593检查**。新 sample/fetch 各 **2,880配置、1,474,560颜色分量**，fetch 另有 **1,105,920精确查询分量**；新双binding **432配置、663,552分量**，均零差异，最大误差 `1.192092896e-7`。每组18项格式检查，F01–F04及原门禁、38项范围检查、Mesa translation unit test 均通过。采样/双binding/查询负向校验各检测一个注入错误，原160×96 any-hit图像SHA256不变。证据汇总在 `artifacts/texture_model/view-swizzle-implementation/verification.json`，下一切片为F06。
 
 ## 代码组织与规范来源
 

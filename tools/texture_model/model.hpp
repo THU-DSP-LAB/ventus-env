@@ -18,6 +18,8 @@ constexpr bool is_srgb(Format format) {
 enum class AddressMode { Repeat, MirroredRepeat, ClampToEdge };
 enum class Filter { Nearest, Bilinear };
 enum class MipFilter { Nearest, Linear };
+enum class Component { Identity, Zero, One, R, G, B, A };
+using ComponentMapping = std::array<Component, 4>;
 using Color = std::array<float, 4>;
 
 struct Level {
@@ -54,6 +56,7 @@ struct Sampling {
 struct View {
   std::uint32_t base_mip;
   std::uint32_t level_count;
+  ComponentMapping components{};
 };
 
 struct LodRange {

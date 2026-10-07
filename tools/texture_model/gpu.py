@@ -55,13 +55,14 @@ def run(args, compiler: str) -> int:
     linear_check = args.action == "gpu-mip-linear-check"
     min_mag = args.action == "gpu-min-mag"
     srgb = args.action in ("gpu-srgb", "gpu-srgb-values", "gpu-multi-srgb")
-    fetch_query = args.action == "gpu-fetch-query"
+    fetch_query = args.action in ("gpu-fetch-query", "gpu-fetch-swizzle")
+    view_swizzle = args.action in ("gpu-swizzle", "gpu-fetch-swizzle", "gpu-multi-swizzle")
     srgb_values = args.action == "gpu-srgb-values"
     multi_srgb = args.action == "gpu-multi-srgb"
     multi_min_mag = args.action == "gpu-multi-min-mag"
     multi_linear = args.action == "gpu-multi-linear"
     multi = args.action.startswith("gpu-multi")
-    mips = args.action == "gpu-mips" or linear_check or min_mag or (srgb and not multi_srgb) or fetch_query
+    mips = args.action == "gpu-mips" or linear_check or min_mag or (srgb and not multi_srgb) or fetch_query or (view_swizzle and not multi)
     rgen_name = "sample_fetch.rgen" if fetch_query else "sample_multi.rgen" if multi else "sample_mip.rgen" if mips else "sample.rgen"
     for stage in ("rgen", "rmiss"):
         with (output / f"compile-{stage}.log").open("w") as log:
@@ -98,9 +99,9 @@ def run(args, compiler: str) -> int:
     command = [str(executable), str(output / "sample.rgen.spv"), str(output / "sample.rmiss.spv"),
                str(output / "numeric.csv"), str(args.case_limit), str(2 if args.inject_query_mismatch else int(args.inject_mismatch))]
     if mips:
-        command.append("fetch-query" if fetch_query else "srgb-values" if srgb_values else "srgb" if srgb else "min-mag" if min_mag else "mip-linear" if linear_check else "mips")
+        command.append("fetch-swizzle" if fetch_query and view_swizzle else "swizzle" if view_swizzle else "fetch-query" if fetch_query else "srgb-values" if srgb_values else "srgb" if srgb else "min-mag" if min_mag else "mip-linear" if linear_check else "mips")
     if multi:
-        command.append("multi-srgb" if multi_srgb else "multi-min-mag" if multi_min_mag else "multi-linear" if multi_linear else "multi")
+        command.append("multi-swizzle" if view_swizzle else "multi-srgb" if multi_srgb else "multi-min-mag" if multi_min_mag else "multi-linear" if multi_linear else "multi")
     checks_only = args.action == "gpu-checks"
     bad_paths = []
     if checks_only:
@@ -162,12 +163,16 @@ def run(args, compiler: str) -> int:
         requests = 256 if srgb_values else 64
         if summary.get("samples") != str(args.case_limit * requests * 2 * outputs) or summary.get("components") != str(args.case_limit * requests * (24 if multi else 8)):
             errors.append("numeric coverage counts are incomplete")
-        if srgb and summary.get("format_checks") != "18":
+        if (srgb or view_swizzle) and summary.get("format_checks") != "18":
             errors.append("sRGB/UNORM format feature and unsupported usage checks incomplete")
         if fetch_query and (summary.get("format_checks") != "18" or
                             summary.get("query_components") != str(args.case_limit * 64 * 6) or
                             summary.get("query_failed") != "0"):
             errors.append("fetch/query format coverage or exact property comparison failed")
+        if view_swizzle and not multi:
+            for m in range(9):
+                if summary.get(f"mapping{m}") != str(max(0, (args.case_limit + 8 - m) // 9)):
+                    errors.append(f"view mapping {m} coverage incomplete")
         if multi:
             if summary.get("mixed_results") != str(args.case_limit * 128):
                 errors.append("mixed-result coverage incomplete")
@@ -184,10 +189,12 @@ def run(args, compiler: str) -> int:
     if returncode:
         errors.append(f"comparison process returned {returncode}")
     if multi:
-        filters = "independent min/mag and linear/nearest mip filters" if multi_min_mag or multi_srgb else "linear/nearest and linear/linear mip filters" if multi_linear else "mip-nearest"
+        filters = "independent min/mag and linear/nearest mip filters" if multi_min_mag or multi_srgb or view_swizzle else "linear/nearest and linear/linear mip filters" if multi_linear else "mip-nearest"
         profile = "two fixed combined bindings (set0:2,13), simultaneous samples and mix, view/sampler swaps and updates; " + filters
         if multi_srgb:
             profile += "; mixed sRGB/UNORM, both sRGB channel orders, shared sRGB image views"
+        if view_swizzle:
+            profile += "; independent view component mappings, mixed sRGB/UNORM and shared sRGB image"
     elif checks_only:
         profile = "API/compiler rejection checks (no execution)"
     elif mips:
@@ -197,6 +204,8 @@ def run(args, compiler: str) -> int:
             profile = "Vulkan V5 megakernel to Spike; RGBA/BGRA sRGB; " + ("all256 byte codes at texel centers" if srgb_values else "four min/mag combinations and both mip filters, view/address/clamp/upload")
         if fetch_query:
             profile = "Vulkan V5 megakernel to Spike; legal integer fetch, exact view-relative dimensions/level queries, four UNORM/sRGB formats, irrelevant sampler changes"
+        if view_swizzle:
+            profile = ("integer fetch/property queries" if fetch_query else "independent min/mag/mip sampling") + "; four UNORM/sRGB formats, nine rotating view mapping corpus, mip/address/view/clamp/upload"
     else:
         profile = "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag"
     manifest = {

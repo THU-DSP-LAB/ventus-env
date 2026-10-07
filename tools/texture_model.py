@@ -23,6 +23,10 @@ def main() -> int:
     parser.add_argument("--array-binding", type=int, choices=(2, 12), default=2)
     parser.add_argument("--array-length", type=int, choices=(1, 2, 4), default=4)
     parser.add_argument("--array-index", type=int, default=None)
+    parser.add_argument("--image-layers", type=int, choices=(1,2,4), help="2D array image layer profile, independent of descriptor array length")
+    parser.add_argument("--linear-image", action="store_true", help="use LINEAR sampled array images and check mapped subresource layouts")
+    parser.add_argument("--single-layer-view", action="store_true", help="sample a 2D view of one layer of the array image")
+    parser.add_argument("--inject-layer-mismatch", action="store_true", help="layer negative control: pin shader array layer to zero")
     parser.add_argument("--offset", type=int, nargs=2, help="constant signed texel offset.xy in [-8,7] for sampling/fetch")
     parser.add_argument("--inject-offset-mismatch", action="store_true", help="offset negative control: replace shader offset with zero")
     parser.add_argument("--constant-gradient", type=float, nargs=4, help="use compile-time dx.xy and dy.xy derivatives instead of the per-invocation gradient corpus")
@@ -41,6 +45,14 @@ def main() -> int:
     parser.add_argument("--inject-mismatch", action="store_true", help="gpu checker negative control; must fail")
     parser.add_argument("--inject-query-mismatch", action="store_true", help="fetch/query checker negative control; must fail")
     args = parser.parse_args()
+    if args.image_layers is not None and args.action in ("test","demo","gpu-checks","gpu","gpu-srgb-values"):
+        parser.error("image-layers requires a mip-capable sampling/fetch GPU profile")
+    if args.linear_image and args.image_layers is None:
+        parser.error("linear-image requires image-layers")
+    if args.single_layer_view and args.image_layers is None:
+        parser.error("single-layer-view requires image-layers")
+    if args.inject_layer_mismatch and (args.image_layers not in (2,4) or args.single_layer_view):
+        parser.error("inject-layer-mismatch requires an array view of two or four image layers")
     if args.offset is not None and (args.action in ("test","demo","gpu-checks","gpu-srgb-values") or any(v < -8 or v > 7 for v in args.offset)):
         parser.error("offset requires a sampling/fetch GPU profile and two integers in [-8,7]")
     if args.inject_offset_mismatch and (not args.offset or args.offset==[0,0] or args.action.startswith("gpu-fetch")):

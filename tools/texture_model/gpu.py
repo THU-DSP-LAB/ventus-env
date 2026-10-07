@@ -128,12 +128,36 @@ def run(args, compiler: str) -> int:
             raise RuntimeError("offset shader transformation did not cover each texture operation")
         rgen_path = output / "offset.rgen"
         rgen_path.write_text(text)
+    image_array = args.image_layers is not None
+    array_sampling = image_array and not args.single_layer_view
+    if array_sampling:
+        text = rgen_path.read_text().replace("sampler2D", "sampler2DArray").replace("texture2D", "texture2DArray")
+        if multi and not args.gradients:
+            text = text.replace("requests.uv_lod[i]", "requests.uv_lod[2*i]")
+        if multi or args.gradients:
+            array = "requests.uv_lod" if multi else "requests.uv"
+            layer_a = "0.0" if args.inject_layer_mismatch else array + "[2*i+1].z"
+            layer_b = "0.0" if args.inject_layer_mismatch else array + "[2*i+1].w"
+            text = text.replace(array+"[2*i].xy", "vec3("+array+"[2*i].xy, "+layer_a+")")
+            text = text.replace(array+"[2*i].yx", "vec3("+array+"[2*i].yx, "+layer_b+")")
+        elif fetch_query:
+            layer = "0.0" if args.inject_layer_mismatch else "requests.uv[i].w"
+            text = text.replace("ivec2(requests.uv[i].xy)", "ivec3(requests.uv[i].xy, "+layer+")")
+            text = text.replace("ivec2 size =", "ivec3 size =").replace("vec2(size)", "vec2(size.xy)")
+            text = text.replace("direct.values[2 * i]", "direct.values[3 * i]").replace("direct.values[2 * i + 1]", "direct.values[3 * i + 1]")
+            text = text.replace("indirect.values[2 * i]", "indirect.values[3 * i]").replace("indirect.values[2 * i + 1]", "indirect.values[3 * i + 1]")
+            text = text.replace("imageStore(carrier,", "direct.values[3*i+2] = vec4(float(size.z), 123, 456, 789);\n    indirect.values[3*i+2] = vec4(float(size.z), 123, 456, 789);\n    imageStore(carrier,")
+        else:
+            layer = "0.0" if args.inject_layer_mismatch else "requests.uv[i].w"
+            text = text.replace("requests.uv[i].xy", "vec3(requests.uv[i].xy, "+layer+")")
+        rgen_path = output / "image-array.rgen"
+        rgen_path.write_text(text)
     for stage in ("rgen", "rmiss"):
         with (output / f"compile-{stage}.log").open("w") as log:
             subprocess.run([glslang, "-V", "--target-env", "vulkan1.2",
                             str(rgen_path if stage == "rgen" else source / "sample.rmiss"), "-o", str(output / f"sample.{stage}.spv")],
                            stdout=log, stderr=subprocess.STDOUT, check=True)
-    if uniform or args.gradients or args.offset is not None:
+    if uniform or args.gradients or args.offset is not None or image_array:
         disassembler = shutil.which("spirv-dis")
         if not disassembler:
             raise RuntimeError("spirv-dis is required to retain runtime-index evidence")
@@ -166,6 +190,12 @@ def run(args, compiler: str) -> int:
         "LD_LIBRARY_PATH": ":".join([str(root / "spike/build"), str(paths["driver"].parent),
                                       str(root / "llvm/build/lib"), env.get("LD_LIBRARY_PATH", "")]),
     })
+    if args.linear_image:
+        env["VENTUS_TEXTURE_LINEAR_IMAGE"] = "1"
+    if image_array:
+        env["VENTUS_TEXTURE_IMAGE_LAYERS"] = str(args.image_layers)
+        if args.single_layer_view:
+            env["VENTUS_TEXTURE_SINGLE_LAYER_VIEW"] = "1"
     if args.gradients:
         env["VENTUS_TEXTURE_GRADIENTS"] = "1"
         if args.constant_gradient is not None:
@@ -200,18 +230,18 @@ def run(args, compiler: str) -> int:
             "shadow-lod": "vec4(textureLod(source, vec3(requests.uv[i], 0.5), 0.0))",
 
             "gather": "textureGather(source, requests.uv[i])",
-            "array-sampling": "textureLod(source, vec3(requests.uv[i], 0), 0.0)",
             "projected": "textureProjLod(source, vec3(requests.uv[i], 2), 0.0)",
         }
         variants = {name: shader_source.replace(original, value) for name, value in variants.items()}
         variants["shadow-lod"] = variants["shadow-lod"].replace("sampler2D source;", "sampler2DShadow source;")
-        variants["array-sampling"] = variants["array-sampling"].replace("sampler2D source;", "sampler2DArray source;")
+        variants["3d-sampling"] = shader_source.replace("sampler2D source;", "sampler3D source;").replace(original, "textureLod(source, vec3(requests.uv[i], 0), 0.0)")
         variants["shadow-gradients"] = shader_source.replace("sampler2D source;", "sampler2DShadow source;").replace(original,
             "vec4(textureGrad(source, vec3(requests.uv[i], 0.5), vec2(1), vec2(1)))")
         nonuniform_source = shader_source.replace("#version 460", "#version 460\n#extension GL_EXT_nonuniform_qualifier : require")
         variants["runtime-descriptor-array"] = nonuniform_source.replace("sampler2D source;", "sampler2D source[];").replace(original, "textureLod(source[nonuniformEXT(i & 1u)], requests.uv[i], 0.0)")
         variants["nested-descriptor-array"] = shader_source.replace("sampler2D source;", "sampler2D source[2][2];").replace(original, "textureLod(source[0][1], requests.uv[i], 0.0)")
         variants["dynamic-storage-image-array"] = nonuniform_source.replace("image2D carrier;", "image2D carrier[2];").replace("imageStore(carrier,", "imageStore(carrier[nonuniformEXT(i & 1u)],")
+        variants["storage-image-layer-array"] = shader_source.replace("image2D carrier;", "image2DArray carrier;").replace("imageStore(carrier, ivec2(i, 0),", "imageStore(carrier, ivec3(i, 0, 0),")
         for name, value in variants.items():
             path = output / f"reject-{name}.rgen"
             path.write_text(value)
@@ -271,6 +301,9 @@ def run(args, compiler: str) -> int:
     if args.offset is not None:
         if not re.search(r"OpImage(?:SampleExplicitLod|Fetch) .*\bConstOffset\b", (output / "sample.rgen.spvasm").read_text()):
             errors.append("actual sampling/fetch SPIR-V ConstOffset evidence missing")
+    if array_sampling:
+        if not re.search(r"OpTypeImage .* 2D 0 1 0 1 Unknown", (output / "sample.rgen.spvasm").read_text()):
+            errors.append("actual sampled2DArray SPIR-V evidence missing")
     uniform_profile = {}
     if uniform:
         expected_feature = f"FEATURE sampled_dynamic_query=1 sampled_dynamic_query2=1 sampled_dynamic_enabled=1 sampled_nonuniform_query=1 sampled_nonuniform_enabled={int(nonuniform)} runtime_array=0 partially_bound=0 variable_count=0 storage_dynamic=0 uniform_buffer_dynamic=0 sampled_native=0 implicit_divergent_lod=0"
@@ -283,7 +316,7 @@ def run(args, compiler: str) -> int:
         uniform_profile["dynamic_spirv"] = bool(re.search(r"OpAccessChain .* %source(?:_[ab])? %\w+", spirv_text) and
                                                  "OpVariable %_ptr_PushConstant_Selectors PushConstant" in spirv_text)
         uniform_profile["dynamic_llvm"] = bool(re.search(r"shl i32 %\w+, 7", llvm_text) and
-                                                re.search(r"mul i32 %\w+, 88", llvm_text))
+                                                re.search(r"mul i32 %\w+, 96", llvm_text))
         uniform_profile["elf_count"] = len(elf_paths)
         if nonuniform:
             uniform_profile["nonuniform_spirv"] = "OpCapability SampledImageArrayNonUniformIndexing" in spirv_text and "NonUniform" in spirv_text
@@ -318,7 +351,7 @@ def run(args, compiler: str) -> int:
     if not checked_frontier or not elf_paths:
         errors.append("checked, retained V5 ELF evidence is missing")
     if checks_only:
-        if summary.get("limits") != "2" or summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "20" or summary.get("errors") != "0" or summary.get("images") != "8" or summary.get("views") != "10":
+        if summary.get("limits") != "2" or summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "20" or summary.get("errors") != "0" or summary.get("images") != "13" or summary.get("views") != "17":
             errors.append("profile rejection checks incomplete")
     else:
         if summary.get("cases") != str(args.case_limit):
@@ -330,7 +363,7 @@ def run(args, compiler: str) -> int:
         if (srgb or view_swizzle) and summary.get("format_checks") != "18":
             errors.append("sRGB/UNORM format feature and unsupported usage checks incomplete")
         if fetch_query and (summary.get("format_checks") != "18" or
-                            summary.get("query_components") != str(args.case_limit * 64 * 6) or
+                            summary.get("query_components") != str(args.case_limit * 64 * (8 if array_sampling else 6)) or
                             summary.get("query_failed") != "0"):
             errors.append("fetch/query format coverage or exact property comparison failed")
         if view_swizzle and not multi:
@@ -395,9 +428,15 @@ def run(args, compiler: str) -> int:
         profile += "; explicit isotropic 2D gradients scaled by view base dimensions; sampler bias/clamp; ordinary LLVM arithmetic and texel loads"
     if args.offset is not None:
         profile += "; constant signed texel offsets[-8,7] before integer addressing in each accessed mip"
+    if image_array:
+        profile += "; 2D image layers with independent view layer subrange; " + ("single-layer 2D view" if args.single_layer_view else "array sample RNE/clamp and integer fetch/query")
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
         "profile": profile,
+        "image_layers": args.image_layers,
+        "linear_image": args.linear_image,
+        "single_layer_view": args.single_layer_view,
+        "injected_layer_mismatch": args.inject_layer_mismatch,
         "texel_offset": args.offset,
         "injected_offset_mismatch": args.inject_offset_mismatch,
         "explicit_gradients": args.gradients,

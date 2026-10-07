@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cfenv>
 #include <functional>
 #include <iostream>
 #include <random>
@@ -112,8 +113,9 @@ std::vector<long double> axis_weights(unsigned n, long double u,
   return weights;
 }
 
-Color oracle(const Image &image, unsigned mip, Sampling sampling, double u, double v, TexelOffset offset = {}) {
-  const auto &level = image.levels[mip];
+Color oracle(const Image &image, unsigned mip, Sampling sampling, double u, double v, TexelOffset offset = {}, unsigned layer = 0) {
+  auto level = image.levels[mip];
+  level.offset += layer * level.layer_pitch;
   const auto wx = axis_weights(level.width, u, sampling.address_u, sampling.mag_filter, offset[0]);
   const auto wy = axis_weights(level.height, v, sampling.address_v, sampling.mag_filter, offset[1]);
   std::array<long double, 4> total{};
@@ -328,7 +330,7 @@ Color mapped_oracle(Color color, ComponentMapping mapping) {
 }
 
 Color lod_oracle(const Image &image, View view, Sampling sampling,
-                 double u, double v, double lod, LodRange range, TexelOffset offset = {}) {
+                 double u, double v, double lod, LodRange range, TexelOffset offset = {}, unsigned layer = 0) {
   long double position = lod;
   if (position < range.min) position = range.min;
   if (position > range.max) position = range.max;
@@ -341,7 +343,7 @@ Color lod_oracle(const Image &image, View view, Sampling sampling,
         ? std::max(0.0L, 1 - std::abs(position - level))
         : (position > level - 0.5L && position <= level + 0.5L ? 1.0L : 0.0L);
     if (!weight) continue;
-    const auto color = mapped_oracle(oracle(image, view.base_mip + level, sampling, u, v, offset),view.components);
+    const auto color = mapped_oracle(oracle(image, view.base_mip + level, sampling, u, v, offset, layer),view.components);
     for (unsigned c = 0; c < 4; ++c) total[c] += weight * color[c];
   }
   return {static_cast<float>(total[0]), static_cast<float>(total[1]),
@@ -487,6 +489,87 @@ void texel_offsets() {
   }
   rejected([&]{texel_fetch(colors,{0,1},0,0,0,{-1,0});},"fetch final coordinate invalid");
   rejected([&]{texel_fetch(colors,{0,1},INT32_MAX,0,0,{7,0});},"fetch offset overflow cannot become legal");
+}
+
+Image array_image(unsigned layers, Format format) {
+  Image image{format, {}, {}, layers};
+  unsigned width=5,height=3;
+  for (unsigned mip=0;mip<3;++mip) {
+    const uint64_t row=width*4ULL+3,span=(height-1)*row+width*4ULL;
+    Level level{width,height,image.data.size()+7,row,span+5};
+    image.levels.push_back(level);
+    image.data.resize(level.offset+(layers-1)*level.layer_pitch+span,0xcd);
+    for (unsigned layer=0;layer<layers;++layer) {
+      auto plane=level; plane.offset+=layer*level.layer_pitch;
+      for (unsigned y=0;y<height;++y) for (unsigned x=0;x<width;++x)
+        put(image,plane,x,y,{static_cast<uint8_t>(layer*53+mip*37+x*11+y*71),
+            static_cast<uint8_t>(layer*97+mip*23+x*37+y*13),static_cast<uint8_t>(layer*127+mip*19+x*89+y*31),
+            static_cast<uint8_t>(19+layer*17+mip*29+x*31+y*53)});
+    }
+    width=std::max(1u,width/2);height=std::max(1u,height/2);
+  }
+  return image;
+}
+
+void image_array_layers() {
+  auto image=array_image(4,Format::RGBA8_UNORM);
+  View all{0,3,{},0,4};
+  for (auto pair : {std::pair<double,unsigned>{-100,0},{0.5,0},{1.5,2},{2.5,2},{3.5,3},
+                    {std::nextafter(0.5,1.),1},{std::nextafter(1.5,1.),1},{1e300,3}})
+    expect(sample_lod(image,all,{},0.3,0.7,0,{}, {},pair.first).layer==pair.second,"preferred sample layer round/clamp");
+  expect(sample_lod(image,{0,3,{},1,2},{},0,0,0,{}, {},0.5).layer==1,"layer ties relative to view, not absolute parity");
+  const int old_round=std::fegetround();
+  std::fesetround(FE_UPWARD);
+  expect(sample_lod(image,all,{},0,0,0,{}, {},0.5).layer==0,"sample layer tie independent of host rounding mode");
+  std::fesetround(old_round);
+  expect(old_round==FE_TONEAREST,"independent nearbyint oracle uses ties-to-even rounding mode");
+  const std::array<double,13> coordinates{-100,-0.5,0,0.49,0.5,0.50001,1,1.5,2.5,3.5,4,1e30,1e300};
+  for (unsigned layers : {1u,2u,4u})
+    for (auto format : {Format::RGBA8_UNORM,Format::BGRA8_UNORM,Format::RGBA8_SRGB,Format::BGRA8_SRGB}) {
+      const auto array=array_image(layers,format);
+      for (unsigned base=0;base<layers;++base)
+        for (unsigned count : {1u,layers-base})
+          for (auto mip_view : {View{0,3,{},base,count},View{1,2,{},base,count}})
+            for (auto address : {AddressMode::Repeat,AddressMode::MirroredRepeat,AddressMode::ClampToEdge,AddressMode::ClampToBorder})
+              for (auto filter : {Filter::Nearest,Filter::Bilinear}) for (auto mip_filter : {MipFilter::Nearest,MipFilter::Linear})
+                for (double lod : {-1.,0.5,0.75,1.5,4.}) for (double coordinate : coordinates) {
+                  Sampling sampling{address,AddressMode::ClampToBorder,filter,mip_filter};sampling.lod_bias=.5;
+                  sampling.border_color=BorderColor::OpaqueWhite;
+                  const TexelOffset offset{1,-1}; const LodRange range{0,1000};
+                  const unsigned selected=base+static_cast<unsigned>(std::clamp(std::nearbyint(coordinate),0.0,static_cast<double>(count-1)));
+                  const auto actual=sample_lod(array,mip_view,sampling,-0.31,1.17,lod,range,offset,coordinate);
+                  expect(actual.layer==selected,"sample layer independent rounding oracle");
+                  expect_color(actual.rgba,lod_oracle(array,mip_view,sampling,-0.31,1.17,static_cast<float>(lod)+.5f,range,offset,selected),"independent array plane/texel/mip oracle");
+                  for (const auto &tap : actual.taps) expect(tap.layer==selected,"no filtering between image layers");
+                }
+      for (int layer=0;layer<static_cast<int>(layers);++layer) for (int mip=0;mip<3;++mip) {
+        const auto size=texture_array_size(array,{0,3,{},0,layers},mip);
+        expect(size==std::array<uint32_t,3>{array.levels[mip].width,array.levels[mip].height,layers},"array size includes view layers unchanged across mip");
+        for (unsigned y=0;y<size[1];++y) for (unsigned x=0;x<size[0];++x) {
+          const auto actual=texel_fetch(array,{0,3,{},0,layers},static_cast<int>(x)-1,static_cast<int>(y)+1,mip,{1,-1},layer);
+          auto plane=array.levels[mip];plane.offset+=layer*plane.layer_pitch;
+          const auto address=plane.offset+y*plane.row_pitch+x*4;
+          expect(actual.layer==static_cast<unsigned>(layer) && actual.taps[0].byte_offset==address,"integer fetch plane byte address oracle");
+          const auto expected=sample_level(array,mip,{},(x+.5)/size[0],(y+.5)/size[1],{},layer);
+          expect_color(actual.rgba,expected.rgba,"array fetch equals texel center sample",0);
+        }
+      }
+      const View view{1,2,{},layers-1,1};
+      expect(texture_array_size(array,view,0)[2]==1,"array query view layer subrange");
+      Sampling sampling{AddressMode::Repeat,AddressMode::Repeat,Filter::Bilinear,MipFilter::Linear};
+      const auto g=sample_grad(array,view,sampling,.3,.7,{.3,.2},{-.1,.4},{0,1000},{7,-8},100);
+      expect(g.layer==layers-1,"gradient sampling selects last view layer");
+      expect_color(g.rgba,lod_oracle(array,view,sampling,.3,.7,static_cast<float>(g.input_lod),{0,1000},{7,-8},layers-1),"gradient array plane oracle");
+    }
+  for (auto view : {View{0,3,{},4,1},View{0,3,{},0,0},View{0,3,{},3,2},View{0,3,{},UINT32_MAX,1}})
+    rejected([&]{texture_array_size(image,view,0);},"invalid layer view range");
+  for (int bad : {-1,4,INT32_MAX}) rejected([&]{texel_fetch(image,all,0,0,0,{},bad);},"invalid integer fetch layer");
+  for (double bad : {std::numeric_limits<double>::quiet_NaN(),std::numeric_limits<double>::infinity()})
+    rejected([&]{sample_lod(image,all,{},0,0,0,{}, {},bad);},"nonfinite sample layer");
+  image.layer_count=0;rejected([&]{validate(image);},"zero image layer count");image.layer_count=4;
+  image.levels[0].layer_pitch=1;rejected([&]{validate(image);},"overlapping layer stride");
+  image.levels[0].layer_pitch=UINT64_MAX;rejected([&]{validate(image);},"layer stride overflow safely rejected");
+  image=array_image(4,Format::RGBA8_UNORM);image.data.pop_back();rejected([&]{validate(image);},"truncated final layer bytes");
 }
 
 void mip_linear() {
@@ -885,7 +968,7 @@ void invalid_inputs() {
 } // namespace
 
 int main() {
-  const std::array<std::pair<const char *, void (*)()>, 15> suites{{
+  const std::array<std::pair<const char *, void (*)()>, 16> suites{{
       {"hand-calculated filtering and seams", hand_calculated},
       {"negative UV, boundaries and huge finite UV", negative_and_boundary_coordinates},
       {"all 256 UNORM values in both formats", all_unorm_values},
@@ -895,6 +978,7 @@ int main() {
       {"sampler LOD bias before clamp/filter/view", lod_bias},
       {"explicit 2D gradients and independent Euclidean oracle", explicit_gradients},
       {"constant sample/fetch offsets and independent texel oracle", texel_offsets},
+      {"2D image array layer storage/view/selection oracle", image_array_layers},
       {"independent min/mag selection before view clamp", min_mag},
       {"sRGB decoding before filtering and unchanged alpha", srgb},
       {"integer texel fetch and view-relative property queries", fetch_and_queries},

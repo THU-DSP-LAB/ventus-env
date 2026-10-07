@@ -119,6 +119,9 @@ void validate_view(const Image &image, View view) {
   require(view.level_count > 0 && view.base_mip < image.levels.size() &&
               view.level_count <= image.levels.size() - view.base_mip,
           "view mip range outside image");
+  require(view.layer_count > 0 && view.base_layer < image.layer_count &&
+              view.layer_count <= image.layer_count - view.base_layer,
+          "view layer range outside image");
   for (auto component : view.components)
     require(component >= Component::Identity && component <= Component::A,
             "unsupported view component mapping");
@@ -141,18 +144,21 @@ void swizzle_result(Result &result, ComponentMapping mapping) {
 }
 
 Result sample_validated(const Image &image, std::uint32_t mip,
-                        const Sampling &sampling, double u, double v, Filter filter, TexelOffset offset) {
+                        const Sampling &sampling, double u, double v, Filter filter, TexelOffset offset, std::uint32_t layer) {
   require(std::isfinite(u) && std::isfinite(v), "UV must be finite");
   check_mode(sampling.address_u);
   check_mode(sampling.address_v);
   require(mip < image.levels.size(), "mip index out of range");
-  const auto &level = image.levels[mip];
+  require(layer < image.layer_count, "layer index outside image");
+  auto level = image.levels[mip];
+  level.offset += layer * level.layer_pitch;
   check_offset(offset);
   const double x = reduce(u, sampling.address_u, offset[0] != 0) * level.width;
   const double y = reduce(v, sampling.address_v, offset[1] != 0) * level.height;
   Result result;
   result.mip = mip;
   result.mip_upper = mip;
+  result.layer = layer;
   result.input_u = u;
   result.input_v = v;
   result.filter = filter;
@@ -163,6 +169,7 @@ Result sample_validated(const Image &image, std::uint32_t mip,
                               static_cast<std::int64_t>(std::floor(y)) + offset[1], 1));
     result.rgba = result.taps[0].color;
     result.taps[0].mip = mip;
+    result.taps[0].layer = layer;
     return result;
   }
   const double sx = x - 0.5;
@@ -177,7 +184,7 @@ Result sample_validated(const Image &image, std::uint32_t mip,
                  read(image, level, sampling, ix + 1, iy, a * (1 - b)),
                  read(image, level, sampling, ix, iy + 1, (1 - a) * b),
                  read(image, level, sampling, ix + 1, iy + 1, a * b)};
-  for (auto &tap : result.taps) tap.mip = mip;
+  for (auto &tap : result.taps) { tap.mip = mip; tap.layer = layer; }
   for (unsigned c = 0; c < 4; ++c) {
     double value = 0;
     for (const auto &tap : result.taps)
@@ -193,6 +200,7 @@ void validate(const Image &image) {
   require(image.format == Format::RGBA8_UNORM || image.format == Format::BGRA8_UNORM ||
               image.format == Format::RGBA8_SRGB || image.format == Format::BGRA8_SRGB,
           "unsupported format");
+  require(image.layer_count > 0, "image needs at least one layer");
   require(!image.levels.empty(), "image needs at least one mip");
   for (std::size_t i = 0; i < image.levels.size(); ++i) {
     const auto &level = image.levels[i];
@@ -214,21 +222,33 @@ void validate(const Image &image) {
     if (level.height > 1)
       require(level.row_pitch <= (remaining - row_bytes) / (level.height - 1),
               "backing bytes do not contain all rows");
+    if (image.layer_count > 1) {
+      const auto span = (level.height - 1ULL) * level.row_pitch + row_bytes;
+      require(level.layer_pitch >= span, "layer pitch overlaps texel bytes");
+      require(image.layer_count - 1ULL <= (remaining - span) / level.layer_pitch,
+              "backing bytes do not contain all layers");
+    }
   }
 }
 
 Result sample_level(const Image &image, std::uint32_t mip,
-                    const Sampling &sampling, double u, double v, TexelOffset offset) {
+                    const Sampling &sampling, double u, double v, TexelOffset offset, std::uint32_t layer) {
   validate(image);
   check_filters(sampling);
-  return sample_validated(image, mip, sampling, u, v, sampling.mag_filter, offset);
+  return sample_validated(image, mip, sampling, u, v, sampling.mag_filter, offset, layer);
 }
 
 Result sample_lod(const Image &image, View view, const Sampling &sampling,
-                  double u, double v, double lod, LodRange range, TexelOffset offset) {
+                  double u, double v, double lod, LodRange range, TexelOffset offset, double layer) {
   validate(image);
   check_filters(sampling);
   validate_view(image, view);
+  require(std::isfinite(layer), "sample layer must be finite");
+  const double relative_layer = std::clamp(layer, 0.0, static_cast<double>(view.layer_count - 1));
+  const auto low_layer = static_cast<std::uint32_t>(std::floor(relative_layer));
+  const double layer_fraction = relative_layer - low_layer;
+  const auto selected_layer = view.base_layer + low_layer +
+      (layer_fraction > 0.5 || (layer_fraction == 0.5 && (low_layer & 1)));
   if (sampling.border_color == BorderColor::OpaqueBlack)
     for (unsigned c=0;c<4;++c)
       require(view.components[c] == Component::Identity ||
@@ -259,13 +279,13 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
               sampling.mip_filter == MipFilter::Linear, "unsupported mip filter");
   const bool linear = sampling.mip_filter == MipFilter::Linear;
   const auto selected = static_cast<std::uint32_t>(low + (!linear && relative - low > 0.5));
-  Result result = sample_validated(image, view.base_mip + selected, sampling, u, v, filter, offset);
+  Result result = sample_validated(image, view.base_mip + selected, sampling, u, v, filter, offset, selected_layer);
   if (linear) {
     result.mip_upper = view.base_mip + std::min(selected + 1, view.level_count - 1);
     result.mip_weight = relative - low;
     // Exact integer/end LODs retain the first sample without needless reads.
     if (result.mip_weight > 0 && result.mip_upper != result.mip) {
-      auto upper = sample_validated(image, result.mip_upper, sampling, u, v, filter, offset);
+      auto upper = sample_validated(image, result.mip_upper, sampling, u, v, filter, offset, selected_layer);
       for (unsigned c = 0; c < 4; ++c)
         result.rgba[c] = static_cast<float>((1 - result.mip_weight) * result.rgba[c] +
                                            result.mip_weight * upper.rgba[c]);
@@ -277,6 +297,7 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
     }
   }
   result.input_lod = lod;
+  result.input_layer = layer;
   result.sampler_lod = clamped;
   result.clamped_lod = relative;
   swizzle_result(result, view.components);
@@ -285,7 +306,7 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
 
 Result sample_grad(const Image &image, View view, const Sampling &sampling,
                    double u, double v, std::array<double,2> dx,
-                   std::array<double,2> dy, LodRange range, TexelOffset offset) {
+                   std::array<double,2> dy, LodRange range, TexelOffset offset, double layer) {
   validate(image);
   validate_view(image, view);
   const auto &base=image.levels[view.base_mip];
@@ -305,7 +326,7 @@ Result sample_grad(const Image &image, View view, const Sampling &sampling,
       0.5*std::log2(static_cast<double>(squared));
   const double lod=std::isfinite(derived) ? static_cast<float>(derived) :
       (squared==0 ? -std::numeric_limits<float>::max() : std::numeric_limits<float>::max());
-  Result result=sample_lod(image,view,sampling,u,v,lod,range,offset);
+  Result result=sample_lod(image,view,sampling,u,v,lod,range,offset,layer);
   result.from_gradients=true;
   result.footprint_squared=squared;
   result.input_lod=derived;
@@ -327,17 +348,28 @@ std::array<std::uint32_t, 2> texture_size(const Image &image, View view,
   return {level.width, level.height};
 }
 
+std::array<std::uint32_t,3> texture_array_size(const Image &image, View view, std::int32_t lod) {
+  const auto size = texture_size(image,view,lod);
+  return {size[0],size[1],view.layer_count};
+}
+
 Result texel_fetch(const Image &image, View view, std::int32_t x,
-                   std::int32_t y, std::int32_t lod, TexelOffset offset) {
+                   std::int32_t y, std::int32_t lod, TexelOffset offset, std::int32_t layer) {
   check_offset(offset);
   const auto size = texture_size(image, view, lod);
   const std::int64_t final_x = static_cast<std::int64_t>(x) + offset[0];
   const std::int64_t final_y = static_cast<std::int64_t>(y) + offset[1];
   require(final_x >= 0 && final_y >= 0 && final_x < size[0] && final_y < size[1], "integer coordinate outside mip");
+  require(layer >= 0 && static_cast<std::uint32_t>(layer) < view.layer_count, "integer layer outside view");
   Result result;
   result.mip = result.mip_upper = view.base_mip + lod;
-  auto tap = read_at(image, image.levels[result.mip], final_x, final_y, 1);
+  result.layer = view.base_layer + layer;
+  result.input_layer = layer;
+  auto level = image.levels[result.mip];
+  level.offset += result.layer * level.layer_pitch;
+  auto tap = read_at(image, level, final_x, final_y, 1);
   tap.mip = result.mip;
+  tap.layer = result.layer;
   result.rgba = tap.color;
   result.taps.push_back(tap);
   result.input_lod = lod;

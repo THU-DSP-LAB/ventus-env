@@ -30,6 +30,7 @@ struct Level {
   std::uint32_t height;
   std::uint64_t offset;
   std::uint64_t row_pitch;
+  std::uint64_t layer_pitch = 0;
 };
 
 struct Image {
@@ -37,6 +38,7 @@ struct Image {
   std::vector<std::uint8_t> data;
   // A partial or complete conventional mip chain, starting at mip 0.
   std::vector<Level> levels;
+  std::uint32_t layer_count = 1;
 };
 
 struct Sampling {
@@ -64,6 +66,8 @@ struct View {
   std::uint32_t base_mip;
   std::uint32_t level_count;
   ComponentMapping components{};
+  std::uint32_t base_layer = 0;
+  std::uint32_t layer_count = 1;
 };
 
 struct LodRange {
@@ -82,6 +86,7 @@ struct Tap {
   double weight;
   Color color;
   std::uint32_t mip = 0;
+  std::uint32_t layer = 0;
   bool border = false; // No image byte address for a border-replacement tap.
 };
 
@@ -90,6 +95,8 @@ struct Result {
   std::uint32_t mip = 0;
   // Absolute image levels, with mip naming the first level for compatibility.
   std::uint32_t mip_upper = 0;
+  std::uint32_t layer = 0;
+  double input_layer = 0;
   double mip_weight = 0;
   double input_u = 0;
   double input_v = 0;
@@ -107,26 +114,30 @@ struct Result {
 void validate(const Image &image);
 // Direct single-level helper uses mag_filter; min/mip selection needs sample_lod.
 Result sample_level(const Image &image, std::uint32_t mip,
-                    const Sampling &sampling, double u, double v, TexelOffset offset = {});
+                    const Sampling &sampling, double u, double v, TexelOffset offset = {},
+                    std::uint32_t layer = 0);
 // Explicit LOD is relative to the view. Mip-nearest uses Vulkan's preferred
 // tie rule (an exact half chooses the lower mip). Mip-linear blends adjacent
 // levels after sampler/view clamps. Sampler bias precedes both clamps;
 // zero bias preserves the original double-precision LOD helper behavior.
 Result sample_lod(const Image &image, View view, const Sampling &sampling,
                   double u, double v, double lod, LodRange range = {},
-                  TexelOffset offset = {});
+                  TexelOffset offset = {}, double layer = 0);
 // Explicit normalized binary32 coordinate derivatives, isotropic Euclidean
 // footprint at view base dimensions. Zero footprint selects the lower clamp.
 Result sample_grad(const Image &image, View view, const Sampling &sampling,
                    double u, double v, std::array<double,2> dx,
                    std::array<double,2> dy, LodRange range = {},
-                   TexelOffset offset = {});
+                   TexelOffset offset = {}, double layer = 0);
 // Integer operations use relative view LOD and never consult a sampler.
 // Coordinates and LOD must be in range; invalid input throws.
 Result texel_fetch(const Image &image, View view, std::int32_t x,
-                   std::int32_t y, std::int32_t lod, TexelOffset offset = {});
+                   std::int32_t y, std::int32_t lod, TexelOffset offset = {},
+                   std::int32_t layer = 0);
 std::array<std::uint32_t, 2> texture_size(const Image &image, View view,
                                           std::int32_t lod);
+std::array<std::uint32_t, 3> texture_array_size(const Image &image, View view,
+                                              std::int32_t lod);
 std::uint32_t texture_query_levels(const Image &image, View view);
 
 } // namespace ventus::texture

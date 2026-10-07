@@ -18,9 +18,9 @@ python3 tools/texture_model.py demo
 
 | 功能 | 行为 |
 | --- | --- |
-| Image | 2D、单 layer、单 sample；完整或部分传统 mip 链 |
+| Image | 2D / 2D array、单 sample；完整或部分传统 mip 链，层数不随 mip 改变 |
 | 格式 | RGBA8/BGRA8 UNORM 或 sRGB；RGBA 浮点结果，sRGB RGB 在过滤前解码，alpha 保持 UNORM |
-| 存储 | 各 mip 独立 offset、width、height、row pitch；允许行填充和非零偏移 |
+| 存储 | 各 mip 独立 offset、width、height、row/layer pitch；允许行/层填充和非零偏移 |
 | 寻址 | U/V 独立的 repeat、mirrored repeat、clamp-to-edge、clamp-to-border |
 | Texel 过滤 | nearest 或 bilinear；独立 minFilter/magFilter，按 sampler clamp 后的 LOD 选择 |
 | Border color | 核心 float transparent black/opaque black/opaque white，逐 tap 替换后过滤；opaque black 采样仅覆盖 identity view |
@@ -29,13 +29,14 @@ python3 tools/texture_model.py demo
 | Mip 过滤 | nearest（精确半整数选择较低一级）或 linear（相邻两级混合）；与级内过滤独立 |
 | View swizzle | IDENTITY、R/G/B/A、ZERO/ONE；解码后通道置换/重复或浮点常量；适用于 sample/fetch |
 | Offset | sample/fetch 的常量 signed 二维 texel offset，分量 [-8,7]；每个访问 mip 独立应用，不改变 LOD 或过滤权重 |
-| 整数读取/查询 | 合法整数坐标 `texel_fetch`；相对 View 的 `texture_size`、`texture_query_levels`；不使用 sampler |
-| Trace | 下/上 mip、跨级权重、输入 UV/LOD、受限后的相对 LOD；每个 tap 的绝对 mip、坐标、偏移、合并权重和颜色 |
+| 整数读取/查询 | 合法整数坐标 `texel_fetch`；相对 View 的 `texture_size`、`texture_array_size`、`texture_query_levels`；不使用 sampler |
+| Layer/View | 独立 base layer/count；采样 layer 相对 view，以 ties-to-even 取整并 clamp，层间不插值；fetch 使用合法整数 layer |
+| Trace | layer 与 view 范围、下/上 mip、跨级权重、输入 UV/LOD、受限后的相对 LOD；每个 tap 的绝对 mip、坐标、偏移、合并权重和颜色 |
 | 多资源 | 不依赖全局采样状态，可交替采样不同 Image 和 Sampling 对象 |
 
 `sample_level` 在指定的 image 绝对 mip 内用 `mag_filter` 采样，它是直接指定级别与级内过滤的 helper，不进行 LOD/min/mag 选择。`sample_lod` 的 LOD 则相对 View；例如 `{base_mip=1, level_count=2}` 的 LOD 0 访问 image mip 1。每个 mip 的尺寸按 `max(1, previous/2)` 递减；可不提供后续级别，但不能在 1×1 之后继续追加重复 mip。
 
-当前尚无隐式导数、压缩、比较过滤、layer array 或 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
+当前尚无隐式导数、压缩、比较过滤、cube/3D 或模型的 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
 
 ## 计算规则与数值边界
 
@@ -55,7 +56,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 ## 验证
 
-测试包含十五组，普通和 ASan/UBSan 模式目前均通过 2,357,491 项检查；包含独立 bias 与显式梯度 oracle：
+测试包含十六组，普通和 ASan/UBSan 模式目前均通过 3,248,351 项检查；包含独立 bias 与显式梯度 oracle：
 
 1. 手算四点平均、非对称插值、repeat 接缝和 mirror/clamp 边缘。
 2. 负坐标、texel 边界两侧、精确边界、负零和巨大有限坐标。
@@ -74,6 +75,8 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 14. 显式二维梯度的独立 `hypot/log2` oracle，view 基础尺寸、dx/dy 分别主导、旋转/负梯度、零/极小/巨大有限梯度、精确半级和相邻浮点值。
 
 15. 常量二维 sample/fetch offset 的独立延伸 texel oracle、正负范围端点、1×1/非二次幂/mip/view、min-mag/bias/sRGB、过滤权重不变与合法最终 fetch 坐标；非法 offset、坐标上溢及极小负 UV 边界。
+
+16. Array layer 的独立颜色/地址 oracle：1/2/4 层、全部格式、行/层填充、mip/layer view 子范围、半整数及相邻浮点值、极值 clamp、host 舍入模式独立性、sample/grad/fetch/query、无跨层过滤与非法 backing。
 
 独立对照以 long double 在虚拟延伸图像上枚举 nearest 区间或 tent kernel，逐个真实 texel 累积贡献；不调用模型的坐标归约、四点选择或寻址函数。精确样例和 UNORM 解码做相应精确比较；过滤测试的每分量绝对误差上限为 `2e-7`，适用于该模型的 float 输出，不能直接当成未来 TMU 精度要求。
 
@@ -439,3 +442,28 @@ Clamp 模式的提前 UV 截断拓宽到安全的 `[-9,10]`（仅非零 offset �
 Fetch 对最终整数坐标做合法性验证，不使用 sampler；实验输入构造为 `target-offset`，使每个 sampled view 的最终 fetch 坐标合法。查询尺寸/级数不使用 offset。不支持/不合法状态继续拒绝；范围检查同时验证设备两项 offset limits。
 
 E03 最终共 42 个 GPU 命令（37 正向、5 预期失败反例），正向零差异，最大颜色误差 `1.192092896e-7`；忽略 offset 反例检出 1,768/6,088 差异。48 项范围/limits 检查、隔离/主目录 Mesa unit 和原 any-hit 通过。证据 `artifacts/texture_model/offset-implementation/verification.json`。
+
+
+## E04 二维数组纹理
+
+```sh
+python3 tools/texture_model.py gpu-min-mag --image-layers 4
+python3 tools/texture_model.py gpu-multi-nonuniform-separate --image-layers 4 --array-length 4 --gradients --offset -8 7
+python3 tools/texture_model.py gpu-fetch-nonuniform --image-layers 4 --array-length 4
+python3 tools/texture_model.py gpu-min-mag --image-layers 4 --single-layer-view
+python3 tools/texture_model.py gpu-fetch-nonuniform --image-layers 4 --linear-image --array-length 4
+python3 tools/texture_model.py gpu-min-mag --image-layers 4 --case-limit 8 --inject-layer-mismatch
+```
+
+`--image-layers` 指一张图像的层数；`--array-length` 是 descriptor 数组的资源引用数，两个索引彼此独立。层数实验可选 1/2/4，创建 profile 支持 1..2048 层；仍为单 sample、四种 RGBA8/BGRA8 UNORM/sRGB。`--single-layer-view` 使用普通 2D shader，读取多层 image 的一个非零层。最后一项把 shader layer 固定为零，模型保留真实请求，必须检出颜色差异并返回 1。
+
+Sample 的 layer 坐标不归一化：相对 view 先 roundTiesToEven，再 clamp 到 `[0,view.layer_count-1]`，最后映射到 image 的绝对层。`0.5→0`，`1.5→2`，而 view 的 base layer 不参与奇偶判定。先 clamp 再对非负值做显式分数/奇偶判断与此规则等价，避免巨大有限 float 转整数越界，也不依赖 host 舍入模式。过滤和梯度 footprint 只用 U/V，层间没有插值。依据是 [Vulkan-Docs v1.4.328 的 Array Layer Selection](https://github.com/KhronosGroup/Vulkan-Docs/blob/v1.4.328/chapters/textures.adoc#textures-unnormalized-to-integer)。
+
+模型函数的最后一个可选参数为 layer：`sample_lod/sample_grad` 接收 view-relative 浮点值；`texel_fetch` 接收合法 view-relative int32；`sample_level` helper 使用 image 的绝对整数层。旧调用默认层零。`texture_array_size` 返回宽、高、view 层数；层数与查询 mip 无关。Trace 保存选中的绝对 layer 和每个 tap 的地址。
+
+上传 buffer 使用独立的 padded row/layer pitch，Vulkan backing 的每个 mip 存连续 layer planes；实验同时检查全层上传、最后一层的非零 baseArrayLayer 局部更新，以及多资源重上传。Image view 的 base/count mip 与 base/count layer 独立校验。`--linear-image` 还验证 `vkGetImageSubresourceLayout` 的 offset/rowPitch/arrayPitch：通过查询的布局直接定位映射内存，逐行比较已上传的独立 fixture 字节，再验证实际 shader 采样。此前该查询入口缺失，本切片补齐。Storage-image array、array attachment、cube、3D、层间过滤未开放。
+
+软件 descriptor 按 [ADR-0028](../../../docs/rt-implementation-architecture/decisions/ADR-0028-software-texture-array-layer-metadata.md) 从 88B 扩为 96B，追加偏移 88 的 view layer count；binding directory 仍为 16B，mip record 仍为 24B。记录表按 `relativeLayer*viewMipCount+relativeMip` 索引，之后才是 sRGB decode table；producer、普通 buffer 元素寻址和 texture consumer 一起迁移。它不规定未来 TMU ABI，也未增加 NIR intrinsic、LLVM texture intrinsic 或 ISA。
+
+
+E04 最终隔离/主目录共 44 个 GPU 命令（40 正向、4 预期失败反例）；正向零差异，最大颜色误差 `1.192092896e-7`。选层反例分别检出 3,072/4,008 差异；61 项支持范围/limits 检查、Mesa unit 与原 any-hit 图像均通过。源码和构建产物前后哈希一致；加入 LINEAR 查询、收紧数组 usage 前的中途验收和 smoke 不计入最终结论。证据 `artifacts/texture_model/image-array-implementation/verification.json`；下一项为 Cube 的方向/face/接缝规则。

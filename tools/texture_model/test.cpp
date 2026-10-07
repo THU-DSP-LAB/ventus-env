@@ -386,6 +386,54 @@ void lod_bias() {
   }
 }
 
+void explicit_gradients() {
+  const auto image=mip_image();
+  Sampling state;
+  auto r=sample_grad(image,{0,3},state,0.3,0.7,{0,0},{0,0});
+  expect(r.from_gradients && r.mip==0 && r.sampler_lod==0,"zero footprint lower clamp");
+  expect(std::isinf(r.input_lod) && r.input_lod<0,"zero footprint diagnostic minus infinity");
+  r=sample_grad(image,{0,3},state,0.3,0.7,{1.f/5,1.f/3},{0,0});
+  expect(r.footprint_squared==2 && r.input_lod==0.5 && r.mip==0,"off-axis exact half tie");
+  r=sample_grad(image,{0,3},state,0.3,0.7,{std::nextafter(1.f/5,1.f),1.f/3},{0,0});
+  expect(r.mip==1,"above half gradient footprint");
+  r=sample_grad(image,{1,2},state,0.3,0.7,{0.25,0},{0,0});
+  expect(r.input_lod==-1 && r.mip==1,"scale by view base width rather than image mip0");
+  state.lod_bias=16;
+  expect(sample_grad(image,{0,3},state,0.3,0.7,{0,0},{0,0}).mip==0,"zero footprint remains lower even with max bias");
+  const std::array<std::array<float,2>,12> derivatives{{{0,0},{1.f/64,0},{0,-0.25f},{1.f/5,1.f/3},
+      {0.5f,-0.5f},{1,2},{0.3f,0.2f},{-16,16},{0x1p-100f,0},
+      {std::numeric_limits<float>::denorm_min(),0},{0x1p60f,0},{std::numeric_limits<float>::max(),0}}};
+  for (auto d : derivatives)
+    for (auto view : {View{0,3},View{1,2},View{1,1}})
+      for (auto mip : {MipFilter::Nearest,MipFilter::Linear})
+        for (auto mag : {Filter::Nearest,Filter::Bilinear})
+          for (auto min : {Filter::Nearest,Filter::Bilinear})
+            for (double bias : {-16.,-0.5,0.,0.5,16.})
+              for (auto range : {LodRange{0,1000},LodRange{0.75,1.75},LodRange{2,2}}) {
+                Sampling sampling{AddressMode::Repeat,AddressMode::ClampToEdge,mag,min,mip};
+                sampling.lod_bias=bias;
+                const auto &base=image.levels[view.base_mip];
+                // Independent Euclidean magnitude via hypot, using binary32
+                // coordinate scaling and long-double LOD/weighted color oracle.
+                const float xu=d[0]*base.width,yu=d[1]*base.height;
+                const float xv=-d[1]*base.width,yv=d[0]*base.height;
+                const long double rho=std::max(std::hypot(static_cast<long double>(xu),static_cast<long double>(yu)),
+                    std::hypot(static_cast<long double>(xv),static_cast<long double>(yv)));
+                const float lod=rho==0 ? -std::numeric_limits<float>::max() :
+                    static_cast<float>(std::log2(rho));
+                const float biased=lod+static_cast<float>(bias);
+                const double clamped=std::clamp(static_cast<double>(biased),range.min,range.max);
+                auto actual=sample_grad(image,view,sampling,0.3,0.7,{d[0],d[1]},{-d[1],d[0]},range);
+                expect_color(actual.rgba,lod_oracle(image,view,sampling,0.3,0.7,clamped,range),"independent gradient magnitude/level oracle",4e-6);
+              }
+  for (double bad : {std::numeric_limits<double>::quiet_NaN(),std::numeric_limits<double>::infinity(),1e100})
+    for (unsigned axis=0;axis<4;++axis) {
+      std::array<double,2> x{},y{};
+      (axis<2 ? x[axis] : y[axis-2])=bad;
+      rejected([&]{sample_grad(image,{0,3},{},0,0,x,y);},"invalid explicit gradient component");
+    }
+}
+
 void mip_linear() {
   auto solid = mip_image();
   Sampling state{AddressMode::Repeat, AddressMode::ClampToEdge,
@@ -782,7 +830,7 @@ void invalid_inputs() {
 } // namespace
 
 int main() {
-  const std::array<std::pair<const char *, void (*)()>, 13> suites{{
+  const std::array<std::pair<const char *, void (*)()>, 14> suites{{
       {"hand-calculated filtering and seams", hand_calculated},
       {"negative UV, boundaries and huge finite UV", negative_and_boundary_coordinates},
       {"all 256 UNORM values in both formats", all_unorm_values},
@@ -790,6 +838,7 @@ int main() {
       {"explicit LOD, view ranges and multiple images", lod_and_views},
       {"mip-linear/trilinear independent oracle and trace", mip_linear},
       {"sampler LOD bias before clamp/filter/view", lod_bias},
+      {"explicit 2D gradients and independent Euclidean oracle", explicit_gradients},
       {"independent min/mag selection before view clamp", min_mag},
       {"sRGB decoding before filtering and unchanged alpha", srgb},
       {"integer texel fetch and view-relative property queries", fetch_and_queries},

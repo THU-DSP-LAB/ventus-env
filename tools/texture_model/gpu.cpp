@@ -20,7 +20,7 @@
 using namespace ventus::texture;
 namespace {
 
-constexpr double tolerance = 1e-6; // Declared before running: float shader arithmetic.
+double tolerance = 1e-6; // Explicit-Lod bound; gradient-only bound is set before running.
 static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559,
               "numeric readback requires IEEE 754 binary32");
 
@@ -527,9 +527,49 @@ public:
     miss = {base + stride, stride, stride};
   }
 
+  static bool gradients() { return std::getenv("VENTUS_TEXTURE_GRADIENTS")!=nullptr; }
+
+  static std::array<float,4> gradient_request(unsigned i) {
+    if (const char *text=std::getenv("VENTUS_TEXTURE_CONSTANT_GRADIENT")) {
+      std::array<float,4> value{};
+      for (unsigned c=0;c<4;++c) {
+        char *end=nullptr;
+        value[c]=std::strtof(text,&end);
+        if (!end || (c<3 ? *end!=',' : *end!='\0')) throw std::runtime_error("invalid constant gradient");
+        text=end+1;
+      }
+      return value;
+    }
+    static const std::array<std::array<float,2>,32> corpus{{
+      {0,0},{1.f/64,0},{0,1.f/64},{1.f/32,1.f/32},{-1.f/16,0},{0,-1.f/16},
+      {1.f/8,0},{1.f/8,1.f/8},{0.25f,-0.25f},{0.5f,0},{0,0.5f},{0.5f,-0.5f},
+      {1,0},{1,1},{2,-2},{4,0},{16,-16},{-0.f,0.f},
+      {0x1p-16f,0},{0x1p-15f,0x1p-16f},{0x1p-30f,0},{0x1p-100f,0},
+      {0x1p20f,0},{0x1p60f,0x1p60f},{std::numeric_limits<float>::max(),0},
+      {std::numeric_limits<float>::denorm_min(),0},{0.3f,0.2f},{-0.1f,0.25f},
+      {0.999f,1.001f},{0.249f,0.251f},{0x1p-10f,0x1p-12f},{8,-0.5f}
+    }};
+    const auto d=corpus[i%corpus.size()];
+    if (i%corpus.size()==29) return {0,0,0.25f,0.125f};
+    if (i%corpus.size()==30) return {0.125f,0,0,0};
+    if (i%corpus.size()==31) return {0.125f,0.125f,0,0};
+    return {d[0],d[1],-d[1],d[0]};
+  }
+
+  static std::vector<std::array<float,4>> gradient_inputs(const std::vector<std::array<float,4>> &requests) {
+    if (!gradients()) return requests;
+    std::vector<std::array<float,4>> packed;
+    for (unsigned i=0;i<requests.size();++i) {
+      packed.push_back(requests[i]);
+      const auto d=gradient_request(i);
+      packed.push_back({d[2],d[3],0,0});
+    }
+    return packed;
+  }
+
   static float requested_bias() {
     const char *text=std::getenv("VENTUS_TEXTURE_LOD_BIAS");
-    return text ? std::stof(text) : 0;
+    return text ? std::strtof(text,nullptr) : 0;
   }
 
   VkSampler sampler(Sampling sampling, LodRange range = {0, 0},
@@ -1000,9 +1040,13 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   const auto &lods = min_mag ? min_mag_lods : mip_linear ? linear_lods : nearest_lods;
   std::vector<std::array<float, 4>> mip_inputs;
   for (unsigned i = 0; i < uv.size(); ++i)
-    mip_inputs.push_back({uv[i][0], uv[i][1], sweep ? 0 : lods[i % lods.size()], 0});
-  auto inputs = experiment.buffer(uv.size() * (mips ? 16 : 8), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-  std::memcpy(inputs.map, mips ? static_cast<const void *>(mip_inputs.data()) : static_cast<const void *>(uv.data()), uv.size() * (mips ? 16 : 8));
+    mip_inputs.push_back({uv[i][0], uv[i][1], Experiment::gradients() ? Experiment::gradient_request(i)[0] : sweep ? 0 : lods[i % lods.size()],
+                          Experiment::gradients() ? Experiment::gradient_request(i)[1] : 0});
+  const auto gradient_inputs=Experiment::gradient_inputs(mip_inputs);
+  const unsigned input_stride=Experiment::gradients() ? 32 : mips ? 16 : 8;
+  auto inputs = experiment.buffer(uv.size() * input_stride, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  std::memcpy(inputs.map, Experiment::gradients() ? static_cast<const void *>(gradient_inputs.data()) :
+      mips ? static_cast<const void *>(mip_inputs.data()) : static_cast<const void *>(uv.data()), uv.size() * input_stride);
   auto direct = experiment.buffer(uv.size() * 32, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   auto indirect = experiment.buffer(uv.size() * 32, VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
   auto output_address = experiment.buffer(8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -1017,7 +1061,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   experiment.submit();
   std::ofstream csv(csv_path);
   if (!csv) throw std::runtime_error("cannot open numeric result CSV");
-  csv << "case,path,width,height,format,address_u,address_v,mag_filter,min_filter,selected_filter,sampler_lod,request,u,v,input_lod,view_base,view_count,selected_mip,mip_upper,mip_weight,mip_filter,view_mapping,border_color,sampler_bias,channel,reference,gpu,abs_error\n";
+  csv << "case,path,width,height,format,address_u,address_v,mag_filter,min_filter,selected_filter,sampler_lod,request,u,v,input_lod,view_base,view_count,selected_mip,mip_upper,mip_weight,mip_filter,view_mapping,border_color,sampler_bias,footprint_squared,derived_lod,gradient_v,gradient_dyu,gradient_dyv,channel,reference,gpu,abs_error\n";
   csv << std::setprecision(10);
   unsigned cases = 0;
   std::uint64_t samples = 0, components = 0, mismatches = 0, markers_failed = 0, buffer_failed = 0;
@@ -1032,7 +1076,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
     query_csv << "case,path,request,lod,view_base,view_count,property,expected,actual\n";
   }
   struct Config { unsigned width, height, levels, base, count; LodRange range; };
-  const std::vector<Config> configurations = sweep ? std::vector<Config>{{256,1,1,0,1,{0,1000}}} : mips ? std::vector<Config>{
+  std::vector<Config> configurations = sweep ? std::vector<Config>{{256,1,1,0,1,{0,1000}}} : mips ? std::vector<Config>{
       {5,3,3,0,3,{0,1000}}, {5,3,3,1,VK_REMAINING_MIP_LEVELS,{0,1000}},
       {8,4,4,0,4,{0.75,1.75}}, {8,4,4,1,2,{2,2}},
       {1,8,3,0,3,{0,0.5}}, {1,8,3,2,1,{0,1000}},
@@ -1040,6 +1084,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
       {16384,1,15,0,15,{0,1000}}, {16384,1,15,13,VK_REMAINING_MIP_LEVELS,{0,1000}}} : std::vector<Config>{
       {1,1,1,0,1,{0,0}}, {1,5,1,0,1,{0,0}}, {5,1,1,0,1,{0,0}},
       {3,5,1,0,1,{0,0}}, {4,4,1,0,1,{0,0}}};
+  if (Experiment::gradients()) configurations[0]={8,8,4,0,4,{0,1000}};
   const unsigned total_cases = border_mode ? configurations.size()*4*7*8*3 :
       configurations.size() * (min_mag ? 144 : 36) * (fetch_query || view_swizzle ? 2 : 1);
   const std::vector<Format> formats = fetch_query || view_swizzle ? std::vector<Format>{Format::RGBA8_UNORM,Format::BGRA8_UNORM,Format::RGBA8_SRGB,Format::BGRA8_SRGB}
@@ -1160,14 +1205,14 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
               for (unsigned element = 0; element < experiment.array_length; ++element) {
                 experiment.array_index = element;
                 experiment.descriptors(element_mapped_views[element][(mapping_index + element) % mappings.size()],
-                    sampler, carrier, inputs, direct, output_address, uv.size(), mips ? 16 : 8);
+                    sampler, carrier, inputs, direct, output_address, uv.size(), input_stride);
               }
               experiment.array_index = base_index;
               experiment.lane_invocations += uv.size();
               experiment.lane_active_a += uv.size();
             } else {
             experiment.descriptors(view_swizzle ? mapped_views[mapping_index] : texture,
-                sampler, carrier, inputs, direct, output_address, uv.size(), mips ? 16 : 8);
+                sampler, carrier, inputs, direct, output_address, uv.size(), input_stride);
             }
             auto *actual = static_cast<float *>(direct.map);
             auto *indirect_values = static_cast<float *>(indirect.map);
@@ -1218,6 +1263,8 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
               }
               const auto reference = fetch_query ? texel_fetch(image,lane_view,static_cast<int32_t>(uv[i][0]),
                   static_cast<int32_t>(uv[i][1]),static_cast<int32_t>(mip_inputs[i][2])) :
+                  Experiment::gradients() ? sample_grad(image,sampled_view,sampling,uv[i][0],uv[i][1],
+                      {mip_inputs[i][2],mip_inputs[i][3]},{Experiment::gradient_request(i)[2],Experiment::gradient_request(i)[3]},config.range) :
                   sample_lod(image, sampled_view, sampling, uv[i][0], uv[i][1], mips ? mip_inputs[i][2] : 0, config.range);
               if (fetch_query) {
                 if (values[i*8+4]!=73) ++markers_failed;
@@ -1257,8 +1304,10 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                     << ',' << (mips ? mip_inputs[i][2] : 0) << ',' << lane_view.base_mip << ',' << lane_view.level_count << ',' << reference.mip
                     << ',' << reference.mip_upper << ',' << reference.mip_weight << ',' << static_cast<int>(sampling.mip_filter)
                     << ',' << packed_mapping(lane_view.components)
-                    << ',' << static_cast<unsigned>(sampling.border_color) << ',' << sampling.lod_bias
-                    << ',' << c << ',' << reference.rgba[c] << ',' << value << ',' << error << '\n';
+                    << ',' << static_cast<unsigned>(sampling.border_color) << ',' << sampling.lod_bias << ',' << reference.footprint_squared << ',' << reference.input_lod
+                    << ',' << (mips ? mip_inputs[i][3] : 0)
+                    << ',' << (Experiment::gradients() ? Experiment::gradient_request(i)[2] : 0)
+                    << ',' << (Experiment::gradients() ? Experiment::gradient_request(i)[3] : 0) << ',' << c << ',' << reference.rgba[c] << ',' << value << ',' << error << '\n';
                 ++components;
               }
               ++samples;
@@ -1350,9 +1399,11 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
       1,1.49f,1.5f,std::nextafter(1.5f,2.f),1.51f,2,2.5f,3,10,1000};
   std::vector<std::array<float, 4>> request_data;
   for (unsigned i = 0; i < uv.size(); ++i)
-    request_data.push_back({uv[i][0],uv[i][1],lods[i % lods.size()],lods[(i * 7 + 3) % lods.size()]});
-  auto inputs = experiment.buffer(request_data.size() * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-  std::memcpy(inputs.map, request_data.data(), request_data.size() * 16);
+    request_data.push_back({uv[i][0],uv[i][1],Experiment::gradients() ? Experiment::gradient_request(i)[0] : lods[i % lods.size()],
+                           Experiment::gradients() ? Experiment::gradient_request(i)[1] : lods[(i * 7 + 3) % lods.size()]});
+  const auto packed_requests=Experiment::gradient_inputs(request_data);
+  auto inputs = experiment.buffer(packed_requests.size() * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  std::memcpy(inputs.map, packed_requests.data(), packed_requests.size() * 16);
   auto direct = experiment.buffer(uv.size() * 64, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   auto indirect = experiment.buffer(uv.size() * 64, VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
   auto output_address = experiment.buffer(8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -1365,7 +1416,7 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
   experiment.submit();
   std::ofstream csv(csv_path);
   if (!csv) throw std::runtime_error("cannot open multi-binding CSV");
-  csv << "case,pair,phase,path,output,resource_a,resource_b,view_a_base,view_b_base,mip_a,mip_b,mip_a_upper,mip_b_upper,mip_weight_a,mip_weight_b,request,u,v,lod_a,lod_b,address_a_u,address_a_v,mag_filter_a,min_filter_a,selected_filter_a,mip_filter_a,min_lod_a,max_lod_a,address_b_u,address_b_v,mag_filter_b,min_filter_b,selected_filter_b,mip_filter_b,min_lod_b,max_lod_b,channel,reference,gpu,abs_error,active_a,active_b,image_index_a,image_index_b,sampler_index_a,sampler_index_b,bias_a,bias_b\n";
+  csv << "case,pair,phase,path,output,resource_a,resource_b,view_a_base,view_b_base,mip_a,mip_b,mip_a_upper,mip_b_upper,mip_weight_a,mip_weight_b,request,u,v,lod_a,lod_b,address_a_u,address_a_v,mag_filter_a,min_filter_a,selected_filter_a,mip_filter_a,min_lod_a,max_lod_a,address_b_u,address_b_v,mag_filter_b,min_filter_b,selected_filter_b,mip_filter_b,min_lod_b,max_lod_b,channel,reference,gpu,abs_error,active_a,active_b,image_index_a,image_index_b,sampler_index_a,sampler_index_b,bias_a,bias_b,footprint_squared_a,footprint_squared_b,derived_lod_a,derived_lod_b\n";
   csv << std::setprecision(10);
   unsigned cases = 0;
   std::array<unsigned, 8> phase_counts{};
@@ -1446,14 +1497,14 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
                   // sampler_descriptor writes at the inverse array index.
                   experiment.descriptors(odd ? b.texture : a.texture,
                       odd ? selected_sampler_b : selected_sampler_a,
-                      carrier,inputs,direct,output_address,uv.size(),16,64);
+                      carrier,inputs,direct,output_address,uv.size(),Experiment::gradients() ? 32 : 16,64);
                   experiment.secondary_descriptor(odd ? a.texture : b.texture,
                       odd ? selected_sampler_a : selected_sampler_b);
                 }
                 experiment.array_index = base_index;
               } else {
                 experiment.descriptors(a.texture,selected_sampler_a,
-                    carrier,inputs,direct,output_address,uv.size(),16,64);
+                    carrier,inputs,direct,output_address,uv.size(),Experiment::gradients() ? 32 : 16,64);
                 experiment.secondary_descriptor(b.texture,selected_sampler_b);
               }
             }
@@ -1501,9 +1552,15 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
                   (experiment.array_length - 1 - sampler_b_index) % 2 : index_b % 2);
               const MultiResource &lane_a = flip_a ? b : a;
               const MultiResource &lane_b = flip_b ? a : b;
-              auto ra = sample_lod(*lane_a.image,lane_a.view,flip_sa ? state_b : state_a,
+              auto ra = Experiment::gradients() ? sample_grad(*lane_a.image,lane_a.view,flip_sa ? state_b : state_a,
+                  request[0],request[1],{request[2],request[3]},
+                  {Experiment::gradient_request(i)[2],Experiment::gradient_request(i)[3]},flip_sa ? clamp_b : clamp_a) :
+                  sample_lod(*lane_a.image,lane_a.view,flip_sa ? state_b : state_a,
                   request[0],request[1],request[2],flip_sa ? clamp_b : clamp_a);
-              auto rb = sample_lod(*lane_b.image,lane_b.view,flip_sb ? state_a : state_b,
+              auto rb = Experiment::gradients() ? sample_grad(*lane_b.image,lane_b.view,flip_sb ? state_a : state_b,
+                  request[1],request[0],{request[3],request[2]},
+                  {Experiment::gradient_request(i)[3],Experiment::gradient_request(i)[2]},flip_sb ? clamp_a : clamp_b) :
+                  sample_lod(*lane_b.image,lane_b.view,flip_sb ? state_a : state_b,
                   request[1],request[0],request[3],flip_sb ? clamp_a : clamp_b);
               if (experiment.nonuniform_index) {
                 ++experiment.lane_invocations;
@@ -1549,7 +1606,9 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
                         << ',' << (experiment.separate ? (experiment.nonuniform_index ? sampler_a_index : experiment.array_length - 1 - experiment.array_index) : (experiment.nonuniform_index ? index_a : experiment.array_index))
                         << ',' << (experiment.separate ? (experiment.nonuniform_index ? sampler_b_index : experiment.array_length - 1 - experiment.array_index) : (experiment.nonuniform_index ? index_b : experiment.array_index))
                         << ',' << (flip_sa ? state_b : state_a).lod_bias
-                        << ',' << (flip_sb ? state_a : state_b).lod_bias << '\n';
+                        << ',' << (flip_sb ? state_a : state_b).lod_bias
+                        << ',' << ra.footprint_squared << ',' << rb.footprint_squared
+                        << ',' << ra.input_lod << ',' << rb.input_lod << '\n';
                     ++components;
                   }
                   if (output < 2) ++samples;
@@ -1591,6 +1650,7 @@ multi_finished:
 
 int main(int argc, char **argv) {
   try {
+    if (Experiment::gradients()) tolerance=4e-6;
     if (argc > 6 && std::string(argv[6]) == "checks")
       return profile_checks(argv[1], argv[2], argc - 7, argv + 7);
     const std::string mode=argc==7 ? argv[6] : "";

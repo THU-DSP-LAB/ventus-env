@@ -94,6 +94,8 @@ struct Result {
   double input_lod = 0;
   double sampler_lod = 0;
   double clamped_lod = 0;
+  bool from_gradients = false;
+  double footprint_squared = 0;
   Filter filter = Filter::Nearest;
   std::vector<Tap> taps;
 };
@@ -109,6 +111,11 @@ Result sample_level(const Image &image, std::uint32_t mip,
 // zero bias preserves the original double-precision LOD helper behavior.
 Result sample_lod(const Image &image, View view, const Sampling &sampling,
                   double u, double v, double lod, LodRange range = {});
+// Explicit normalized binary32 coordinate derivatives, isotropic Euclidean
+// footprint at view base dimensions. Zero footprint selects the lower clamp.
+Result sample_grad(const Image &image, View view, const Sampling &sampling,
+                   double u, double v, std::array<double,2> dx,
+                   std::array<double,2> dy, LodRange range = {});
 // Integer operations use relative view LOD and never consult a sampler.
 // Coordinates and LOD must be in range; invalid input throws.
 Result texel_fetch(const Image &image, View view, std::int32_t x,

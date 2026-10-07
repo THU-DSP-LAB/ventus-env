@@ -23,6 +23,9 @@ def main() -> int:
     parser.add_argument("--array-binding", type=int, choices=(2, 12), default=2)
     parser.add_argument("--array-length", type=int, choices=(1, 2, 4), default=4)
     parser.add_argument("--array-index", type=int, default=None)
+    parser.add_argument("--constant-gradient", type=float, nargs=4, help="use compile-time dx.xy and dy.xy derivatives instead of the per-invocation gradient corpus")
+    parser.add_argument("--gradients", action="store_true", help="use explicit 2D textureGrad with per-invocation gradient corpus in sampling GPU profiles")
+    parser.add_argument("--inject-gradient-mismatch", action="store_true", help="gradient negative control: replace shader gradients with zero")
     parser.add_argument("--lod-bias", type=float, default=0, help="finite sampler bias in [-16,16]; multi profiles use opposite biases for the two samplers")
     parser.add_argument("--inject-bias-mismatch", action="store_true", help="bias negative control: give GPU samplers zero bias while oracle retains requested bias")
     parser.add_argument("--sanitize", action="store_true", help="enable address/UB sanitizers")
@@ -36,6 +39,14 @@ def main() -> int:
     parser.add_argument("--inject-mismatch", action="store_true", help="gpu checker negative control; must fail")
     parser.add_argument("--inject-query-mismatch", action="store_true", help="fetch/query checker negative control; must fail")
     args = parser.parse_args()
+    if args.constant_gradient is not None and (not args.gradients or any(not math.isfinite(v) or abs(v)>3.4028234663852886e38 for v in args.constant_gradient)):
+        parser.error("constant-gradient requires gradients and four finite binary32 values")
+    if args.inject_gradient_mismatch and args.constant_gradient==[0,0,0,0]:
+        parser.error("a zero constant gradient cannot serve as the mismatch control")
+    if args.gradients and (args.action in ("test","demo","gpu-checks","gpu","gpu-srgb-values") or args.action.startswith("gpu-fetch")):
+        parser.error("gradients requires a mip-capable sampling GPU profile")
+    if args.inject_gradient_mismatch and not args.gradients:
+        parser.error("inject-gradient-mismatch requires gradients")
     if not math.isfinite(args.lod_bias) or abs(args.lod_bias)>16:
         parser.error("lod-bias must be finite and in [-16,16]")
     if args.inject_bias_mismatch and (args.lod_bias==0 or args.action in ("test","demo","gpu-checks") or args.action.startswith("gpu-fetch")):

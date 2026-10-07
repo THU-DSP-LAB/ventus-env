@@ -268,6 +268,35 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
   return result;
 }
 
+Result sample_grad(const Image &image, View view, const Sampling &sampling,
+                   double u, double v, std::array<double,2> dx,
+                   std::array<double,2> dy, LodRange range) {
+  validate(image);
+  validate_view(image, view);
+  const auto &base=image.levels[view.base_mip];
+  auto square=[&](std::array<double,2> derivative) {
+    for (double d : derivative)
+      require(std::isfinite(d) && std::abs(d)<=std::numeric_limits<float>::max(),
+              "gradient must be finite binary32");
+    const float x=static_cast<float>(derivative[0])*static_cast<float>(base.width);
+    const float y=static_cast<float>(derivative[1])*static_cast<float>(base.height);
+    return static_cast<float>(x*x+y*y);
+  };
+  const float squared=std::max(square(dx),square(dy));
+  // Infinite/zero binary32 footprint has an unambiguous sampler clamp, but
+  // sample_lod keeps its explicit finite-input contract. Use finite sentinels
+  // for that call and preserve the derived limiting LOD in diagnostics.
+  const double derived=squared==0 ? -std::numeric_limits<double>::infinity() :
+      0.5*std::log2(static_cast<double>(squared));
+  const double lod=std::isfinite(derived) ? static_cast<float>(derived) :
+      (squared==0 ? -std::numeric_limits<float>::max() : std::numeric_limits<float>::max());
+  Result result=sample_lod(image,view,sampling,u,v,lod,range);
+  result.from_gradients=true;
+  result.footprint_squared=squared;
+  result.input_lod=derived;
+  return result;
+}
+
 std::uint32_t texture_query_levels(const Image &image, View view) {
   validate(image);
   validate_view(image, view);

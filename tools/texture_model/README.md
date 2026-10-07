@@ -25,6 +25,7 @@ python3 tools/texture_model.py demo
 | Texel 过滤 | nearest 或 bilinear；独立 minFilter/magFilter，按 sampler clamp 后的 LOD 选择 |
 | Border color | 核心 float transparent black/opaque black/opaque white，逐 tap 替换后过滤；opaque black 采样仅覆盖 identity view |
 | LOD | 显式有限值；非零 sampler bias 先做 binary32 加法，再限制到 sampler/view 范围；bias 范围为 [-16,16] |
+| 显式梯度 | `sample_grad` / `textureGrad`：有限 binary32 二维 dx/dy，以 view 基础级尺寸计算各向同性 LOD；再使用已有 bias/clamp/min-mag/mip/filter |
 | Mip 过滤 | nearest（精确半整数选择较低一级）或 linear（相邻两级混合）；与级内过滤独立 |
 | View swizzle | IDENTITY、R/G/B/A、ZERO/ONE；解码后通道置换/重复或浮点常量；适用于 sample/fetch |
 | 整数读取/查询 | 合法整数坐标 `texel_fetch`；相对 View 的 `texture_size`、`texture_query_levels`；不使用 sampler |
@@ -33,7 +34,7 @@ python3 tools/texture_model.py demo
 
 `sample_level` 在指定的 image 绝对 mip 内用 `mag_filter` 采样，它是直接指定级别与级内过滤的 helper，不进行 LOD/min/mag 选择。`sample_lod` 的 LOD 则相对 View；例如 `{base_mip=1, level_count=2}` 的 LOD 0 访问 image mip 1。每个 mip 的尺寸按 `max(1, previous/2)` 递减；可不提供后续级别，但不能在 1×1 之后继续追加重复 mip。
 
-当前尚无导数、压缩、比较过滤、layer array 或 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
+当前尚无隐式导数、压缩、比较过滤、layer array 或 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
 
 ## 计算规则与数值边界
 
@@ -53,7 +54,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 ## 验证
 
-测试包含十三组，普通和 ASan/UBSan 模式目前均通过 1,417,963 项检查，新增独立 bias oracle、正负范围、view/clamp/filter 顺序及非法 bias 检查：
+测试包含十四组，普通和 ASan/UBSan 模式目前均通过 1,435,261 项检查；包含独立 bias 与显式梯度 oracle：
 
 1. 手算四点平均、非对称插值、repeat 接缝和 mirror/clamp 边缘。
 2. 负坐标、texel 边界两侧、精确边界、负零和巨大有限坐标。
@@ -67,6 +68,9 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 10. 整数 fetch 的独立颜色/字节地址 oracle、与 nearest 中心读取交叉核对，合法 view 子范围的尺寸/级数、非法整数坐标和 LOD 拒绝。
 11. 四种格式的全部 2,401 种 view component mappings，独立 sample/fetch oracle、常量精确性、trace 与属性查询不变。
 12. 三种 core float border color、角点/边缘手算、七种混合 border 寻址组合、独立延伸图像 oracle、huge finite UV、合法 swizzle 和非法状态。
+
+13. 非零 bias 的独立 LOD oracle，正负/端点/非法值及 clamp/filter 顺序。
+14. 显式二维梯度的独立 `hypot/log2` oracle，view 基础尺寸、dx/dy 分别主导、旋转/负梯度、零/极小/巨大有限梯度、精确半级和相邻浮点值。
 
 独立对照以 long double 在虚拟延伸图像上枚举 nearest 区间或 tent kernel，逐个真实 texel 累积贡献；不调用模型的坐标归约、四点选择或寻址函数。精确样例和 UNORM 解码做相应精确比较；过滤测试的每分量绝对误差上限为 `2e-7`，适用于该模型的 float 输出，不能直接当成未来 TMU 精度要求。
 
@@ -392,3 +396,23 @@ Multi profiles 的两个 sampler 使用相反 bias，交换、共享及逐 lane 
 依据 Vulkan-Docs v1.4.328 的 LOD Operation，sampler bias 参与显式 Lod 采样，先于 sampler clamp、min/mag 判定和 view/mip 选择。GPU 输入 bias 为有限 binary32，`maxSamplerLodBias` 查询值为 16。资源元素在偏移 80 追加 bias，大小从 80 扩为 88 字节；binding 目录、24 字节 mip 表和 texel 存储不变。旧阶段的 80 字节描述保留为历史记录。
 
 E01 同时暴露了 LLVM 的 uniform FP scalar pattern 优先级问题：混合 vector fallback 抢先选择，随后产生非法 VGPR→GPRF32 COPY。LLVM `a4e6dfe7f818` 提升严格 uniform 的 add/sub/mul/div pattern 优先级；新增 scalar/zero-add 回归通过，既有 mixed/vector 检查没有新增失败，Spike 与自定义编码未改。完整证据保存在 `artifacts/texture_model/bias-implementation/`；下一项是显式二维梯度 E02。
+
+## E02 显式二维梯度
+
+```sh
+python3 tools/texture_model.py gpu-min-mag --gradients
+python3 tools/texture_model.py gpu-min-mag --gradients --lod-bias 0.5
+python3 tools/texture_model.py gpu-min-mag --gradients --constant-gradient 0.125 0.125 0 0
+python3 tools/texture_model.py gpu-multi-nonuniform-separate --gradients --array-length 4
+python3 tools/texture_model.py gpu-min-mag --gradients --case-limit 8 --inject-gradient-mismatch
+```
+
+最后一个命令将 GPU 的梯度改成零，模型保留真实梯度，必须返回 1 并报告颜色差异。`--gradients` 只适用于 mip-capable sample profile，不适用于整数 fetch/query、LOD0-only profile 或 API 范围检查。`--constant-gradient` 接收 dx.xy、dy.xy 四个分量；默认 corpus 则逐 invocation 提供四分量，覆盖任一方向主导、旋转、负值、零和有限 binary32 极值。请求 buffer 每次采样为两个 vec4，第一项为 UV/dx，第二项为 dy；这只是实验输入，不是纹理存储或硬件接口。
+
+参考模型先按 binary32 计算 `q=max(dot(dx*viewBaseSize),dot(dy*viewBaseSize))`，再用独立标准库 `0.5*log2(q)` 得到 binary32 LOD 输入。零/上溢 footprint 保留诊断值，并进入既有 sampler clamp。GPU 解析标准 NIR `txd/ddx/ddy`，在 Mesa 的 NIR→LLVM 转换里展开：对 q 做当前 2D profile 等价的范围限制，以指数/尾数分解和奇次多项式计算 log2，再进入既有 bias/filter 路径。无新 NIR intrinsic、LLVM texture intrinsic 或纹理指令。
+
+GPU 的 q 限制为 `[2^-32,2^60]`，即基础 LOD `[-16,30]`；等价性依赖当前 bias±16、非负 minLod、最大 16384×16384/15 mip 的 Vulkan 范围，不能当作通用 log2 helper。精确 q=2 的幂保持整数/半整数 LOD。尾数近似截断误差小于 `1.6e-8`；梯度 profile 的颜色绝对误差上限预先规定为 `4e-6`，既有 explicit Lod profile 仍为 `1e-6`。参考模型内部没有复用 GPU 近似算法。
+
+当前不提供 implicit derivatives、quad/helper/divergence、各向异性、projector、shadow 或其他维度的梯度采样。
+
+E02 最终隔离/主目录验收共 43 个 GPU 命令（38 正向、5 预期失败反例），正向零差异，最大误差 `1.192092896e-7`；忽略梯度反例分别检出 2,240/2,088 差异。Mesa unit、46 项范围检查与原 any-hit 均通过。证据：`artifacts/texture_model/gradient-implementation/verification.json`。LLVM 配套提交 `88d9b6874ef0` 修正严格 divergent FP 规则被 fallback 抢先匹配；目录 89 项中 71 PASS/18 既有失败名称，未引入新失败。

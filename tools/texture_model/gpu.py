@@ -104,12 +104,27 @@ def run(args, compiler: str) -> int:
                 text = re.sub(r"    vec4 b = (textureLod\(.+);", r"    vec4 b = vec4(0);\n    if (i % 2u == 0u) b = \1;", text)
         rgen_path = output / "array.rgen"
         rgen_path.write_text(text)
+    if args.gradients:
+        text = rgen_path.read_text().replace("textureLod(", "textureGrad(")
+        text = re.sub(r", requests\.uv(?:_lod)?\[i\]\.z\)", ", gradient_x, gradient_y)", text)
+        text = re.sub(r", requests\.uv_lod\[i\]\.w\)", ", gradient_x.yx, gradient_y.yx)", text)
+        text = text.replace("requests.uv[i]", "requests.uv[2*i]").replace("requests.uv_lod[i]", "requests.uv_lod[2*i]")
+        array = "requests.uv_lod" if multi else "requests.uv"
+        vector_x = "vec2(0)" if args.inject_gradient_mismatch else array + "[2*i].zw"
+        vector_y = "vec2(0)" if args.inject_gradient_mismatch else array + "[2*i+1].xy"
+        if args.constant_gradient is not None and not args.inject_gradient_mismatch:
+            vector_x = "vec2(" + ",".join(format(v,".17g") for v in args.constant_gradient[:2]) + ")"
+            vector_y = "vec2(" + ",".join(format(v,".17g") for v in args.constant_gradient[2:]) + ")"
+        declaration = f"\n    vec2 gradient_x = {vector_x};\n    vec2 gradient_y = {vector_y};"
+        text = text.replace("uint i = gl_LaunchIDEXT.x;", "uint i = gl_LaunchIDEXT.x;" + declaration)
+        rgen_path = output / "gradients.rgen"
+        rgen_path.write_text(text)
     for stage in ("rgen", "rmiss"):
         with (output / f"compile-{stage}.log").open("w") as log:
             subprocess.run([glslang, "-V", "--target-env", "vulkan1.2",
                             str(rgen_path if stage == "rgen" else source / "sample.rmiss"), "-o", str(output / f"sample.{stage}.spv")],
                            stdout=log, stderr=subprocess.STDOUT, check=True)
-    if uniform:
+    if uniform or args.gradients:
         disassembler = shutil.which("spirv-dis")
         if not disassembler:
             raise RuntimeError("spirv-dis is required to retain runtime-index evidence")
@@ -142,6 +157,10 @@ def run(args, compiler: str) -> int:
         "LD_LIBRARY_PATH": ":".join([str(root / "spike/build"), str(paths["driver"].parent),
                                       str(root / "llvm/build/lib"), env.get("LD_LIBRARY_PATH", "")]),
     })
+    if args.gradients:
+        env["VENTUS_TEXTURE_GRADIENTS"] = "1"
+        if args.constant_gradient is not None:
+            env["VENTUS_TEXTURE_CONSTANT_GRADIENT"] = ",".join(map(str,args.constant_gradient))
     env["VENTUS_TEXTURE_LOD_BIAS"] = str(args.lod_bias)
     if args.inject_bias_mismatch:
         env["VENTUS_TEXTURE_INJECT_BIAS_MISMATCH"] = "1"
@@ -168,12 +187,14 @@ def run(args, compiler: str) -> int:
         original = "textureLod(source, requests.uv[i], 0.0)"
         variants = {
             "offset": "textureLodOffset(source, requests.uv[i], 0.0, ivec2(1, 0))",
-            "gradients": "textureGrad(source, requests.uv[i], vec2(1), vec2(1))",
+
             "gather": "textureGather(source, requests.uv[i])",
             "texel-fetch-offset": "texelFetchOffset(source, ivec2(0), 0, ivec2(1, 0))",
             "projected": "textureProjLod(source, vec3(requests.uv[i], 2), 0.0)",
         }
         variants = {name: shader_source.replace(original, value) for name, value in variants.items()}
+        variants["shadow-gradients"] = shader_source.replace("sampler2D source;", "sampler2DShadow source;").replace(original,
+            "vec4(textureGrad(source, vec3(requests.uv[i], 0.5), vec2(1), vec2(1)))")
         nonuniform_source = shader_source.replace("#version 460", "#version 460\n#extension GL_EXT_nonuniform_qualifier : require")
         variants["runtime-descriptor-array"] = nonuniform_source.replace("sampler2D source;", "sampler2D source[];").replace(original, "textureLod(source[nonuniformEXT(i & 1u)], requests.uv[i], 0.0)")
         variants["nested-descriptor-array"] = shader_source.replace("sampler2D source;", "sampler2D source[2][2];").replace(original, "textureLod(source[0][1], requests.uv[i], 0.0)")
@@ -217,6 +238,11 @@ def run(args, compiler: str) -> int:
         errors.append("runtime timed out")
     if not summary:
         errors.append("numeric summary is missing")
+    if args.gradients:
+        spirv_gradient = (output / "sample.rgen.spvasm").read_text()
+        gradient_ir = "\n".join(path.read_text() for path in elf_dir.glob("*.emit.ll"))
+        if not re.search(r"OpImageSampleExplicitLod .* Grad ", spirv_gradient) or "fdiv float" not in gradient_ir:
+            errors.append("SPIR-V Grad or software footprint/log2 arithmetic evidence missing")
     if arrays:
         final_case = args.case_limit - 1
         selector_case = final_case - int(multi and final_case % 8 == 6)
@@ -349,9 +375,15 @@ def run(args, compiler: str) -> int:
         profile += "; fixed descriptor arrays with " + ("runtime per-lane NonUniform" if nonuniform else "runtime dispatch-uniform push-constant" if uniform else "compile-time") + " image/sampler indices and element updates/copies"
     if separate:
         profile += "; sampled image in set0, sampler in set1 bindings6/7; samplerless layout for fetch/query"
+    if args.gradients:
+        profile += "; explicit isotropic 2D gradients scaled by view base dimensions; sampler bias/clamp; ordinary LLVM arithmetic and texel loads"
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
         "profile": profile,
+        "explicit_gradients": args.gradients,
+        "constant_gradient": args.constant_gradient,
+        "gradient_color_tolerance": 4e-6 if args.gradients else None,
+        "injected_gradient_mismatch": args.inject_gradient_mismatch,
         "sampler_lod_bias": args.lod_bias,
         "injected_bias_mismatch": args.inject_bias_mismatch,
         "resource_profile": resources,

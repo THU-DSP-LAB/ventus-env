@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -79,6 +80,10 @@ public:
   VkDescriptorSetLayout sampler_layout = VK_NULL_HANDLE;
   VkDescriptorSet sampler_set = VK_NULL_HANDLE;
   bool separate = false, samplerless = false;
+  unsigned array_length = 1, array_index = 0, array_binding = 2;
+  bool array_mode = false, image_a_initialized = false, image_b_initialized = false;
+  bool sampler_a_initialized = false, sampler_b_initialized = false, copy_elements = false;
+  unsigned element_writes = 0, element_copies = 0, consecutive_copies = 0;
   unsigned separate_sampler_bindings = 0;
   VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
   VkPipeline pipeline = VK_NULL_HANDLE;
@@ -385,30 +390,37 @@ public:
         VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
+    if (const char *length = std::getenv("VENTUS_TEXTURE_ARRAY_LENGTH")) {
+      array_mode = true;
+      array_length = std::stoul(length);
+      array_index = std::stoul(std::getenv("VENTUS_TEXTURE_ARRAY_INDEX"));
+      array_binding = std::stoul(std::getenv("VENTUS_TEXTURE_ARRAY_BINDING"));
+    }
     if (separate) types[2] = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     if (multiple_bindings) types.push_back(types[2]);
     std::vector<VkDescriptorSetLayoutBinding> bindings(types.size());
     for (unsigned i = 0; i < bindings.size(); ++i)
-      bindings[i] = {i == 6 ? 13 : i, types[i], 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr};
+      bindings[i] = {i == 6 ? 13 : i == 2 ? array_binding : i, types[i], i == 2 || i == 6 ? array_length : 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr};
     VkDescriptorSetLayoutCreateInfo layout{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     layout.bindingCount = bindings.size();
     layout.pBindings = bindings.data();
     check(vkCreateDescriptorSetLayout(device, &layout, nullptr, &set_layout), "create descriptor layout");
     std::vector<VkDescriptorPoolSize> sizes{{types[0], 1}, {types[1], 1},
-        {types[2], multiple_bindings ? 2U : 1U}, {types[3], 3}};
+        {types[2], array_length * (multiple_bindings ? 2U : 1U)}, {types[3], 3}};
     if (separate && !samplerless) {
-      const VkDescriptorSetLayoutBinding states[]{{6, VK_DESCRIPTOR_TYPE_SAMPLER, 1,
-          VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr}, {7, VK_DESCRIPTOR_TYPE_SAMPLER, 1,
+      const VkDescriptorSetLayoutBinding states[]{{6, VK_DESCRIPTOR_TYPE_SAMPLER, array_length,
+          VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr}, {7, VK_DESCRIPTOR_TYPE_SAMPLER, array_length,
           VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr}};
       VkDescriptorSetLayoutCreateInfo state_layout{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
       state_layout.bindingCount = multiple_bindings ? 2 : 1;
       state_layout.pBindings = states;
       check(vkCreateDescriptorSetLayout(device, &state_layout, nullptr, &sampler_layout), "create sampler layout");
-      sizes.push_back({VK_DESCRIPTOR_TYPE_SAMPLER, multiple_bindings ? 2U : 1U});
+      sizes.push_back({VK_DESCRIPTOR_TYPE_SAMPLER, array_length * (multiple_bindings ? 2U : 1U)});
       separate_sampler_bindings = multiple_bindings ? 2 : 1;
     }
     VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool.maxSets = sampler_layout ? 2 : 1;
+    if (array_mode) pool.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     pool.poolSizeCount = sizes.size();
     pool.pPoolSizes = sizes.data();
     check(vkCreateDescriptorPool(device, &pool, nullptr, &descriptor_pool), "create descriptor pool");
@@ -490,21 +502,91 @@ public:
     return result;
   }
 
+  void array_lifecycle_checks() {
+    if (!array_mode) return;
+    const VkDescriptorSet old[]{descriptor_set, sampler_set};
+    check(vkFreeDescriptorSets(device, descriptor_pool, sampler_set ? 2 : 1, old), "free array sets");
+    descriptor_set = sampler_set = VK_NULL_HANDLE;
+    auto allocate = [&]() {
+      VkDescriptorSetAllocateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+      info.descriptorPool = descriptor_pool;
+      info.descriptorSetCount = 1;
+      info.pSetLayouts = &set_layout;
+      check(vkAllocateDescriptorSets(device, &info, &descriptor_set), "reallocate array image set");
+      if (sampler_layout) {
+        info.pSetLayouts = &sampler_layout;
+        check(vkAllocateDescriptorSets(device, &info, &sampler_set), "reallocate array sampler set");
+      }
+    };
+    allocate();
+    const VkDescriptorSetLayout overflow_layouts[]{set_layout, set_layout};
+    VkDescriptorSet overflow[]{descriptor_set, descriptor_set};
+    VkDescriptorSetAllocateInfo excessive{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    excessive.descriptorPool = descriptor_pool;
+    excessive.descriptorSetCount = 2;
+    excessive.pSetLayouts = overflow_layouts;
+    if (vkAllocateDescriptorSets(device, &excessive, overflow) != VK_ERROR_OUT_OF_POOL_MEMORY ||
+        overflow[0] != VK_NULL_HANDLE || overflow[1] != VK_NULL_HANDLE)
+      throw std::runtime_error("failed pool allocation must clear every returned handle");
+    check(vkResetDescriptorPool(device, descriptor_pool, 0), "reset array pool");
+    descriptor_set = sampler_set = VK_NULL_HANDLE;
+    allocate();
+    std::cout << "LIFECYCLE free_reallocate=1 reset_reallocate=1 failed_allocate_null=1" << std::endl;
+  }
+
   void bind_descriptors() {
     const VkDescriptorSet sets[]{descriptor_set, sampler_set};
     vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
         pipeline_layout, 0, sampler_set ? 2 : 1, sets, 0, nullptr);
   }
 
+  void image_descriptor(VkDescriptorSet set, VkDescriptorType type, unsigned binding,
+                        const VkDescriptorImageInfo &image, bool &initialized,
+                        unsigned selected) {
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = set;
+    write.dstBinding = binding;
+    write.descriptorType = type;
+    std::vector<VkDescriptorImageInfo> all(array_length, image);
+    write.descriptorCount = initialized ? 1 : array_length;
+    write.dstArrayElement = initialized ? selected : 0;
+    write.pImageInfo = initialized ? &image : all.data();
+    const bool copying = array_mode && array_length > 1 && copy_elements && initialized;
+    if (!copying) {
+      vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+      ++element_writes;
+    }
+    initialized = true;
+    if (copying) {
+      // The adjacent-binding profile copies two descriptors across a binding
+      // boundary; selected is the second destination, so copying only element0
+      // cannot accidentally satisfy the numerical comparison.
+      const bool consecutive = array_binding == 12 && array_length == 4 &&
+          (binding == 12 || binding == 6) && selected > 0 && selected < 3;
+      const unsigned donor = consecutive ? array_length - 1 : (selected + 1) % array_length;
+      const VkDescriptorImageInfo donors[]{image, image};
+      write.dstArrayElement = donor;
+      write.descriptorCount = consecutive ? 2 : 1;
+      write.pImageInfo = donors;
+      vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+      ++element_writes;
+      VkCopyDescriptorSet copy{VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET};
+      copy.srcSet = copy.dstSet = set;
+      copy.srcBinding = copy.dstBinding = binding;
+      copy.srcArrayElement = donor;
+      copy.dstArrayElement = consecutive ? selected - 1 : selected;
+      copy.descriptorCount = consecutive ? 2 : 1;
+      vkUpdateDescriptorSets(device, 0, nullptr, 1, &copy);
+      if (consecutive) ++consecutive_copies;
+      ++element_copies;
+    }
+  }
+
   void sampler_descriptor(VkSampler sampler, unsigned binding) {
     VkDescriptorImageInfo image{sampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
-    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    write.dstSet = sampler_set;
-    write.dstBinding = binding;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-    write.pImageInfo = &image;
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    bool &initialized = binding == 6 ? sampler_a_initialized : sampler_b_initialized;
+    image_descriptor(sampler_set, VK_DESCRIPTOR_TYPE_SAMPLER, binding, image,
+                     initialized, array_length - 1 - array_index);
   }
 
   void descriptors(Texture sampled, VkSampler sampler, Texture carrier, Buffer uv, Buffer direct, Buffer output_address,
@@ -537,19 +619,19 @@ public:
     writes[3].pBufferInfo = &data[0];
     writes[4].pBufferInfo = &data[1];
     writes[5].pBufferInfo = &data[2];
-    vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
+    // The image binding is updated independently; the adjacent SSBO at b3
+    // retains its own descriptor and checks the array-address collision case.
+    vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+    vkUpdateDescriptorSets(device, 3, writes + 3, 0, nullptr);
+    image_descriptor(descriptor_set, types[2], array_binding, images[1], image_a_initialized, array_index);
     if (separate && !samplerless) sampler_descriptor(sampler, 6);
   }
 
   void secondary_descriptor(Texture sampled, VkSampler sampler) {
-    VkDescriptorImageInfo image{separate ? VK_NULL_HANDLE : sampler, sampled.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    write.dstSet = descriptor_set;
-    write.dstBinding = 13;
-    write.descriptorCount = 1;
-    write.descriptorType = separate ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.pImageInfo = &image;
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    VkDescriptorImageInfo image{separate ? VK_NULL_HANDLE : sampler, sampled.view,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    image_descriptor(descriptor_set, separate ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE :
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 13, image, image_b_initialized, array_index);
     if (separate) sampler_descriptor(sampler, 7);
   }
 };
@@ -1064,11 +1146,16 @@ finished:
     query_csv.flush();
     if (!query_csv) throw std::runtime_error("cannot write query CSV");
   }
+  experiment.array_lifecycle_checks();
   loaded_libraries();
   std::cout << "PROFILE separate=" << experiment.separate
             << " descriptor_sets=" << (experiment.sampler_set ? 2 : 1)
             << " sampler_bindings=" << experiment.separate_sampler_bindings
-            << " sampler_objects=" << experiment.samplers.size() << std::endl;
+            << " sampler_objects=" << experiment.samplers.size()
+            << " array_binding=" << experiment.array_binding
+            << " array_length=" << experiment.array_length << " array_index=" << experiment.array_index
+            << " element_writes=" << experiment.element_writes << " element_copies=" << experiment.element_copies
+            << " consecutive_copies=" << experiment.consecutive_copies << std::endl;
   std::cout << std::setprecision(10) << "SUMMARY cases=" << cases << " samples=" << samples
             << " components=" << components << " mismatches=" << mismatches
             << " markers_failed=" << markers_failed << " buffer_failed=" << buffer_failed << " max_abs_error=" << max_error
@@ -1210,6 +1297,7 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
             const Sampling state_b = shared_sampler ? sampling_a : swap_samplers ? sampling_a : sampling_b;
             const LodRange clamp_a = swap_samplers ? range_b : range_a;
             const LodRange clamp_b = shared_sampler || swap_samplers ? range_a : range_b;
+            experiment.copy_elements = phase == 3 || phase == 4;
             if (phase != 6) {
               experiment.descriptors(a.texture,swap_samplers ? sampler_b : sampler_a,
                   carrier,inputs,direct,output_address,uv.size(),16,64);
@@ -1294,11 +1382,16 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
 multi_finished:
   csv.flush();
   if (!csv) throw std::runtime_error("cannot write multi-binding CSV");
+  experiment.array_lifecycle_checks();
   loaded_libraries();
   std::cout << "PROFILE separate=" << experiment.separate
             << " descriptor_sets=" << (experiment.sampler_set ? 2 : 1)
             << " sampler_bindings=" << experiment.separate_sampler_bindings
-            << " sampler_objects=" << experiment.samplers.size() << std::endl;
+            << " sampler_objects=" << experiment.samplers.size()
+            << " array_binding=" << experiment.array_binding
+            << " array_length=" << experiment.array_length << " array_index=" << experiment.array_index
+            << " element_writes=" << experiment.element_writes << " element_copies=" << experiment.element_copies
+            << " consecutive_copies=" << experiment.consecutive_copies << std::endl;
   std::cout << std::setprecision(10) << "SUMMARY cases=" << cases << " samples=" << samples
       << " mixed_results=" << mixed_results << " components=" << components << " mismatches=" << mismatches << " markers_failed=" << markers_failed
       << " buffer_failed=" << buffer_failed << " max_abs_error=" << max_error << " tolerance=" << tolerance

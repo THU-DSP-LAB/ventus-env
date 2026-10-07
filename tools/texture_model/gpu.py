@@ -52,12 +52,13 @@ def run(args, compiler: str) -> int:
         raise RuntimeError(f"output directory must be empty to exclude stale evidence: {output}")
     elf_dir = output / "elf"
     elf_dir.mkdir()
-    separate = args.action in ("gpu-separate", "gpu-fetch-separate", "gpu-multi-separate")
+    arrays = args.action in ("gpu-multi-array", "gpu-multi-array-separate", "gpu-fetch-array")
+    separate = args.action in ("gpu-separate", "gpu-fetch-separate", "gpu-multi-separate", "gpu-multi-array-separate", "gpu-fetch-array")
     linear_check = args.action == "gpu-mip-linear-check"
     min_mag = args.action == "gpu-min-mag"
     srgb = args.action in ("gpu-srgb", "gpu-srgb-values", "gpu-multi-srgb")
-    fetch_query = args.action in ("gpu-fetch-query", "gpu-fetch-swizzle", "gpu-fetch-border", "gpu-fetch-separate")
-    border_mode = args.action in ("gpu-border", "gpu-fetch-border", "gpu-multi-border", "gpu-separate", "gpu-fetch-separate", "gpu-multi-separate")
+    fetch_query = args.action in ("gpu-fetch-query", "gpu-fetch-swizzle", "gpu-fetch-border", "gpu-fetch-separate", "gpu-fetch-array")
+    border_mode = args.action in ("gpu-border", "gpu-fetch-border", "gpu-multi-border", "gpu-separate", "gpu-fetch-separate", "gpu-multi-separate", "gpu-multi-array", "gpu-multi-array-separate", "gpu-fetch-array")
     view_swizzle = args.action in ("gpu-swizzle", "gpu-fetch-swizzle", "gpu-multi-swizzle") or border_mode
     srgb_values = args.action == "gpu-srgb-values"
     multi_srgb = args.action == "gpu-multi-srgb"
@@ -68,10 +69,27 @@ def run(args, compiler: str) -> int:
     rgen_name = "sample_fetch.rgen" if fetch_query else "sample_multi.rgen" if multi else "sample_mip.rgen" if mips else "sample.rgen"
     if separate:
         rgen_name = "sample_fetch_separate.rgen" if fetch_query else "sample_multi_separate.rgen" if multi else "sample_separate.rgen"
+    rgen_path = source / rgen_name
+    if arrays:
+        text = rgen_path.read_text()
+        names = ("source",) if fetch_query else ("source_a", "source_b")
+        for name in names:
+            text = text.replace(f"{name};", f"{name}[{args.array_length}];")
+            text = re.sub(r"\b" + name + r"\b(?!\[|;)",
+                          name + f"[{args.array_index}]", text)
+        if separate and not fetch_query:
+            for name in ("state_a", "state_b"):
+                text = text.replace(f"{name};", f"{name}[{args.array_length}];")
+                text = re.sub(r"\b" + name + r"\b(?!\[|;)",
+                              name + f"[{args.array_length - 1 - args.array_index}]", text)
+        if args.array_binding != 2:
+            text = text.replace("binding = 2)", f"binding = {args.array_binding})")
+        rgen_path = output / "array.rgen"
+        rgen_path.write_text(text)
     for stage in ("rgen", "rmiss"):
         with (output / f"compile-{stage}.log").open("w") as log:
             subprocess.run([glslang, "-V", "--target-env", "vulkan1.2",
-                            str(source / (rgen_name if stage == "rgen" else "sample.rmiss")), "-o", str(output / f"sample.{stage}.spv")],
+                            str(rgen_path if stage == "rgen" else source / "sample.rmiss"), "-o", str(output / f"sample.{stage}.spv")],
                            stdout=log, stderr=subprocess.STDOUT, check=True)
     flags = shlex.split(subprocess.check_output(["pkg-config", "--cflags", "--libs", "vulkan"], text=True))
     executable = output / "compare"
@@ -100,6 +118,10 @@ def run(args, compiler: str) -> int:
         "LD_LIBRARY_PATH": ":".join([str(root / "spike/build"), str(paths["driver"].parent),
                                       str(root / "llvm/build/lib"), env.get("LD_LIBRARY_PATH", "")]),
     })
+    if arrays:
+        env["VENTUS_TEXTURE_ARRAY_LENGTH"] = str(args.array_length)
+        env["VENTUS_TEXTURE_ARRAY_INDEX"] = str(args.array_index)
+        env["VENTUS_TEXTURE_ARRAY_BINDING"] = str(args.array_binding)
     command = [str(executable), str(output / "sample.rgen.spv"), str(output / "sample.rmiss.spv"),
                str(output / "numeric.csv"), str(args.case_limit), str(2 if args.inject_query_mismatch else int(args.inject_mismatch))]
     if mips:
@@ -119,8 +141,9 @@ def run(args, compiler: str) -> int:
             "projected": "textureProjLod(source, vec3(requests.uv[i], 2), 0.0)",
         }
         variants = {name: shader_source.replace(original, value) for name, value in variants.items()}
-        variants["descriptor-array"] = shader_source.replace("sampler2D source;", "sampler2D source[2];").replace(original, "textureLod(source[1], requests.uv[i], 0.0)")
-        variants["separate-image-array"] = shader_source.replace("uniform sampler2D source;", "uniform texture2D source[2];\nlayout(set = 0, binding = 6) uniform sampler state;").replace(original, "textureLod(sampler2D(source[1], state), requests.uv[i], 0.0)")
+        variants["dynamic-descriptor-array"] = shader_source.replace("sampler2D source;", "sampler2D source[2];").replace(original, "textureLod(source[i & 1u], requests.uv[i], 0.0)")
+        variants["dynamic-separate-image-array"] = shader_source.replace("uniform sampler2D source;", "uniform texture2D source[2];\nlayout(set = 0, binding = 6) uniform sampler state;").replace(original, "textureLod(sampler2D(source[i & 1u], state), requests.uv[i], 0.0)")
+        variants["nonuniform-descriptor-array"] = shader_source.replace("#version 460", "#version 460\n#extension GL_EXT_nonuniform_qualifier : require").replace("sampler2D source;", "sampler2D source[2];").replace(original, "textureLod(source[nonuniformEXT(i & 1u)], requests.uv[i], 0.0)")
         for name, value in variants.items():
             path = output / f"reject-{name}.rgen"
             path.write_text(value)
@@ -160,6 +183,15 @@ def run(args, compiler: str) -> int:
         errors.append("runtime timed out")
     if not summary:
         errors.append("numeric summary is missing")
+    if arrays:
+        for field, expected in (("array_length", args.array_length), ("array_index", args.array_index),
+                                ("array_binding", args.array_binding)):
+            if resources.get(field) != str(expected):
+                errors.append(f"array resource profile {field} mismatch")
+        if "LIFECYCLE free_reallocate=1 reset_reallocate=1 failed_allocate_null=1" not in text:
+            errors.append("array descriptor free/reset/reallocation checks missing")
+        if multi and args.array_length > 1 and args.case_limit >= 5 and int(resources.get("element_copies", "0")) == 0:
+            errors.append("descriptor element copy was not exercised")
     if checks_only:
         expected_libraries = {paths["mesa"].resolve()}
     if not expected_libraries.issubset(set(libraries)):
@@ -236,12 +268,17 @@ def run(args, compiler: str) -> int:
             profile += "; all seven border address pairs, three core float border colors; opaque-black sampling restricted to identity"
     else:
         profile = "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag"
+    if arrays:
+        profile += "; fixed descriptor arrays with compile-time image/sampler indices and element updates/copies"
     if separate:
         profile += "; sampled image in set0, sampler in set1 bindings6/7; samplerless layout for fetch/query"
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
         "profile": profile,
         "resource_profile": resources,
+        "array_profile": {"binding": args.array_binding, "length": args.array_length, "image_index": args.array_index,
+                          "sampler_index": args.array_length - 1 - args.array_index} if arrays else None,
+        "rgen_source_sha256": digest(rgen_path),
         "readback": "direct SSBO and GLSL buffer-reference stores to coherent host-visible buffers",
         "summary": summary, "errors": errors, "timeout": timeout,
         "injected_mismatch": args.inject_mismatch, "checked_frontier": checked_frontier,

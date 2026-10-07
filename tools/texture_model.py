@@ -18,7 +18,10 @@ import tempfile
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Standalone C++ texture functional model")
-    parser.add_argument("action", choices=("test", "demo", "gpu", "gpu-checks", "gpu-mips", "gpu-mip-linear-check", "gpu-multi", "gpu-multi-linear", "gpu-min-mag", "gpu-multi-min-mag", "gpu-srgb", "gpu-srgb-values", "gpu-multi-srgb", "gpu-fetch-query", "gpu-swizzle", "gpu-fetch-swizzle", "gpu-multi-swizzle", "gpu-border", "gpu-fetch-border", "gpu-multi-border", "gpu-separate", "gpu-fetch-separate", "gpu-multi-separate"))
+    parser.add_argument("action", choices=("test", "demo", "gpu", "gpu-checks", "gpu-mips", "gpu-mip-linear-check", "gpu-multi", "gpu-multi-linear", "gpu-min-mag", "gpu-multi-min-mag", "gpu-srgb", "gpu-srgb-values", "gpu-multi-srgb", "gpu-fetch-query", "gpu-swizzle", "gpu-fetch-swizzle", "gpu-multi-swizzle", "gpu-border", "gpu-fetch-border", "gpu-multi-border", "gpu-separate", "gpu-fetch-separate", "gpu-multi-separate", "gpu-multi-array", "gpu-multi-array-separate", "gpu-fetch-array"))
+    parser.add_argument("--array-binding", type=int, choices=(2, 12), default=2)
+    parser.add_argument("--array-length", type=int, choices=(1, 2, 4), default=4)
+    parser.add_argument("--array-index", type=int, default=None)
     parser.add_argument("--sanitize", action="store_true", help="enable address/UB sanitizers")
     parser.add_argument("--cxx", default="c++", help="host C++17 compiler executable")
     parser.add_argument("--mesa-build", type=Path, help="local Mesa build directory for gpu")
@@ -28,15 +31,19 @@ def main() -> int:
     parser.add_argument("--inject-mismatch", action="store_true", help="gpu checker negative control; must fail")
     parser.add_argument("--inject-query-mismatch", action="store_true", help="fetch/query checker negative control; must fail")
     args = parser.parse_args()
+    if args.array_index is None:
+        args.array_index = args.array_length - 1
+    if not 0 <= args.array_index < args.array_length:
+        parser.error("array index must be within array length")
     compiler = shutil.which(args.cxx)
     if compiler is None:
         parser.error(f"host compiler not found: {args.cxx}")
-    maximum = 6720 if args.action in ("gpu-border", "gpu-fetch-border", "gpu-separate", "gpu-fetch-separate") else 2880 if args.action in ("gpu-fetch-query", "gpu-swizzle", "gpu-fetch-swizzle") else 144 if args.action == "gpu-srgb-values" else 1440 if args.action in ("gpu-min-mag", "gpu-srgb") else 432 if args.action.startswith("gpu-multi") else 360 if args.action in ("gpu-mips", "gpu-mip-linear-check") else 180
+    maximum = 6720 if args.action in ("gpu-border", "gpu-fetch-border", "gpu-separate", "gpu-fetch-separate", "gpu-fetch-array") else 2880 if args.action in ("gpu-fetch-query", "gpu-swizzle", "gpu-fetch-swizzle") else 144 if args.action == "gpu-srgb-values" else 1440 if args.action in ("gpu-min-mag", "gpu-srgb") else 432 if args.action.startswith("gpu-multi") else 360 if args.action in ("gpu-mips", "gpu-mip-linear-check") else 180
     if args.case_limit is None:
         args.case_limit = maximum
     if args.case_limit < 1 or args.case_limit > maximum or args.timeout <= 0:
         parser.error("case-limit exceeds selected profile and timeout must be positive")
-    if args.inject_query_mismatch and (args.action not in ("gpu-fetch-query", "gpu-fetch-swizzle", "gpu-fetch-border", "gpu-fetch-separate") or args.inject_mismatch):
+    if args.inject_query_mismatch and (args.action not in ("gpu-fetch-query", "gpu-fetch-swizzle", "gpu-fetch-border", "gpu-fetch-separate", "gpu-fetch-array") or args.inject_mismatch):
         parser.error("inject-query-mismatch requires a fetch/query profile and excludes inject-mismatch")
     if args.action.startswith("gpu"):
         if args.sanitize:

@@ -320,3 +320,19 @@ F06在TASK-1321修复LLVM leaf函数入口VGPR栈分配后完成验收。原来�
 隔离源码验收：sample/fetch 各6,720配置、3,440,640颜色分量；fetch另有2,580,480精确查询分量。multi有432配置、663,552分量。均零差异，最大颜色误差 `1.192092896e-7`。21个正向命令和6个预期失败的比较器负向控制符合预期；39项范围检查继续拒绝 descriptor array，原先“独立 sampler 不支持”的检查改为独立 image array 检查。Host模型12组1,375,170检查和 Mesa translation unit test 通过。原160×96 any-hit图像保持 SHA256 `88b724540dc17b23161c638ebcbb71e9acaf73ff098b43764f9edf17cd5bebb0`。
 
 复现入口为 `python3 tools/texture_model.py gpu-separate`、`gpu-fetch-separate`、`gpu-multi-separate`，支持 `--mesa-build` 和 `--out-dir`。命令、CSV、实际源码/工具/库哈希、LLVM/ELF及资源数量证明保存在 `artifacts/texture_model/separate-sampler-implementation/`；汇总见 `verification.json`。本步不扩大纹理数值 profile，不声明完整 Vulkan descriptor indexing 或硬件一致性。下一切片是 F08：固定长度 descriptor array 的常量索引。
+
+## F08 固定 descriptor array 与常量索引
+
+TASK-1324 已完成并通过主目录验收，基于已接受的 [ADR-0026](../../../docs/rt-implementation-architecture/decisions/ADR-0026-software-descriptor-array-directory.md)。本步的数组是descriptor引用数组，图像仍是2D、单layer/sample；只接受一维固定长度、完整绑定、合法编译期常量索引。
+
+CPU layout/set保存每binding的type/count/stages及元素；`vkUpdateDescriptorSets`处理array element、count和兼容连续binding，copy按源/目标element复制。Set free、pool reset/destroy和失败回滚回收元素内存；分配失败清空所有输出handle。新增pool已满反例在补齐清空分支前失败、修复后须通过。Dispatch capture增加element维度；每binding上传80字节资源记录的元素表，并通过16字节目录项保存device address、count/type。目录定位仍为set*32+binding，mip entry、swizzle和sRGB decode规则不变。Dispatch carrier字段布局保留，table address/count/stride在这条私有软件路径解释为目录；不承诺旧shader二进制混用。
+
+Compiler内部以低7位保存binding slot、高位保存element的32bit token；resource reindex只修改element，不把偏移解释为另一个binding。所有record字段读取先解析目录再访问element*80；image/sampler各自解析。这个token不是ISA/TMU接口。RV32在dispatch前检查目录/元素表device地址范围，RV64 lowering采用64bit地址读取；当前数值验收运行于RV32 Spike，不能将代码路径存在称为RV64运行已验证。
+
+实验增加 `gpu-multi-array`、`gpu-multi-array-separate`、`gpu-fetch-array`，参数 `--array-length 1|2|4`、`--array-index`、`--array-binding 2|12`。Shader输入在artifact目录内生成并保留哈希，数组下标是编译期字面量；独立sampler使用反向下标，证明image/sampler索引分别解析。Binding2紧邻SSBO3，binding12/13测试两个相邻数组。局部元素更新、单元素copy、跨binding的双元素write/copy和重复dispatch均与既有数值oracle比较。双元素copy让被采样元素对应第二个destination，不能靠仅复制element0通过。
+
+规范依据固定 [Vulkan-Docs v1.4.328 descriptorsets.adoc](https://github.com/KhronosGroup/Vulkan-Docs/blob/v1.4.328/chapters/descriptorsets.adoc)，SHA256 `8ff85412f05323d9d21e98ee1480fe8e38a721006d84c683931ce203ba3b2e52`。范围门禁以动态array和显式nonuniform array替代旧constant-array拒绝项。动态索引feature未提前开放，F09/F10、runtime array、immutable sampler、partially bound、variable count、update-after-bind和robustness扩展均未作为本步承诺。
+
+最终验收：长度1/2/4的所有合法常量下标分别验证combined与separate，三种长度的fetch/query也完整通过；另有相邻数组及跨binding双元素copy验证。每个完整multi profile为432配置、663,552颜色分量，每个fetch profile为6,720配置、3,440,640颜色分量和2,580,480精确查询分量，均零差异，最大颜色误差1.192092896e-7。共65个有效命令（含主目录补验）符合预期，其中53正向、12比较器负向；范围检查40项通过，host12组1,375,170检查和隔离/主目录unit通过。Pool已满反例在修复前失败、修复后输出NULL与free/reset/reallocation检查通过。原any-hit图像在隔离/主目录保持原SHA256。LLVM未修改，18项既有失败未处理。
+
+原array-separate-4-1执行期间host测试源码发生更新，导致manifest源码快照与已编译程序不一致；该次不计入有效验收，保留诊断证据，并以array-separate-4-1-replay重新执行通过。最终状态、命令、manifest/CSV/LLVM/ELF及失败反例保存在 `artifacts/texture_model/constant-array-implementation/verification.json`。Mesa本地实现提交为2948af7。下一切片是F09动态一致索引；本步不提前声明它已支持。

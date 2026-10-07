@@ -23,6 +23,10 @@ def main() -> int:
     parser.add_argument("--array-binding", type=int, choices=(2, 12), default=2)
     parser.add_argument("--array-length", type=int, choices=(1, 2, 4), default=4)
     parser.add_argument("--array-index", type=int, default=None)
+    parser.add_argument("--volume", action="store_true", help="3D color volume explicit LOD or fetch/query")
+    parser.add_argument("--volume-depth", type=int, choices=(1,2,4,5,8), default=5)
+    parser.add_argument("--inject-volume-w-mismatch", action="store_true", help="volume negative control: shader W is zero")
+    parser.add_argument("--inject-volume-filter-mismatch", action="store_true", help="volume negative control: oracle suppresses W interpolation")
     parser.add_argument("--cube", action="store_true", help="sample a six-face Cube view with explicit LOD")
     parser.add_argument("--cube-count", type=int, choices=(1,2), default=1, help="number of cubes stored as layer planes; shader view selects one cube")
     parser.add_argument("--cube-base-layer", type=int, help="explicit start of the six-plane cube view (may be nonmultiple of six)")
@@ -50,6 +54,12 @@ def main() -> int:
     parser.add_argument("--inject-mismatch", action="store_true", help="gpu checker negative control; must fail")
     parser.add_argument("--inject-query-mismatch", action="store_true", help="fetch/query checker negative control; must fail")
     args = parser.parse_args()
+    if args.volume and (args.action in ("test","demo","gpu","gpu-checks","gpu-srgb-values") or args.cube or args.image_layers is not None or args.single_layer_view or args.gradients or args.offset is not None):
+        parser.error("volume requires mip-capable sampling/fetch; Cube/array/Grad/Offset are separate")
+    if (args.volume_depth!=5 or args.inject_volume_w_mismatch or args.inject_volume_filter_mismatch) and not args.volume:
+        parser.error("volume options require volume")
+    if (args.inject_volume_w_mismatch or args.inject_volume_filter_mismatch) and args.action.startswith("gpu-fetch"):
+        parser.error("volume sampling negative controls require a sampling profile")
     if args.cube and (args.action in ("test","demo","gpu","gpu-checks","gpu-srgb-values") or args.action.startswith("gpu-fetch") or args.image_layers is not None or args.single_layer_view or args.linear_image or args.gradients or args.offset is not None):
         parser.error("cube requires a mip-capable sampling GPU profile; array/gradient/offset/fetch options are separate")
     if args.cube_base_layer is not None and (not args.cube or args.cube_base_layer<0 or args.cube_base_layer+6>args.cube_count*6):
@@ -58,7 +68,7 @@ def main() -> int:
         parser.error("cube-count/direction mismatch require cube")
     if args.image_layers is not None and args.action in ("test","demo","gpu-checks","gpu","gpu-srgb-values"):
         parser.error("image-layers requires a mip-capable sampling/fetch GPU profile")
-    if args.linear_image and args.image_layers is None:
+    if args.linear_image and args.image_layers is None and not args.volume:
         parser.error("linear-image requires image-layers")
     if args.single_layer_view and args.image_layers is None:
         parser.error("single-layer-view requires image-layers")
@@ -96,7 +106,7 @@ def main() -> int:
         args.case_limit = maximum
     if args.case_limit < 1 or args.case_limit > maximum or args.timeout <= 0:
         parser.error("case-limit exceeds selected profile and timeout must be positive")
-    if args.inject_query_mismatch and ((args.action not in ("gpu-fetch-query", "gpu-fetch-swizzle", "gpu-fetch-border", "gpu-fetch-separate", "gpu-fetch-array", "gpu-fetch-uniform", "gpu-fetch-nonuniform") and not (args.cube and not args.action.startswith("gpu-multi"))) or args.inject_mismatch):
+    if args.inject_query_mismatch and ((args.action not in ("gpu-fetch-query", "gpu-fetch-swizzle", "gpu-fetch-border", "gpu-fetch-separate", "gpu-fetch-array", "gpu-fetch-uniform", "gpu-fetch-nonuniform") and not ((args.cube or args.volume) and not args.action.startswith("gpu-multi"))) or args.inject_mismatch):
         parser.error("inject-query-mismatch requires a fetch/query profile and excludes inject-mismatch")
     if args.action.startswith("gpu"):
         if args.sanitize:

@@ -1113,6 +1113,111 @@ void cube_sampling() {
   rejected([&]{texture_cube_size(image,view,3);},"Cube query invalid relative mip");
 }
 
+Image volume_fixture(unsigned w,unsigned h,unsigned d,Format format) {
+  Image image{format,{},{}};image.volume=true;
+  for (unsigned mip=0;;++mip) {
+    Level level{w,h,image.data.size()+7,w*4ULL+3};level.depth=d;level.slice_pitch=(h+1)*level.row_pitch+5;
+    image.data.resize(level.offset+d*level.slice_pitch,0xcd);image.levels.push_back(level);
+    for (unsigned z=0;z<d;++z) for (unsigned y=0;y<h;++y) for (unsigned x=0;x<w;++x) {
+      auto slice=level;slice.offset+=z*level.slice_pitch;
+      put(image,slice,x,y,{static_cast<uint8_t>(x*37+y*11+z*67+mip*43),static_cast<uint8_t>(x*17+y*73+z*23+mip*59),static_cast<uint8_t>(x*7+y*29+z*101+mip*19),static_cast<uint8_t>(x*31+y*13+z*79+127)});
+    }
+    if (w==1 && h==1 && d==1) break;
+    w=std::max(1U,w/2);h=std::max(1U,h/2);d=std::max(1U,d/2);
+  }
+  return image;
+}
+Color volume_oracle(const Image &image,View view,Sampling sampling,double u,double v,double w,double lod,LodRange range) {
+  const double biased=sampling.lod_bias ? static_cast<float>(static_cast<float>(lod)+static_cast<float>(sampling.lod_bias)) : lod;
+  const double lambda=std::clamp(biased,range.min,range.max);
+  const auto filter=lambda<=0 ? sampling.mag_filter : sampling.min_filter;
+  const long double relative=std::clamp(lambda,0.0,static_cast<double>(view.level_count-1));
+  std::array<long double,4> color{};
+  for (unsigned r=0;r<view.level_count;++r) {
+    long double mw;
+    if (sampling.mip_filter==MipFilter::Linear) mw=std::max(0.L,1-std::abs(relative-r));
+    else mw=((r==0 ? relative>=0 : relative>r-.5L) && (r+1==view.level_count || relative<=r+.5L)) ? 1 : 0;
+    if (!mw) continue;
+    const auto &level=image.levels[view.base_mip+r];
+    auto wx=axis_weights(level.width,u,sampling.address_u,filter);
+    auto wy=axis_weights(level.height,v,sampling.address_v,filter);
+    auto wz=axis_weights(level.depth,w,sampling.address_w,filter);
+    long double cx=0,cy=0,cz=0;for(auto a:wx)cx+=a;for(auto a:wy)cy+=a;for(auto a:wz)cz+=a;
+    std::array<long double,4> value{};
+    for(unsigned z=0;z<level.depth;++z)for(unsigned y=0;y<level.height;++y)for(unsigned x=0;x<level.width;++x)for(unsigned c=0;c<4;++c) {
+      const unsigned channel=is_bgra(image.format)&&(c==0||c==2) ? 2-c : c;
+      const long double e=image.data[level.offset+z*level.slice_pitch+y*level.row_pitch+x*4+channel]/255.L;
+      const long double decoded=is_srgb(image.format)&&c<3 ? (e<=.04045L ? e/12.92L : std::pow((e+.055L)/1.055L,2.4L)) : e;
+      value[c]+=wx[x]*wy[y]*wz[z]*decoded;
+    }
+    const long double outside=1-cx*cy*cz;
+    for(unsigned c=0;c<4;++c) {
+      if(sampling.border_color==BorderColor::OpaqueWhite || (sampling.border_color==BorderColor::OpaqueBlack&&c==3))value[c]+=outside;
+      color[c]+=mw*value[c];
+    }
+  }
+  return mapped_oracle({static_cast<float>(color[0]),static_cast<float>(color[1]),static_cast<float>(color[2]),static_cast<float>(color[3])},view.components);
+}
+void volume_sampling() {
+  const std::array<AddressMode,4> modes{AddressMode::Repeat,AddressMode::MirroredRepeat,AddressMode::ClampToEdge,AddressMode::ClampToBorder};
+  const std::array<std::array<double,3>,8> coordinates{{{0,0,0},{1,1,1},{.5,.5,.5},{-.125,.75,1.125},{1.875,-1.125,.25},{.125,.625,.875},{.999,.001,.999},{-.25,-.25,-.25}}};
+  for (auto dimensions : {std::array<unsigned,3>{3,5,7},{1,1,4},{2,2,2},{1,3,1}})
+  for (auto format : {Format::RGBA8_UNORM,Format::BGRA8_UNORM,Format::RGBA8_SRGB,Format::BGRA8_SRGB}) {
+    const auto image=volume_fixture(dimensions[0],dimensions[1],dimensions[2],format);
+    for(unsigned base=0;base<image.levels.size();++base) {
+      View view{base,static_cast<unsigned>(image.levels.size()-base)};
+      for(unsigned r=0;r<view.level_count;++r) {
+        const auto &level=image.levels[base+r];expect(texture_volume_size(image,view,r)==std::array<uint32_t,3>{level.width,level.height,level.depth},"volume mip dimensions");
+        for(unsigned z=0;z<level.depth;++z)for(unsigned y=0;y<level.height;++y)for(unsigned x=0;x<level.width;++x) {
+          Sampling nearest;nearest.address_u=nearest.address_v=nearest.address_w=AddressMode::ClampToEdge;
+          auto fetched=texel_fetch_volume(image,view,x,y,z,r);
+          expect_color(fetched.rgba,volume_oracle(image,view,nearest,(x+.5)/level.width,(y+.5)/level.height,(z+.5)/level.depth,r,{}),"volume fetch independent bytes");
+          expect(fetched.taps[0].byte_offset==level.offset+z*level.slice_pitch+y*level.row_pitch+x*4,"volume fetch pitch");
+        }
+      }
+      for(auto au:modes)for(auto av:modes)for(auto aw:modes)for(auto filter:{Filter::Nearest,Filter::Bilinear})for(auto mip:{MipFilter::Nearest,MipFilter::Linear}) {
+        Sampling sampling{au,av,filter,mip};sampling.address_w=aw;
+        for(auto p:coordinates)for(double lod:{-.25,.5,1.25}) {
+          const auto actual=sample_volume_lod(image,view,sampling,p[0],p[1],p[2],lod);
+          expect_color(actual.rgba,volume_oracle(image,view,sampling,p[0],p[1],p[2],lod,{}),"independent volume virtual texel oracle");
+          double weight=0;for(auto tap:actual.taps){weight+=tap.weight;if(!tap.border)expect(tap.byte_offset+4<=image.data.size() && tap.z<image.levels[tap.mip].depth,"volume trace bounds");}
+          expect(std::abs(weight-1)<1e-12,"volume trace total weight");
+        }
+      }
+      Sampling mixed{AddressMode::ClampToBorder,AddressMode::MirroredRepeat,Filter::Nearest,Filter::Bilinear,MipFilter::Linear};mixed.address_w=AddressMode::ClampToBorder;
+      for(auto bias:{-.75,.5,16.})for(auto border:{BorderColor::TransparentBlack,BorderColor::OpaqueBlack,BorderColor::OpaqueWhite})for(auto p:coordinates) {
+        mixed.lod_bias=bias;mixed.border_color=border;
+        expect_color(sample_volume_lod(image,view,mixed,p[0],p[1],p[2],.25,{.25,2}).rgba,volume_oracle(image,view,mixed,p[0],p[1],p[2],.25,{.25,2}),"volume bias mixed minmag border");
+      }
+    }
+  }
+  auto image=volume_fixture(2,2,2,Format::RGBA8_UNORM);View view{0,2};Sampling linear{AddressMode::ClampToEdge,AddressMode::ClampToEdge,Filter::Bilinear};linear.address_w=AddressMode::ClampToEdge;
+  Color average{};for(unsigned z=0;z<2;++z)for(unsigned y=0;y<2;++y)for(unsigned x=0;x<2;++x){auto c=texel_fetch_volume(image,view,x,y,z,0).rgba;for(unsigned ch=0;ch<4;++ch)average[ch]+=c[ch]/8;}
+  const auto center=sample_volume_lod(image,view,linear,.5,.5,.5,0);expect_color(center.rgba,average,"eight texel hand average");expect(center.taps.size()==8,"volume eight taps");
+  for(auto tap:center.taps)expect(tap.weight==.125,"eight equal weights");
+  for(double w:{std::numeric_limits<double>::max(),-std::numeric_limits<double>::max()})expect_color(sample_volume_lod(image,view,linear,.5,.5,w,0).rgba,sample_volume_lod(image,view,linear,.5,.5,w>0 ? 1 : 0,0).rgba,"huge W safe edge");
+  rejected([&]{sample_volume_lod(image,view,linear,0,0,std::numeric_limits<double>::infinity(),0);},"invalid volume W");
+  auto bad=image;bad.levels[0].slice_pitch=1;rejected([&]{validate(bad);},"overlapping slices");
+  bad=image;bad.levels[0].slice_pitch=UINT64_MAX;rejected([&]{validate(bad);},"overflowing slices");
+  bad=image;bad.data.resize(bad.levels[0].offset+bad.levels[0].slice_pitch);rejected([&]{validate(bad);},"missing slice");
+  bad=image;bad.levels[1].depth=2;rejected([&]{validate(bad);},"nonshrinking depth");
+  bad=image;bad.layer_count=2;rejected([&]{validate(bad);},"volume array layer");
+  rejected([&]{texel_fetch_volume(image,view,0,0,2,0);},"fetch outside depth");
+  rejected([&]{sample_lod(image,view,linear,0,0,0);},"2D sampling volume");
+  rejected([&]{texture_volume_size(image,view,-1);},"negative volume LOD");
+  rejected([&]{texel_fetch(image,view,0,0,0);},"2D fetch volume");
+  rejected([&]{texture_array_size(image,view,0);},"array query volume");
+  auto invalid_state=linear;invalid_state.address_w=static_cast<AddressMode>(99);
+  rejected([&]{sample_volume_lod(image,view,invalid_state,0,0,0,0);},"unknown W address mode");
+  for(auto mapping : {ComponentMapping{Component::B,Component::G,Component::R,Component::A},ComponentMapping{Component::Zero,Component::One,Component::A,Component::R}}) {
+    auto mapped=view;mapped.components=mapping;
+    expect_color(sample_volume_lod(image,mapped,linear,.25,.75,.5,.25).rgba,volume_oracle(image,mapped,linear,.25,.75,.5,.25,{}),"volume view swizzle");
+    expect(texture_volume_size(image,mapped,1)==std::array<uint32_t,3>{1,1,1},"volume swizzle preserves size");
+    expect_color(texel_fetch_volume(image,mapped,1,0,1,0).rgba,mapped_oracle(texel_fetch_volume(image,view,1,0,1,0).rgba,mapping),"volume fetch swizzle");
+  }
+
+}
+
 void invalid_inputs() {
   const auto image = four_colors();
   for (double invalid : {std::numeric_limits<double>::infinity(),
@@ -1167,7 +1272,7 @@ void invalid_inputs() {
 } // namespace
 
 int main() {
-  const std::array<std::pair<const char *, void (*)()>, 17> suites{{
+  const std::array<std::pair<const char *, void (*)()>, 18> suites{{
       {"hand-calculated filtering and seams", hand_calculated},
       {"negative UV, boundaries and huge finite UV", negative_and_boundary_coordinates},
       {"all 256 UNORM values in both formats", all_unorm_values},
@@ -1179,6 +1284,7 @@ int main() {
       {"constant sample/fetch offsets and independent texel oracle", texel_offsets},
       {"2D image array layer storage/view/selection oracle", image_array_layers},
       {"Cube face/edge/corner independent geometric oracle", cube_sampling},
+      {"3D volume pitches and independent eight-texel oracle", volume_sampling},
       {"independent min/mag selection before view clamp", min_mag},
       {"sRGB decoding before filtering and unchanged alpha", srgb},
       {"integer texel fetch and view-relative property queries", fetch_and_queries},

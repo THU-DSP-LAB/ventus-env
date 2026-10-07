@@ -166,12 +166,35 @@ def run(args, compiler: str) -> int:
                 f"int view_levels = textureQueryLevels({query_image});\n    ivec2 query_size = textureSize({query_image}, int(i % uint(view_levels)));\n    vec4 marker = vec4(float(completion), vec2(query_size), float(view_levels));")
         rgen_path = output / "cube.rgen"
         rgen_path.write_text(text)
+    if args.volume:
+        text = rgen_path.read_text().replace("sampler2D", "sampler3D").replace("texture2D", "texture3D")
+        if multi:
+            a = "vec3(requests.uv_lod[2*i].xy,0)" if args.inject_volume_w_mismatch else "requests.uv_lod[2*i].xyz"
+            b = "vec3(requests.uv_lod[2*i+1].xy,0)" if args.inject_volume_w_mismatch else "requests.uv_lod[2*i+1].xyz"
+            text = text.replace("requests.uv_lod[i].xy",a).replace("requests.uv_lod[i].yx",b)
+            text = text.replace("requests.uv_lod[i].z","requests.uv_lod[2*i].w").replace("requests.uv_lod[i].w","requests.uv_lod[2*i+1].w")
+        elif fetch_query:
+            text = text.replace("ivec2(requests.uv[i].xy)","ivec3(requests.uv[i].xy,requests.uv[i].w)")
+            text = text.replace("ivec2 size =","ivec3 size =").replace("vec2(size)","vec2(size.xy)")
+            text = text.replace("vec4 marker = vec4(float(completion), vec2(size.xy), float(levels));", "vec4 marker = vec4(float(completion), vec2(size.xy), float(levels));\n    vec4 extra = vec4(float(size.z),123,456,789);")
+        else:
+            text = text.replace("requests.uv[i].xy","vec3(requests.uv[i].xy,0)" if args.inject_volume_w_mismatch else "requests.uv[i].xyz")
+            text = text.replace("requests.uv[i].z","requests.uv[i].w")
+            query_image = "sampler3D(source,state)" if separate else "source"
+            text = text.replace("vec4 marker = vec4(float(completion), 123, 456, 789);",
+                f"int view_levels = textureQueryLevels({query_image});\n    ivec3 query_size = textureSize({query_image},int(i % uint(view_levels)));\n    vec4 marker = vec4(float(completion),vec2(query_size.xy),float(view_levels));\n    vec4 extra = vec4(float(query_size.z),123,456,789);")
+        if not multi:
+            for resource in ["direct","indirect"]:
+                text = text.replace(resource+".values[2 * i]",resource+".values[3 * i]").replace(resource+".values[2 * i + 1]",resource+".values[3 * i + 1]")
+            text = text.replace("imageStore(carrier,","direct.values[3 * i + 2] = extra;\n    indirect.values[3 * i + 2] = extra;\n    imageStore(carrier,")
+        rgen_path = output / "volume.rgen"
+        rgen_path.write_text(text)
     for stage in ("rgen", "rmiss"):
         with (output / f"compile-{stage}.log").open("w") as log:
             subprocess.run([glslang, "-V", "--target-env", "vulkan1.2",
                             str(rgen_path if stage == "rgen" else source / "sample.rmiss"), "-o", str(output / f"sample.{stage}.spv")],
                            stdout=log, stderr=subprocess.STDOUT, check=True)
-    if uniform or args.gradients or args.offset is not None or image_array or args.cube:
+    if uniform or args.gradients or args.offset is not None or image_array or args.cube or args.volume:
         disassembler = shutil.which("spirv-dis")
         if not disassembler:
             raise RuntimeError("spirv-dis is required to retain runtime-index evidence")
@@ -206,6 +229,10 @@ def run(args, compiler: str) -> int:
     })
     if args.inject_cube_seam_mismatch:
         env["VENTUS_TEXTURE_INJECT_CUBE_SEAM_MISMATCH"] = "1"
+    if args.volume:
+        env["VENTUS_TEXTURE_VOLUME_DEPTH"] = str(args.volume_depth)
+        if args.inject_volume_filter_mismatch:
+            env["VENTUS_TEXTURE_VOLUME_FILTER_MISMATCH"] = "1"
     if args.cube:
         env["VENTUS_TEXTURE_CUBE_COUNT"] = str(args.cube_count)
         if args.cube_base_layer is not None:
@@ -254,7 +281,8 @@ def run(args, compiler: str) -> int:
         }
         variants = {name: shader_source.replace(original, value) for name, value in variants.items()}
         variants["shadow-lod"] = variants["shadow-lod"].replace("sampler2D source;", "sampler2DShadow source;")
-        variants["3d-sampling"] = shader_source.replace("sampler2D source;", "sampler3D source;").replace(original, "textureLod(source, vec3(requests.uv[i], 0), 0.0)")
+        variants["3d-gradients"] = shader_source.replace("sampler2D source;", "sampler3D source;").replace(original, "textureGrad(source, vec3(requests.uv[i],0), vec3(1),vec3(1))")
+        variants["3d-offset"] = shader_source.replace("sampler2D source;", "sampler3D source;").replace(original, "textureLodOffset(source,vec3(requests.uv[i],0),0,ivec3(1))")
         variants["shadow-gradients"] = shader_source.replace("sampler2D source;", "sampler2DShadow source;").replace(original,
             "vec4(textureGrad(source, vec3(requests.uv[i], 0.5), vec2(1), vec2(1)))")
         nonuniform_source = shader_source.replace("#version 460", "#version 460\n#extension GL_EXT_nonuniform_qualifier : require")
@@ -338,7 +366,7 @@ def run(args, compiler: str) -> int:
         uniform_profile["dynamic_spirv"] = bool(re.search(r"OpAccessChain .* %source(?:_[ab])? %\w+", spirv_text) and
                                                  "OpVariable %_ptr_PushConstant_Selectors PushConstant" in spirv_text)
         uniform_profile["dynamic_llvm"] = bool(re.search(r"shl i32 %\w+, 7", llvm_text) and
-                                                re.search(r"mul i32 %\w+, 96", llvm_text))
+                                                re.search(r"mul i32 %\w+, 104", llvm_text))
         uniform_profile["elf_count"] = len(elf_paths)
         if nonuniform:
             uniform_profile["nonuniform_spirv"] = "OpCapability SampledImageArrayNonUniformIndexing" in spirv_text and "NonUniform" in spirv_text
@@ -373,7 +401,7 @@ def run(args, compiler: str) -> int:
     if not checked_frontier or not elf_paths:
         errors.append("checked, retained V5 ELF evidence is missing")
     if checks_only:
-        if summary.get("limits") != "3" or summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "20" or summary.get("errors") != "0" or summary.get("images") != "18" or summary.get("views") != "26":
+        if summary.get("copies") != "6" or summary.get("limits") != "5" or summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "24" or summary.get("errors") != "0" or summary.get("images") != "27" or summary.get("views") != "33":
             errors.append("profile rejection checks incomplete")
     else:
         if summary.get("cases") != str(args.case_limit):
@@ -384,8 +412,8 @@ def run(args, compiler: str) -> int:
             errors.append("numeric coverage counts are incomplete")
         if (srgb or view_swizzle) and summary.get("format_checks") != "18":
             errors.append("sRGB/UNORM format feature and unsupported usage checks incomplete")
-        if (fetch_query or (args.cube and not multi)) and (summary.get("format_checks") != "18" or
-                            summary.get("query_components") != str(args.case_limit * 64 * (8 if array_sampling else 6)) or
+        if (fetch_query or ((args.cube or args.volume) and not multi)) and (summary.get("format_checks") != "18" or
+                            summary.get("query_components") != str(args.case_limit * 64 * (8 if array_sampling or args.volume else 6)) or
                             summary.get("query_failed") != "0"):
             errors.append("fetch/query format coverage or exact property comparison failed")
         if view_swizzle and not multi:
@@ -450,6 +478,10 @@ def run(args, compiler: str) -> int:
         profile += "; explicit isotropic 2D gradients scaled by view base dimensions; sampler bias/clamp; ordinary LLVM arithmetic and texel loads"
     if args.offset is not None:
         profile += "; constant signed texel offsets[-8,7] before integer addressing in each accessed mip"
+    if args.volume:
+        if not re.search(r"OpTypeImage .* 3D 0 0 0 1 Unknown", (output / "sample.rgen.spvasm").read_text()):
+            errors.append("3D SPIR-V image type evidence missing")
+        profile += "; 3D volume with shrinking depth, W addressing and eight-texel filtering"
     if args.cube:
         if not re.search(r"OpTypeImage .* Cube 0 0 0 1 Unknown", (output / "sample.rgen.spvasm").read_text()):
             errors.append("Cube SPIR-V image type evidence missing")
@@ -459,6 +491,10 @@ def run(args, compiler: str) -> int:
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
         "profile": profile,
+        "volume": args.volume,
+        "volume_depth": args.volume_depth,
+        "injected_volume_w_mismatch": args.inject_volume_w_mismatch,
+        "injected_volume_filter_mismatch": args.inject_volume_filter_mismatch,
         "cube": args.cube,
         "cube_count": args.cube_count,
         "cube_base_layer": args.cube_base_layer,

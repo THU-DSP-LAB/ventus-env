@@ -154,7 +154,7 @@ double dot(std::array<double,3> a, CubeAxis b) { return a[0]*b[0]+a[1]*b[1]+a[2]
 void validate_cube(const Image &image, View view) {
   validate(image);
   validate_view(image,view);
-  require(view.layer_count==6,"Cube view needs exactly six faces");
+  require(!image.volume && view.layer_count==6,"Cube view needs exactly six faces");
   for (const auto &level : image.levels)
     require(level.width==level.height,"Cube mip must be square");
 }
@@ -204,7 +204,7 @@ std::vector<Tap> cube_read(const Image &image, unsigned mip, unsigned base,
 }
 
 Result sample_validated(const Image &image, std::uint32_t mip,
-                        const Sampling &sampling, double u, double v, Filter filter, TexelOffset offset, std::uint32_t layer, bool cube = false, std::uint32_t cube_base = 0) {
+                        const Sampling &sampling, double u, double v, Filter filter, TexelOffset offset, std::uint32_t layer, bool cube = false, std::uint32_t cube_base = 0, double w = 0) {
   require(std::isfinite(u) && std::isfinite(v), "UV must be finite");
   check_mode(sampling.address_u);
   check_mode(sampling.address_v);
@@ -225,6 +225,29 @@ Result sample_validated(const Image &image, std::uint32_t mip,
   result.input_v = v;
   result.filter = filter;
   result.texel_offset = offset;
+  if (image.volume) {
+    require(std::isfinite(w), "W must be finite");
+    check_mode(sampling.address_w);
+    const double z = reduce(w,sampling.address_w)*level.depth;
+    result.from_volume=true;result.input_w=w;
+    const bool linear=filter==Filter::Bilinear;
+    std::array<double,3> position{x-(linear ? .5 : 0),y-(linear ? .5 : 0),z-(linear ? .5 : 0)};
+    std::array<std::int64_t,3> low{};std::array<double,3> fraction{};
+    for (unsigned c=0;c<3;++c) {low[c]=static_cast<std::int64_t>(std::floor(position[c]));fraction[c]=position[c]-std::floor(position[c]);}
+    const unsigned count=linear ? 2 : 1;
+    for (unsigned dz=0;dz<count;++dz) for (unsigned dy=0;dy<count;++dy) for (unsigned dx=0;dx<count;++dx) {
+      const auto rz=low[2]+dz;const auto zi=address(rz,level.depth,sampling.address_w);
+      const double weight=linear ? (dx ? fraction[0] : 1-fraction[0])*(dy ? fraction[1] : 1-fraction[1])*(dz ? fraction[2] : 1-fraction[2]) : 1;
+      auto slice=level;slice.offset+=zi*level.slice_pitch;
+      auto tap=read(image,slice,sampling,low[0]+dx,low[1]+dy,weight);
+      if (sampling.address_w==AddressMode::ClampToBorder && (rz<0 || rz>=level.depth)) {
+        tap.border=true;tap.byte_offset=0;tap.color=border_color(sampling.border_color);
+      }
+      tap.raw_z=rz;tap.z=zi;tap.mip=mip;result.taps.push_back(tap);
+    }
+    for (unsigned c=0;c<4;++c) {double value=0;for (const auto &tap:result.taps) value+=tap.weight*tap.color[c];result.rgba[c]=static_cast<float>(value);}
+    return result;
+  }
   if (filter == Filter::Nearest) {
     result.taps.push_back(read(image, level, lookup,
                               static_cast<std::int64_t>(std::floor(x)) + offset[0],
@@ -269,16 +292,19 @@ void validate(const Image &image) {
               image.format == Format::RGBA8_SRGB || image.format == Format::BGRA8_SRGB,
           "unsupported format");
   require(image.layer_count > 0, "image needs at least one layer");
+  require(!image.volume || image.layer_count==1,"3D images have one array layer");
   require(!image.levels.empty(), "image needs at least one mip");
   for (std::size_t i = 0; i < image.levels.size(); ++i) {
     const auto &level = image.levels[i];
-    require(level.width > 0 && level.height > 0, "mip dimensions must be positive");
+    require(level.width > 0 && level.height > 0 && level.depth > 0, "mip dimensions must be positive");
+    require(image.volume || level.depth==1,"2D level depth must be one");
     if (i > 0) {
       const auto &previous = image.levels[i - 1];
-      require(previous.width != 1 || previous.height != 1,
+      require(previous.width != 1 || previous.height != 1 || previous.depth != 1,
               "mip chain continues past 1x1");
       require(level.width == std::max(1U, previous.width / 2) &&
-                  level.height == std::max(1U, previous.height / 2),
+                  level.height == std::max(1U, previous.height / 2) &&
+                  level.depth == std::max(1U,previous.depth / 2),
               "mip dimensions do not follow the conventional chain");
     }
     const std::uint64_t row_bytes = level.width * 4ULL;
@@ -290,6 +316,11 @@ void validate(const Image &image) {
     if (level.height > 1)
       require(level.row_pitch <= (remaining - row_bytes) / (level.height - 1),
               "backing bytes do not contain all rows");
+    if (level.depth > 1) {
+      const auto span=(level.height-1ULL)*level.row_pitch+row_bytes;
+      require(level.slice_pitch>=span,"slice pitch overlaps texel bytes");
+      require(level.depth-1ULL <= (remaining-span)/level.slice_pitch,"backing bytes do not contain all slices");
+    }
     if (image.layer_count > 1) {
       const auto span = (level.height - 1ULL) * level.row_pitch + row_bytes;
       require(level.layer_pitch >= span, "layer pitch overlaps texel bytes");
@@ -303,11 +334,12 @@ Result sample_level(const Image &image, std::uint32_t mip,
                     const Sampling &sampling, double u, double v, TexelOffset offset, std::uint32_t layer) {
   validate(image);
   check_filters(sampling);
+  require(!image.volume,"use sample_volume_lod for 3D images");
   return sample_validated(image, mip, sampling, u, v, sampling.mag_filter, offset, layer);
 }
 
 static Result sample_lod_impl(const Image &image, View view, const Sampling &sampling,
-                  double u, double v, double lod, LodRange range, TexelOffset offset, double layer, bool cube) {
+                  double u, double v, double lod, LodRange range, TexelOffset offset, double layer, bool cube, double w = 0) {
   validate(image);
   check_filters(sampling);
   validate_view(image, view);
@@ -347,13 +379,13 @@ static Result sample_lod_impl(const Image &image, View view, const Sampling &sam
               sampling.mip_filter == MipFilter::Linear, "unsupported mip filter");
   const bool linear = sampling.mip_filter == MipFilter::Linear;
   const auto selected = static_cast<std::uint32_t>(low + (!linear && relative - low > 0.5));
-  Result result = sample_validated(image, view.base_mip + selected, sampling, u, v, filter, offset, selected_layer, cube, view.base_layer);
+  Result result = sample_validated(image, view.base_mip + selected, sampling, u, v, filter, offset, selected_layer, cube, view.base_layer, w);
   if (linear) {
     result.mip_upper = view.base_mip + std::min(selected + 1, view.level_count - 1);
     result.mip_weight = relative - low;
     // Exact integer/end LODs retain the first sample without needless reads.
     if (result.mip_weight > 0 && result.mip_upper != result.mip) {
-      auto upper = sample_validated(image, result.mip_upper, sampling, u, v, filter, offset, selected_layer, cube, view.base_layer);
+      auto upper = sample_validated(image, result.mip_upper, sampling, u, v, filter, offset, selected_layer, cube, view.base_layer, w);
       for (unsigned c = 0; c < 4; ++c)
         result.rgba[c] = static_cast<float>((1 - result.mip_weight) * result.rgba[c] +
                                            result.mip_weight * upper.rgba[c]);
@@ -374,7 +406,28 @@ static Result sample_lod_impl(const Image &image, View view, const Sampling &sam
 
 Result sample_lod(const Image &image, View view, const Sampling &sampling,
                   double u,double v,double lod,LodRange range,TexelOffset offset,double layer) {
+  require(!image.volume,"use sample_volume_lod for 3D images");
   return sample_lod_impl(image,view,sampling,u,v,lod,range,offset,layer,false);
+}
+
+Result sample_volume_lod(const Image &image,View view,const Sampling &sampling,
+                         double u,double v,double w,double lod,LodRange range) {
+  require(image.volume,"3D sampling requires volume image");
+  return sample_lod_impl(image,view,sampling,u,v,lod,range,{},0,false,w);
+}
+std::array<std::uint32_t,3> texture_volume_size(const Image &image,View view,std::int32_t lod) {
+  require(image.volume,"3D size requires volume image");
+  const auto size=texture_size(image,view,lod);
+  return {size[0],size[1],image.levels[view.base_mip+lod].depth};
+}
+Result texel_fetch_volume(const Image &image,View view,std::int32_t x,std::int32_t y,std::int32_t z,std::int32_t lod) {
+  const auto size=texture_volume_size(image,view,lod);
+  require(x>=0 && y>=0 && z>=0 && static_cast<std::uint32_t>(x)<size[0] &&
+    static_cast<std::uint32_t>(y)<size[1] && static_cast<std::uint32_t>(z)<size[2],"3D fetch coordinate outside mip");
+  const auto mip=view.base_mip+lod;auto level=image.levels[mip];level.offset+=static_cast<std::uint32_t>(z)*level.slice_pitch;
+  Result result;result.from_volume=true;result.input_w=z;result.mip=result.mip_upper=mip;
+  auto tap=read_at(image,level,x,y,1);tap.z=z;tap.raw_z=z;tap.mip=mip;result.taps.push_back(tap);result.rgba=tap.color;
+  swizzle_result(result,view.components);return result;
 }
 
 Result sample_cube_lod(const Image &image,View view,const Sampling &sampling,
@@ -446,12 +499,14 @@ std::array<std::uint32_t, 2> texture_size(const Image &image, View view,
 }
 
 std::array<std::uint32_t,3> texture_array_size(const Image &image, View view, std::int32_t lod) {
+  require(!image.volume,"array query requires 2D image");
   const auto size = texture_size(image,view,lod);
   return {size[0],size[1],view.layer_count};
 }
 
 Result texel_fetch(const Image &image, View view, std::int32_t x,
                    std::int32_t y, std::int32_t lod, TexelOffset offset, std::int32_t layer) {
+  require(!image.volume,"use texel_fetch_volume for 3D images");
   check_offset(offset);
   const auto size = texture_size(image, view, lod);
   const std::int64_t final_x = static_cast<std::int64_t>(x) + offset[0];

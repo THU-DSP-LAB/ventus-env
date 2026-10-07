@@ -18,11 +18,11 @@ python3 tools/texture_model.py demo
 
 | 功能 | 行为 |
 | --- | --- |
-| Image | 2D / 2D array / Cube、单 sample；完整或部分传统 mip 链，层数不随 mip 改变 |
+| Image | 2D / 2D array / Cube / 3D、单 sample；传统 mip 链，array 层数固定，volume depth 随 mip 递减 |
 | 格式 | RGBA8/BGRA8 UNORM 或 sRGB；RGBA 浮点结果，sRGB RGB 在过滤前解码，alpha 保持 UNORM |
-| 存储 | 各 mip 独立 offset、width、height、row/layer pitch；允许行/层填充和非零偏移 |
-| 寻址 | U/V 独立的 repeat、mirrored repeat、clamp-to-edge、clamp-to-border |
-| Texel 过滤 | nearest 或 bilinear；独立 minFilter/magFilter，按 sampler clamp 后的 LOD 选择 |
+| 存储 | 各 mip 独立 offset、width、height、depth、row/layer/slice pitch；允许行/层填充和非零偏移 |
+| 寻址 | U/V（3D 另有 W）独立的 repeat、mirrored repeat、clamp-to-edge、clamp-to-border |
+| Texel 过滤 | nearest 或 2D bilinear / 3D 八点 linear；独立 minFilter/magFilter，按 sampler clamp 后的 LOD 选择 |
 | Border color | 核心 float transparent black/opaque black/opaque white，逐 tap 替换后过滤；opaque black 采样仅覆盖 identity view |
 | LOD | 显式有限值；非零 sampler bias 先做 binary32 加法，再限制到 sampler/view 范围；bias 范围为 [-16,16] |
 | 显式梯度 | `sample_grad` / `textureGrad`：有限 binary32 二维 dx/dy，以 view 基础级尺寸计算各向同性 LOD；再使用已有 bias/clamp/min-mag/mip/filter |
@@ -37,7 +37,7 @@ python3 tools/texture_model.py demo
 
 `sample_level` 在指定的 image 绝对 mip 内用 `mag_filter` 采样，它是直接指定级别与级内过滤的 helper，不进行 LOD/min/mag 选择。`sample_lod` 的 LOD 则相对 View；例如 `{base_mip=1, level_count=2}` 的 LOD 0 访问 image mip 1。每个 mip 的尺寸按 `max(1, previous/2)` 递减；可不提供后续级别，但不能在 1×1 之后继续追加重复 mip。
 
-当前尚无隐式导数、压缩、比较过滤、3D 或模型的 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
+当前尚无隐式导数、压缩、比较过滤或模型的 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
 
 ## 计算规则与数值边界
 
@@ -57,7 +57,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 ## 验证
 
-测试包含十七组，普通和 ASan/UBSan 模式目前均通过 9,709,300 项检查；包含独立 bias 与显式梯度 oracle：
+测试包含十八组，普通和 ASan/UBSan 模式目前均通过 11,792,751 项检查；包含独立 bias 与显式梯度 oracle：
 
 1. 手算四点平均、非对称插值、repeat 接缝和 mirror/clamp 边缘。
 2. 负坐标、texel 边界两侧、精确边界、负零和巨大有限坐标。
@@ -79,6 +79,8 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 16. Array layer 的独立颜色/地址 oracle：1/2/4 层、全部格式、行/层填充、mip/layer view 子范围、半整数及相邻浮点值、极值 clamp、host 舍入模式独立性、sample/grad/fetch/query、无跨层过滤与非法 backing。
 17. Cube 的独立几何 oracle：六 face、12 条边的双向朝向、八角点、preferred 主轴 ties、跨 face virtual tap、角点三面平均；12 plane 的 view base layer 0/1/6、非二次幂/mip、格式/过滤/bias/swizzle、方向缩放和无效输入。
+
+18. Volume 的独立三轴 virtual texel oracle：3×5×7 / 1×1×4 / 2×2×2 / 1×3×1、三维 mip/view/pitches、64 种 U/V/W 寻址组合、nearest/八 texel linear、bias/min-mag/mip/border/swizzle、整数 fetch 与 size；深度溢出、截断和维度误用诊断。
 
 独立对照以 long double 在虚拟延伸图像上枚举 nearest 区间或 tent kernel，逐个真实 texel 累积贡献；不调用模型的坐标归约、四点选择或寻址函数。精确样例和 UNORM 解码做相应精确比较；过滤测试的每分量绝对误差上限为 `2e-7`，适用于该模型的 float 输出，不能直接当成未来 TMU 精度要求。
 
@@ -493,3 +495,29 @@ Face 顺序为 +X、-X、+Y、-Y、+Z、-Z。有限非零方向先选择绝对�
 两个负向命令都应返回 1：direction 反例把 shader 方向固定为 +Z，模型保留原请求；seam 反例故意把比较端改成错误的 face 内 clamp oracle，实际 shader 与正确模型代码保持正常，验证比较器能检出接缝颜色差异。`--inject-query-mismatch` 还可在单 Cube profile 检查属性比较器。
 
 E05 完整隔离/主目录验收共 41 个 GPU 命令（36 正向、5 预期失败反例），正向零差异，最大颜色误差 `1.788139343e-7`，保持既定 `1e-6` 上限。方向反例检出 3,840 差异，单/多 Cube 接缝反例检出 1,696/6,560 差异，查询反例精确检出 1 项。17 组、9,709,300 host 检查在普通/ASan/UBSan 模式通过；78 项范围检查、隔离/主目录 Mesa unit 和原 any-hit exact SHA 均通过，源码/库前后哈希一致。Mesa 本地提交 `af324cf`，LLVM/Spike 未改。证据 `artifacts/texture_model/cube-implementation/verification.json`；smoke 不计入最终验收。下一项 E06 3D 纹理。
+
+
+## E06 三维 volume 纹理
+
+```sh
+python3 tools/texture_model.py gpu-min-mag --volume
+python3 tools/texture_model.py gpu-multi-nonuniform-separate --volume --array-length 4
+python3 tools/texture_model.py gpu-srgb --volume --volume-depth 8 --lod-bias 0.5
+python3 tools/texture_model.py gpu-fetch-nonuniform --volume --linear-image --array-length 4
+python3 tools/texture_model.py gpu-min-mag --volume --case-limit 8 --inject-volume-w-mismatch
+python3 tools/texture_model.py gpu-min-mag --volume --case-limit 8 --inject-volume-filter-mismatch
+```
+
+3D image 有一个 array layer，每 mip 的 width/height/depth 都按 `max(1,previous/2)` 缩小。View 选择 mip 子范围，没有 z 子范围；`--volume-depth` 实验可选 1/2/4/5/8（默认 5），设备支持各轴最多 2048、最多 12 mip，整个 volume backing 不超过 UINT32_MAX。保持四种 RGBA8/BGRA8 UNORM/sRGB、单 sample 和 sampled/transfer usage；storage/attachment、2D-compatible view 暂不开放。
+
+Normalized W 与 U/V 一样独立使用 repeat、mirrored repeat、clamp-to-edge 或 clamp-to-border。Nearest 选择一个 texel；级内 linear 在 `uvw*size-0.5` 的八个邻点上使用三个轴的权重积，逐 tap 解码/border 后混合。再应用既有 mip 混合；3D 的八点级内 filtering 与二维 bilinear 加 mip-linear 的常用“trilinear”说法需区分。二维数组的 layer 没有这种层间插值。规范依据：[Vulkan-Docs v1.4.328 3D 线性过滤](https://github.com/KhronosGroup/Vulkan-Docs/blob/v1.4.328/chapters/textures.adoc#textures-texel-linear-filtering)。
+
+模型 `Image.volume` 标记维度，`Level.depth/slice_pitch` 保存三维布局，`sample_volume_lod` 实现显式 LOD；`texel_fetch_volume` 使用合法整数 XYZ/LOD，不使用 sampler，`texture_volume_size` 返回当前 mip 的三维尺寸。Trace 保存输入 W、tap raw/实际 Z 与地址。公开二维采样/fetch 和 array 查询遇到 volume 时诊断维度误用；数学模型函数不是硬件 ABI。
+
+GPU 使用标准 `sampler3D/texture3D`、`textureLod/texelFetch/textureSize/textureQueryLevels`。Mesa NIR→LLVM 层解析已有 `txl/txf/txs/query_levels`，产生普通 LLVM 地址计算、load、wrap/border、八点计算，再由 Ventus backend 选现有指令。无新 NIR intrinsic、LLVM texture intrinsic 或纹理 ISA；3D Grad/Offset、projector/shadow/gather、隐式导数仍拒绝，显式二维 Grad/Offset 保持原支持范围。
+
+线性 backing 每 mip 存连续 depth slices；上传 fixture 使用独立 padded row/slice pitch，各 slice 颜色不同。逐 mip 复制与非零 XYZ 局部更新验证实际上传。`--linear-image` 还按 `vkGetImageSubresourceLayout` 的 rowPitch/depthPitch 定位映射字节，逐 slice/row 对照，再做真实 shader 读取。六项 API copy 检查覆盖非法 Z、depth、array layer、不足 source 与合法非零 Z；含有效首 region 的失败请求也必须在所有 region 验证完之前不写任何 byte。
+
+私有资源元素从 96B→104B，在偏移 96 追加 addressModeW，100 保留为零；mip record 从 24B→32B，在 24/28 追加 depth/slicePitch。16B binding directory 和所有旧字段解释不变，2D/array/Cube producer、consumer、buffer 元素寻址和 sRGB 表起点同步迁移；详见 [ADR-0029](../../../docs/rt-implementation-architecture/decisions/ADR-0029-software-texture-volume-metadata.md)。没有冻结公共 RT/ISA/TMU 格式。
+
+W 反例把 shader W 固定为零；filter 反例把比较端 W 强制移动到所选 mip 的最近 texel 中心，故意抑制 W 插值，实际 GPU 和正确模型仍正常。二者应报告颜色差异并返回 1；另有精确查询反例。101 项范围/limits 检查加六项 copy 检查共 107 项。E06 最终隔离/主目录验收共 50 个 GPU 命令（45 正向、5 预期失败反例），正向零差异，最大误差 `1.192092896e-7`。18 组、11,792,751 host 检查在普通/ASan/UBSan 模式通过；W 反例检出 1,072 差异，单/多 volume 的 filter 反例检出 528/1,112 差异，查询反例检出 1 项。107 项范围/copy/limits 检查、隔离/主目录 Mesa unit 与原 any-hit exact SHA 均通过；源码/库前后哈希一致。Mesa 本地提交 `5052dde`，LLVM/Spike 未改。证据 `artifacts/texture_model/volume-implementation/verification.json`；smoke 和中途范围补齐前的结果不计入完成结论。下一项 E07 深度比较，然后 gather。

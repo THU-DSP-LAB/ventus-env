@@ -31,6 +31,8 @@ struct Level {
   std::uint64_t offset;
   std::uint64_t row_pitch;
   std::uint64_t layer_pitch = 0;
+  std::uint32_t depth = 1;
+  std::uint64_t slice_pitch = 0;
 };
 
 struct Image {
@@ -39,6 +41,7 @@ struct Image {
   // A partial or complete conventional mip chain, starting at mip 0.
   std::vector<Level> levels;
   std::uint32_t layer_count = 1;
+  bool volume = false;
 };
 
 struct Sampling {
@@ -51,6 +54,7 @@ struct Sampling {
   // E01 finite sampler bias profile. Nonzero bias uses a binary32 LOD sum.
   double lod_bias = 0;
   static constexpr double max_lod_bias = 16;
+  AddressMode address_w = AddressMode::Repeat;
 
   Sampling() = default;
   // Existing equal-filter call sites retain their meaning.
@@ -87,6 +91,8 @@ struct Tap {
   Color color;
   std::uint32_t mip = 0;
   std::uint32_t layer = 0;
+  std::int64_t raw_z = 0;
+  std::uint32_t z = 0;
   bool border = false; // No image byte address for a border-replacement tap.
 };
 
@@ -103,6 +109,8 @@ struct Result {
   double input_lod = 0;
   double sampler_lod = 0;
   double clamped_lod = 0;
+  bool from_volume = false;
+  double input_w = 0;
   bool from_cube = false;
   std::array<double,3> input_direction{};
   std::uint32_t cube_face = 0;
@@ -126,6 +134,12 @@ Result sample_level(const Image &image, std::uint32_t mip,
 Result sample_lod(const Image &image, View view, const Sampling &sampling,
                   double u, double v, double lod, LodRange range = {},
                   TexelOffset offset = {}, double layer = 0);
+// 3D volumes: all three mip dimensions shrink; W is filtered, never a layer.
+Result sample_volume_lod(const Image &image, View view, const Sampling &sampling,
+                         double u, double v, double w, double lod, LodRange range = {});
+Result texel_fetch_volume(const Image &image, View view, std::int32_t x,
+                          std::int32_t y, std::int32_t z, std::int32_t lod);
+std::array<std::uint32_t,3> texture_volume_size(const Image &image, View view, std::int32_t lod);
 // Six square layer planes in a Cube view, face order +X,-X,+Y,-Y,+Z,-Z.
 // Finite nonzero binary32 direction; preferred Z>Y>X major ties. Bilinear
 // crosses face edges; a corner tap averages all three incident face corners.

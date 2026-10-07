@@ -666,7 +666,7 @@ int profile_checks(const char *rgen, const char *rmiss, int bad_count, char **ba
 }
 
 int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limit,
-        bool inject_mismatch, bool mips = false, bool reject_linear = false) {
+        bool inject_mismatch, bool mips = false, bool mip_linear = false) {
   Experiment experiment;
   experiment.initialize();
   experiment.empty_tlas();
@@ -676,10 +676,16 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
     uv[18] = {std::numeric_limits<float>::max(), -std::numeric_limits<float>::max()};
     uv[19] = {-8388608.f, 16777216.f};
   }
-  const std::array<float, 32> lods{-100, 0, 0.49f, 0.5f, std::nextafter(0.5f, 1.f),
+  const std::array<float, 32> nearest_lods{-100, 0, 0.49f, 0.5f, std::nextafter(0.5f, 1.f),
       0.51f, 1, 1.49f, 1.5f, std::nextafter(1.5f, 2.f), 1.51f, 2, 2.5f, 3, 10,
       std::numeric_limits<float>::max(), 4,4.5f,5,6,7,8,9,10,11,12,13,13.49f,13.5f,
       std::nextafter(13.5f,14.f),13.51f,14};
+  const std::array<float, 32> linear_lods{-100, -0.f, 0.25f, 0.5f, 0.75f,
+      std::nextafter(1.f,0.f), 1, std::nextafter(1.f,2.f), 1.25f, 1.5f, 1.75f,
+      std::nextafter(2.f,1.f), 2, std::nextafter(2.f,3.f), 2.5f,
+      std::numeric_limits<float>::max(), 3,3.5f,4,4.5f,5,6,7,8,9,10,11,12,13,
+      13.25f,13.75f,14};
+  const auto &lods = mip_linear ? linear_lods : nearest_lods;
   std::vector<std::array<float, 4>> mip_inputs;
   for (unsigned i = 0; i < uv.size(); ++i)
     mip_inputs.push_back({uv[i][0], uv[i][1], lods[i % lods.size()], 0});
@@ -699,7 +705,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   experiment.submit();
   std::ofstream csv(csv_path);
   if (!csv) throw std::runtime_error("cannot open numeric result CSV");
-  csv << "case,path,width,height,format,address_u,address_v,filter,request,u,v,input_lod,view_base,view_count,selected_mip,channel,reference,gpu,abs_error\n";
+  csv << "case,path,width,height,format,address_u,address_v,filter,request,u,v,input_lod,view_base,view_count,selected_mip,mip_upper,mip_weight,mip_filter,channel,reference,gpu,abs_error\n";
   csv << std::setprecision(10);
   unsigned cases = 0;
   std::uint64_t samples = 0, components = 0, mismatches = 0, markers_failed = 0, buffer_failed = 0;
@@ -756,8 +762,8 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
         for (auto v_mode : {AddressMode::Repeat, AddressMode::MirroredRepeat, AddressMode::ClampToEdge})
           for (auto filter : {Filter::Nearest, Filter::Bilinear}) {
             if (cases == limit) goto finished;
-            const Sampling sampling{u_mode, v_mode, filter};
-            auto sampler = experiment.sampler(sampling, config.range, reject_linear || (mips && view.level_count == 1) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
+            const Sampling sampling{u_mode, v_mode, filter, mip_linear ? MipFilter::Linear : MipFilter::Nearest};
+            auto sampler = experiment.sampler(sampling, config.range, mip_linear || (mips && view.level_count == 1) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
             experiment.descriptors(texture, sampler, carrier, inputs, direct, output_address, uv.size(), mips ? 16 : 8);
             auto *actual = static_cast<float *>(direct.map);
             auto *indirect_values = static_cast<float *>(indirect.map);
@@ -792,14 +798,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
             visibility.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
             vkCmdPipelineBarrier(experiment.command, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
                                  VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &visibility, 0, nullptr, 0, nullptr);
-            try { experiment.submit(); }
-            catch (const std::runtime_error &error) {
-              if (!reject_linear || std::string(error.what()) != "queue submit: VkResult=-4") throw;
-              loaded_libraries();
-              std::cout << "REJECT mip_linear=1 errors=0" << std::endl;
-              return 0;
-            }
-            if (reject_linear) throw std::runtime_error("multi-mip linear sampler silently accepted");
+            experiment.submit();
             if (std::memcmp(actual, indirect_values, uv.size() * 32)) ++buffer_failed;
             if (inject_mismatch && cases == 0) actual[0] = 0.75f;
             for (unsigned path = 0; path < 2; ++path) {
@@ -828,6 +827,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                     << ',' << static_cast<int>(u_mode) << ',' << static_cast<int>(v_mode)
                     << ',' << static_cast<int>(filter) << ',' << i << ',' << uv[i][0] << ',' << uv[i][1]
                     << ',' << (mips ? mip_inputs[i][2] : 0) << ',' << view.base_mip << ',' << view.level_count << ',' << reference.mip
+                    << ',' << reference.mip_upper << ',' << reference.mip_weight << ',' << static_cast<int>(sampling.mip_filter)
                     << ',' << c << ',' << reference.rgba[c] << ',' << value << ',' << error << '\n';
                 ++components;
               }
@@ -886,7 +886,7 @@ void record_upload(Experiment &experiment, const MultiResource &resource, bool i
 }
 
 int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
-              unsigned limit, bool inject_mismatch) {
+              unsigned limit, bool inject_mismatch, bool mip_linear) {
   Experiment experiment;
   experiment.initialize();
   experiment.empty_tlas();
@@ -911,7 +911,7 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
   experiment.submit();
   std::ofstream csv(csv_path);
   if (!csv) throw std::runtime_error("cannot open multi-binding CSV");
-  csv << "case,pair,phase,path,output,resource_a,resource_b,view_a_base,view_b_base,mip_a,mip_b,request,u,v,lod_a,lod_b,address_a_u,address_a_v,filter_a,min_lod_a,max_lod_a,address_b_u,address_b_v,filter_b,min_lod_b,max_lod_b,channel,reference,gpu,abs_error\n";
+  csv << "case,pair,phase,path,output,resource_a,resource_b,view_a_base,view_b_base,mip_a,mip_b,mip_a_upper,mip_b_upper,mip_weight_a,mip_weight_b,request,u,v,lod_a,lod_b,address_a_u,address_a_v,filter_a,mip_filter_a,min_lod_a,max_lod_a,address_b_u,address_b_v,filter_b,mip_filter_b,min_lod_b,max_lod_b,channel,reference,gpu,abs_error\n";
   csv << std::setprecision(10);
   unsigned cases = 0;
   std::array<unsigned, 8> phase_counts{};
@@ -948,11 +948,11 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
     for (unsigned u = 0; u < 3; ++u)
       for (unsigned v = 0; v < 3; ++v)
         for (unsigned filter = 0; filter < 2; ++filter) {
-          const Sampling sampling_a{static_cast<AddressMode>(u),static_cast<AddressMode>(v),static_cast<Filter>(filter)};
-          const Sampling sampling_b{static_cast<AddressMode>((v + 1) % 3),static_cast<AddressMode>((u + 2) % 3),static_cast<Filter>(1 - filter)};
+          const Sampling sampling_a{static_cast<AddressMode>(u),static_cast<AddressMode>(v),static_cast<Filter>(filter),mip_linear ? MipFilter::Linear : MipFilter::Nearest};
+          const Sampling sampling_b{static_cast<AddressMode>((v + 1) % 3),static_cast<AddressMode>((u + 2) % 3),static_cast<Filter>(1 - filter),mip_linear && filter == 1 ? MipFilter::Linear : MipFilter::Nearest};
           const LodRange range_a{0,1000}, range_b{0.75,1.75};
-          const auto sampler_a = experiment.sampler(sampling_a,range_a);
-          const auto sampler_b = experiment.sampler(sampling_b,range_b);
+          const auto sampler_a = experiment.sampler(sampling_a,range_a,sampling_a.mip_filter == MipFilter::Linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
+          const auto sampler_b = experiment.sampler(sampling_b,range_b,sampling_b.mip_filter == MipFilter::Linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
           for (unsigned phase = 0; phase < phases.size(); ++phase) {
             if (cases == limit) goto multi_finished;
             const bool swap_images = phase == 1 || phase == 2;
@@ -1024,11 +1024,12 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
                     csv << cases << ',' << pair << ',' << phases[phase] << ',' << (path ? "bda" : "ssbo")
                         << ',' << output << ',' << (swap_images ? 1 : 0) << ',' << (swap_images ? 0 : 1)
                         << ',' << a.view.base_mip << ',' << b.view.base_mip << ',' << ra.mip << ',' << rb.mip
+                        << ',' << ra.mip_upper << ',' << rb.mip_upper << ',' << ra.mip_weight << ',' << rb.mip_weight
                         << ',' << i << ',' << request[0] << ',' << request[1] << ',' << request[2] << ',' << request[3]
                         << ',' << static_cast<int>(state_a.address_u) << ',' << static_cast<int>(state_a.address_v)
-                        << ',' << static_cast<int>(state_a.filter) << ',' << clamp_a.min << ',' << clamp_a.max
+                        << ',' << static_cast<int>(state_a.filter) << ',' << static_cast<int>(state_a.mip_filter) << ',' << clamp_a.min << ',' << clamp_a.max
                         << ',' << static_cast<int>(state_b.address_u) << ',' << static_cast<int>(state_b.address_v)
-                        << ',' << static_cast<int>(state_b.filter) << ',' << clamp_b.min << ',' << clamp_b.max
+                        << ',' << static_cast<int>(state_b.filter) << ',' << static_cast<int>(state_b.mip_filter) << ',' << clamp_b.min << ',' << clamp_b.max
                         << ',' << c << ',' << expected[output][c] << ',' << value << ',' << error << '\n';
                     ++components;
                   }
@@ -1063,12 +1064,12 @@ int main(int argc, char **argv) {
   try {
     if (argc > 6 && std::string(argv[6]) == "checks")
       return profile_checks(argv[1], argv[2], argc - 7, argv + 7);
-    if (argc == 7 && std::string(argv[6]) == "multi")
-      return run_multi(argv[1],argv[2],argv[3],std::stoul(argv[4]),std::string(argv[5]) == "1");
-    const bool reject_linear = argc == 7 && std::string(argv[6]) == "reject-mip-linear";
-    const bool mips = argc == 7 && (std::string(argv[6]) == "mips" || reject_linear);
+    if (argc == 7 && (std::string(argv[6]) == "multi" || std::string(argv[6]) == "multi-linear"))
+      return run_multi(argv[1],argv[2],argv[3],std::stoul(argv[4]),std::string(argv[5]) == "1",std::string(argv[6]) == "multi-linear");
+    const bool mip_linear = argc == 7 && std::string(argv[6]) == "mip-linear";
+    const bool mips = argc == 7 && (std::string(argv[6]) == "mips" || mip_linear);
     if (argc != 6 && !mips) throw std::runtime_error("expected rgen.spv rmiss.spv numeric.csv case-limit inject-mismatch");
-    return run(argv[1], argv[2], argv[3], std::stoul(argv[4]), std::string(argv[5]) == "1", mips, reject_linear);
+    return run(argv[1], argv[2], argv[3], std::stoul(argv[4]), std::string(argv[5]) == "1", mips, mip_linear);
   } catch (const std::exception &error) {
     std::cerr << "FAIL " << error.what() << std::endl;
     return 1;

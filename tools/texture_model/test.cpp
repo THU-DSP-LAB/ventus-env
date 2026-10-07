@@ -294,6 +294,100 @@ void lod_and_views() {
                sample_level(partial, 0, linear, -0.1, 0.1).rgba, "partial chain");
 }
 
+// Independent mip oracle: enumerate all view levels with a tent kernel in
+// level space, then reuse the independent spatial oracle (not sample_level).
+Color mip_linear_oracle(const Image &image, View view, Sampling sampling,
+                        double u, double v, double lod, LodRange range) {
+  long double position = lod;
+  if (position < range.min) position = range.min;
+  if (position > range.max) position = range.max;
+  if (position < 0) position = 0;
+  if (position > view.level_count - 1) position = view.level_count - 1;
+  std::array<long double, 4> total{};
+  for (unsigned level = 0; level < view.level_count; ++level) {
+    const auto weight = std::max(0.0L, 1 - std::abs(position - level));
+    if (!weight) continue;
+    const auto color = oracle(image, view.base_mip + level, sampling, u, v);
+    for (unsigned c = 0; c < 4; ++c) total[c] += weight * color[c];
+  }
+  return {static_cast<float>(total[0]), static_cast<float>(total[1]),
+          static_cast<float>(total[2]), static_cast<float>(total[3])};
+}
+
+void mip_linear() {
+  auto solid = mip_image();
+  Sampling state{AddressMode::Repeat, AddressMode::ClampToEdge,
+                 Filter::Nearest, MipFilter::Linear};
+  expect_color(sample_lod(solid, {0, 3}, state, 0.3, 0.7, 0.25).rgba,
+               {0.75, 0.25, 0, 1}, "quarter LOD blend");
+  expect_color(sample_lod(solid, {1, 2}, state, 0.3, 0.7, 0.5).rgba,
+               {0, 0.5, 0.5, 1}, "relative view half blend");
+  expect_color(sample_lod(solid, {0, 3}, state, 0.3, 0.7, 0, {0.75, 1.75}).rgba,
+               {0.25, 0.75, 0, 1}, "sampler clamp before mip weights");
+  expect_color(sample_lod(solid, {0, 3}, state, 0.3, 0.7, 100, {0, 0.5}).rgba,
+               {0.5, 0.5, 0, 1}, "upper clamp before mip weights");
+  put(solid, solid.levels[1], 0, 0, {255, 0, 0, 255});
+  put(solid, solid.levels[1], 1, 0, {0, 0, 255, 255});
+  state.filter = Filter::Bilinear;
+  expect_color(sample_lod(solid, {1, 2}, state, 0.5, 0.5, 0.5).rgba,
+               {0.25, 0, 0.75, 1}, "trilinear combines level-specific bilinear");
+  for (const auto &level : solid.levels)
+    for (unsigned y = 0; y < level.height; ++y)
+      for (unsigned x = 0; x < level.width; ++x)
+        put(solid, level, x, y, {31, 127, 193, 211});
+  for (auto filter : {Filter::Nearest, Filter::Bilinear}) {
+    state.filter = filter;
+    const auto expected = sample_level(solid, 0, state, 0.3, 0.7).rgba;
+    for (double lod : {0.25, 0.5, 0.75, 1.25, 1.75})
+      expect_color(sample_lod(solid, {0, 3}, state, 0.3, 0.7, lod).rgba,
+                   expected, "identical mip colors retain exact single-level result", 0);
+  }
+  std::mt19937 generator(0x4d4950);
+  std::uniform_real_distribution<double> coordinate(-2.5, 2.5);
+  const std::array<double, 13> lods{-100, -0.0, std::nextafter(1.0, 0.0), 1,
+      std::nextafter(1.0, 2.0), 0.25, 0.5, 0.75, 1.25, 1.5, 1.75, 2, 1e300};
+  for (Format format : {Format::RGBA8_UNORM, Format::BGRA8_UNORM}) {
+    Image image{format, {}, {}};
+    for (unsigned m = 0, w = 7, h = 5; m < 3; ++m, w = std::max(1U, w/2), h = std::max(1U, h/2)) {
+      auto part = make_image(w, h, format, 8, 16);
+      // Distinct level content including alpha, with independent padding.
+      for (unsigned y = 0; y < h; ++y)
+        for (unsigned x = 0; x < w; ++x)
+          put(part, part.levels[0], x, y, {static_cast<uint8_t>(m*59+x*17),
+              static_cast<uint8_t>(m*43+y*29), static_cast<uint8_t>(m*71+x+y),
+              static_cast<uint8_t>(m*97+x*13+y*7)});
+      auto level = part.levels[0];
+      level.offset += image.data.size();
+      image.data.insert(image.data.end(), part.data.begin(), part.data.end());
+      image.levels.push_back(level);
+    }
+    for (auto u_mode : {AddressMode::Repeat, AddressMode::MirroredRepeat, AddressMode::ClampToEdge})
+      for (auto v_mode : {AddressMode::Repeat, AddressMode::MirroredRepeat, AddressMode::ClampToEdge})
+        for (auto filter : {Filter::Nearest, Filter::Bilinear})
+          for (View view : {View{0,3}, View{1,2}, View{1,1}})
+            for (LodRange range : {LodRange{0,1000}, LodRange{0.75,1.75}, LodRange{10,20}})
+              for (double lod : lods) {
+                const Sampling sampling{u_mode,v_mode,filter,MipFilter::Linear};
+                const auto u = coordinate(generator), v = coordinate(generator);
+                const auto result = sample_lod(image,view,sampling,u,v,lod,range);
+                expect_color(result.rgba,mip_linear_oracle(image,view,sampling,u,v,lod,range),
+                             "independent mip/spatial oracle");
+                double sum = 0;
+                for (const auto &tap : result.taps) {
+                  sum += tap.weight;
+                  expect(tap.mip >= view.base_mip && tap.mip < view.base_mip + view.level_count,
+                         "tap remains inside view");
+                }
+                expect(std::abs(sum - 1) < 1e-14, "combined mip/tap weights sum to one");
+                expect(result.mip_upper >= result.mip && result.mip_upper - result.mip <= 1,
+                       "adjacent trace levels");
+                if (result.mip_weight == 0)
+                  expect_color(result.rgba,sample_level(image,result.mip,sampling,u,v).rgba,
+                               "integer/clamped LOD retains exact single-level result",0);
+              }
+  }
+}
+
 void invalid_inputs() {
   const auto image = four_colors();
   for (double invalid : {std::numeric_limits<double>::infinity(),
@@ -341,17 +435,20 @@ void invalid_inputs() {
            "unknown V address mode");
   rejected([&] { sample_level(image, 0, {AddressMode::Repeat, AddressMode::Repeat,
                                         static_cast<Filter>(99)}, 0, 0); }, "unknown filter");
+  rejected([&] { sample_lod(image, {0,1}, {AddressMode::Repeat, AddressMode::Repeat,
+                 Filter::Nearest, static_cast<MipFilter>(99)}, 0, 0, 0); }, "unknown mip filter");
 }
 
 } // namespace
 
 int main() {
-  const std::array<std::pair<const char *, void (*)()>, 6> suites{{
+  const std::array<std::pair<const char *, void (*)()>, 7> suites{{
       {"hand-calculated filtering and seams", hand_calculated},
       {"negative UV, boundaries and huge finite UV", negative_and_boundary_coordinates},
       {"all 256 UNORM values in both formats", all_unorm_values},
       {"3600 independent-oracle samples and properties", randomized_oracle},
       {"explicit LOD, view ranges and multiple images", lod_and_views},
+      {"mip-linear/trilinear independent oracle and trace", mip_linear},
       {"invalid inputs and storage arithmetic", invalid_inputs}}};
   try {
     for (const auto &suite : suites) {

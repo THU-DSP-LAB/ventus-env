@@ -53,7 +53,8 @@ def run(args, compiler: str) -> int:
     elf_dir = output / "elf"
     elf_dir.mkdir()
     linear_check = args.action == "gpu-mip-linear-check"
-    multi = args.action == "gpu-multi"
+    multi_linear = args.action == "gpu-multi-linear"
+    multi = args.action in ("gpu-multi", "gpu-multi-linear")
     mips = args.action == "gpu-mips" or linear_check
     rgen_name = "sample_multi.rgen" if multi else "sample_mip.rgen" if mips else "sample.rgen"
     for stage in ("rgen", "rmiss"):
@@ -91,9 +92,9 @@ def run(args, compiler: str) -> int:
     command = [str(executable), str(output / "sample.rgen.spv"), str(output / "sample.rmiss.spv"),
                str(output / "numeric.csv"), str(args.case_limit), str(int(args.inject_mismatch))]
     if mips:
-        command.append("reject-mip-linear" if linear_check else "mips")
+        command.append("mip-linear" if linear_check else "mips")
     if multi:
-        command.append("multi")
+        command.append("multi-linear" if multi_linear else "multi")
     checks_only = args.action == "gpu-checks"
     bad_paths = []
     if checks_only:
@@ -128,7 +129,7 @@ def run(args, compiler: str) -> int:
             timeout = True
             returncode = 124
     text = (output / "run.log").read_text(errors="replace")
-    match = re.search(r"^" + ("REJECT" if linear_check else "CHECKS" if checks_only else "SUMMARY") + r" (.+)$", text, re.MULTILINE)
+    match = re.search(r"^" + ("CHECKS" if checks_only else "SUMMARY") + r" (.+)$", text, re.MULTILINE)
     summary = dict(item.split("=", 1) for item in match[1].split()) if match else {}
     libraries = [Path(line[8:]).resolve() for line in text.splitlines() if line.startswith("LIBRARY ")]
     expected_libraries = {paths[name].resolve() for name in ("mesa", "driver", "spike")}
@@ -145,10 +146,7 @@ def run(args, compiler: str) -> int:
         errors.append("loaded ICD/driver/Spike libraries do not match the selected local builds")
     if not checked_frontier or not elf_paths:
         errors.append("checked, retained V5 ELF evidence is missing")
-    if linear_check:
-        if summary.get("mip_linear") != "1" or summary.get("errors") != "0" or "unsupported RT 2D mip sampler binding=2" not in text:
-            errors.append("mip-linear rejection evidence missing")
-    elif checks_only:
+    if checks_only:
         if summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "13" or summary.get("errors") != "0" or summary.get("images") != "8" or summary.get("views") != "10":
             errors.append("profile rejection checks incomplete")
     else:
@@ -174,7 +172,7 @@ def run(args, compiler: str) -> int:
         errors.append(f"comparison process returned {returncode}")
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
-        "profile": "two fixed combined bindings (set0:2,13), simultaneous samples and mix, view/sampler swaps and updates" if multi else "multi-mip linear sampler rejected at queue submission" if linear_check else "API/compiler rejection checks (no execution)" if checks_only else ("Vulkan V5 megakernel to Spike; 2D mip views, dynamic explicit LOD, mip-nearest" if mips else "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag"),
+        "profile": ("two fixed combined bindings (set0:2,13), simultaneous samples and mix, view/sampler swaps and updates; " + ("linear/nearest and linear/linear mip filters" if multi_linear else "mip-nearest")) if multi else "API/compiler rejection checks (no execution)" if checks_only else ("Vulkan V5 megakernel to Spike; 2D mip views, dynamic explicit LOD, " + ("mip-linear" if linear_check else "mip-nearest") if mips else "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag"),
         "readback": "direct SSBO and GLSL buffer-reference stores to coherent host-visible buffers",
         "summary": summary, "errors": errors, "timeout": timeout,
         "injected_mismatch": args.inject_mismatch, "checked_frontier": checked_frontier,

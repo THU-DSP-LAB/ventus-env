@@ -11,6 +11,7 @@ namespace ventus::texture {
 enum class Format { RGBA8_UNORM, BGRA8_UNORM };
 enum class AddressMode { Repeat, MirroredRepeat, ClampToEdge };
 enum class Filter { Nearest, Bilinear };
+enum class MipFilter { Nearest, Linear };
 using Color = std::array<float, 4>;
 
 struct Level {
@@ -32,6 +33,7 @@ struct Sampling {
   AddressMode address_v = AddressMode::Repeat;
   // A single filter: the first profile requires equal min/mag filters.
   Filter filter = Filter::Nearest;
+  MipFilter mip_filter = MipFilter::Nearest;
 };
 
 struct View {
@@ -54,11 +56,15 @@ struct Tap {
   std::uint64_t byte_offset;
   double weight;
   Color color;
+  std::uint32_t mip = 0;
 };
 
 struct Result {
   Color rgba{};
   std::uint32_t mip = 0;
+  // Absolute image levels, with mip naming the first level for compatibility.
+  std::uint32_t mip_upper = 0;
+  double mip_weight = 0;
   double input_u = 0;
   double input_v = 0;
   double input_lod = 0;
@@ -71,7 +77,8 @@ void validate(const Image &image);
 Result sample_level(const Image &image, std::uint32_t mip,
                     const Sampling &sampling, double u, double v);
 // Explicit LOD is relative to the view. Mip-nearest uses Vulkan's preferred
-// tie rule (an exact half chooses the lower mip); no LOD bias is modeled.
+// tie rule (an exact half chooses the lower mip). Mip-linear blends adjacent
+// levels after sampler/view clamps; no LOD bias is modeled.
 Result sample_lod(const Image &image, View view, const Sampling &sampling,
                   double u, double v, double lod, LodRange range = {});
 

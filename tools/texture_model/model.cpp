@@ -74,6 +74,7 @@ Result sample_validated(const Image &image, std::uint32_t mip,
   const double y = reduce(v, sampling.address_v) * level.height;
   Result result;
   result.mip = mip;
+  result.mip_upper = mip;
   result.input_u = u;
   result.input_v = v;
   if (sampling.filter == Filter::Nearest) {
@@ -81,6 +82,7 @@ Result sample_validated(const Image &image, std::uint32_t mip,
                               static_cast<std::int64_t>(std::floor(x)),
                               static_cast<std::int64_t>(std::floor(y)), 1));
     result.rgba = result.taps[0].color;
+    result.taps[0].mip = mip;
     return result;
   }
   const double sx = x - 0.5;
@@ -95,6 +97,7 @@ Result sample_validated(const Image &image, std::uint32_t mip,
                  read(image, level, sampling, ix + 1, iy, a * (1 - b)),
                  read(image, level, sampling, ix, iy + 1, (1 - a) * b),
                  read(image, level, sampling, ix + 1, iy + 1, a * b)};
+  for (auto &tap : result.taps) tap.mip = mip;
   for (unsigned c = 0; c < 4; ++c) {
     double value = 0;
     for (const auto &tap : result.taps)
@@ -156,8 +159,27 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
   // Express the decision without addition that could round nextafter(0.5, 1)
   // back onto the half boundary.
   const double low = std::floor(relative);
-  const auto selected = static_cast<std::uint32_t>(low + (relative - low > 0.5));
+  require(sampling.mip_filter == MipFilter::Nearest ||
+              sampling.mip_filter == MipFilter::Linear, "unsupported mip filter");
+  const bool linear = sampling.mip_filter == MipFilter::Linear;
+  const auto selected = static_cast<std::uint32_t>(low + (!linear && relative - low > 0.5));
   Result result = sample_validated(image, view.base_mip + selected, sampling, u, v);
+  if (linear) {
+    result.mip_upper = view.base_mip + std::min(selected + 1, view.level_count - 1);
+    result.mip_weight = relative - low;
+    // Exact integer/end LODs retain the first sample without needless reads.
+    if (result.mip_weight > 0 && result.mip_upper != result.mip) {
+      auto upper = sample_validated(image, result.mip_upper, sampling, u, v);
+      for (unsigned c = 0; c < 4; ++c)
+        result.rgba[c] = static_cast<float>((1 - result.mip_weight) * result.rgba[c] +
+                                           result.mip_weight * upper.rgba[c]);
+      for (auto &tap : result.taps) tap.weight *= 1 - result.mip_weight;
+      for (auto &tap : upper.taps) {
+        tap.weight *= result.mip_weight;
+        result.taps.push_back(tap);
+      }
+    }
+  }
   result.input_lod = lod;
   result.clamped_lod = relative;
   return result;

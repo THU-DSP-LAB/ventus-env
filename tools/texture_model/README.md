@@ -24,13 +24,13 @@ python3 tools/texture_model.py demo
 | 寻址 | U/V 独立的 repeat、mirrored repeat、clamp-to-edge |
 | Texel 过滤 | nearest 或 bilinear；使用一个 filter，对应 min/mag 相同的 profile |
 | LOD | 显式有限值；sampler 范围限制后映射至 view 的可访问 mip |
-| Mip 过滤 | mip nearest，精确半整数选择较低一级 |
-| Trace | mip、输入 UV/LOD、受限后的相对 LOD、邻点坐标、偏移、权重和颜色 |
+| Mip 过滤 | nearest（精确半整数选择较低一级）或 linear（相邻两级混合）；与级内过滤独立 |
+| Trace | 下/上 mip、跨级权重、输入 UV/LOD、受限后的相对 LOD；每个 tap 的绝对 mip、坐标、偏移、合并权重和颜色 |
 | 多资源 | 不依赖全局采样状态，可交替采样不同 Image 和 Sampling 对象 |
 
 `sample_level` 在指定的 image 绝对 mip 内采样。`sample_lod` 的 LOD 则相对 View；例如 `{base_mip=1, level_count=2}` 的 LOD 0 访问 image mip 1。每个 mip 的尺寸按 `max(1, previous/2)` 递减；可不提供后续级别，但不能在 1×1 之后继续追加重复 mip。
 
-当前没有 LOD bias、mip linear、导数、sRGB、压缩、比较过滤、layer array 或 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
+当前没有 LOD bias、导数、sRGB、压缩、比较过滤、layer array 或 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
 
 ## 计算规则与数值边界
 
@@ -39,6 +39,7 @@ python3 tools/texture_model.py demo
 - Repeat 的整数周期为 W；mirrored repeat 为 2W，后半周期折返；clamp 将邻点限制在 `[0,W-1]`。
 - 对周期性 UV 先做有限范围归约，clamp 坐标先截到 `[0,1]`，避免将巨大有限值直接转换成整数。Trace 的 raw 坐标是这次归约后、整数寻址前的坐标，原始 UV 单独保留。
 - Mip nearest 采用 Vulkan 文本中的 preferred 选择：精确半整数向较低级；alternative 的半整数向较高级在规范中也有允许，但不是本模型的选择。使用分数比较实现，避免 `LOD+0.5` 的浮点舍入吞掉半整数附近的差别。
+- Mip linear 先将 LOD 限制到 sampler、view 范围，令 `l0=floor(LOD)`、`l1=min(l0+1,viewCount-1)`、`t=LOD-l0`。在两级分别按其尺寸进行 nearest/bilinear 采样，再返回 `(1-t)*C0+t*C1`；级内 bilinear 加跨级 linear 即 trilinear。整数 LOD、末级和单级 view 不引入其他级的颜色。`sample_level` 直接指定一个 mip，不使用 mip filter。
 - 不模拟实际 TMU 的固定点权重或硬件时序。UNORM 解码和输出为 float；坐标与权重计算、插值累加为 double。这是明确的数学参考实现，不承诺与未来 TMU bit-identical。
 
 NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚举、无效 mip/view 和不足的 backing bytes，均抛出 `std::invalid_argument`。这是本地模型的输入诊断，不规定 Vulkan API 的返回码。巨大有限 UV 按已有 double 值处理；它们在输入类型中已经丢失的小数信息无法恢复。
@@ -47,7 +48,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 ## 验证
 
-测试包含六组：
+测试包含七组，普通和 ASan/UBSan 模式目前均通过 98,976 项检查：
 
 1. 手算四点平均、非对称插值、repeat 接缝和 mirror/clamp 边缘。
 2. 负坐标、texel 边界两侧、精确边界、负零和巨大有限坐标。
@@ -55,6 +56,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 4. 3,600 个独立对照样例：五种尺寸、两种格式、U/V 九种寻址组合、两种过滤、各 20 个坐标；包含 1×1、1×N、N×1、非二次幂和 padding。同时验证周期、镜像对称与 trace 权重。
 5. 每级不同颜色、view base mip、LOD clamp、半整数及其相邻浮点值、非零 mip 上的 bilinear，以及多个 Image 交替访问。
 6. 非法输入、截断数据、存储运算溢出风险及不合法 mip 链。
+7. Mip linear 手算与独立跨级 oracle；两种格式、全部寻址/级内过滤组合、view/clamp、小数/整数相邻 LOD、非二次幂/padding，检查跨级 tap 权重和整数 LOD 的精确退化。
 
 独立对照以 long double 在虚拟延伸图像上枚举 nearest 区间或 tent kernel，逐个真实 texel 累积贡献；不调用模型的坐标归约、四点选择或寻址函数。精确样例和 UNORM 解码做相应精确比较；过滤测试的每分量绝对误差上限为 `2e-7`，适用于该模型的 float 输出，不能直接当成未来 TMU 精度要求。
 
@@ -69,6 +71,7 @@ python3 tools/texture_model.py gpu
 python3 tools/texture_model.py gpu --case-limit 1
 python3 tools/texture_model.py gpu-mips
 python3 tools/texture_model.py gpu-multi
+python3 tools/texture_model.py gpu-multi-linear
 python3 tools/texture_model.py gpu-checks
 python3 tools/texture_model.py gpu-mip-linear-check
 python3 tools/texture_model.py gpu --case-limit 1 --inject-mismatch
@@ -116,9 +119,9 @@ dyadic UV 能在本组尺寸下精确表示相关坐标计算，减少 nearest �
 
 当前 Mesa 的 image 私有存储为每级紧密行、顺序拼接，全部 mip 计入内存需求；view 保存相对可见范围。每次 dispatch 上传一个 view-relative mip 表，元素记录设备地址、宽高与 row pitch；它由已有 dispatch transient allocation 生命周期管理。软件 descriptor 现为 80 字节，mip 表元素为 24 字节，producer/consumer 有 layout static assertions。这是 Mesa 软件实现编码，**不是 TMU/Spike 纹理指令 ABI**；没有新增 ISA。
 
-`gpu-checks` 覆盖 13 项 sampler、8 项 image、10 项 view 和 7 类 shader 拒绝检查。Sampler API 不支持的状态返回 `VK_ERROR_FEATURE_NOT_PRESENT`；当前不支持的 shader 编译经 pipeline 返回初始化失败；多级 mipmap-linear 与动态 LOD 的不支持组合在提交时拒绝，当前实验驱动返回 `VK_ERROR_DEVICE_LOST`，由 `gpu-mip-linear-check` 单独验证。合法而无效的 compareOp/maxAnisotropy 默认字段不会被一概拒绝。
+`gpu-checks` 覆盖 13 项 sampler、8 项 image、10 项 view 和 7 类 shader 拒绝检查。Sampler API 不支持的状态返回 `VK_ERROR_FEATURE_NOT_PRESENT`；当前不支持的 shader 编译经 pipeline 返回初始化失败。合法而无效的 compareOp/maxAnisotropy 默认字段不会被一概拒绝。2026-10-07 F01 开放了当前 profile 的多级 mipmap-linear；`gpu-mip-linear-check` 已改为正向数值门禁，见后面的 F01 节。
 
-兼容例外：单级 view 的 mipmap-linear 没有跨级效果；另外，已证明所有采样均为 LOD0 的普通 RT pipeline、sampler minLod=0 时，多级 mipmap-linear 仍只读取 view 的第 0 级。原 any-hit workload 属于后者。此例外保守地不开放给独立 global callback/resume ELF profile。
+历史兼容例外：F01 之前，单级 view 和已证明只用 LOD0/minLod=0 的普通 RT pipeline 可使用 mipmap-linear；其他多级组合会被拒绝。现在已实现通用的跨级混合，不再依靠这个 LOD0 例外。
 
 最终运行证据：
 
@@ -133,7 +136,7 @@ dyadic UV 能在本组尺寸下精确表示相关坐标计算，减少 nearest �
 
 两组数值门禁的最大绝对误差均为 `5.960464478e-8`。Mesa `vt_nir_to_llvm_phi_test` 与 host 模型 47,885 项检查（普通/ASan/UBSan）通过。软件执行证据对应 Mesa 本地提交 `7f5b850`。
 
-仍要求 min/mag 相同、零 bias、有限 UV/LOD、二维单 layer/sample、RGBA8/BGRA8 UNORM 和 identity swizzle。不支持跨 mip 线性混合、导数选级、独立 sampler、数组/非一致 descriptor 索引、comparison、anisotropy、offset、projector、gather、texelFetch、sRGB 或压缩。host 模型的 NaN/Inf 异常诊断不是 GPU 运行时异常能力。不同 Image 在同一 binding 顺序替换已验证；多 binding 的后续专项验证见下一节。
+仍要求 min/mag 相同、零 bias、有限 UV/LOD、二维单 layer/sample、RGBA8/BGRA8 UNORM 和 identity swizzle。不支持导数选级、独立 sampler、数组/非一致 descriptor 索引、comparison、anisotropy、offset、projector、gather、texelFetch、sRGB 或压缩。host 模型的 NaN/Inf 异常诊断不是 GPU 运行时异常能力。不同 Image 在同一 binding 顺序替换已验证；多 binding 的专项验证见下一节。
 
 上传和执行顺序的证据限定在当前 coherent backing、串行提交的 Spike 实验路径；不证明一般 Vulkan barrier/layout、跨队列或缓存一致性。模型尚未成为 Spike 的纹理指令处理程序，也未接入 RTL。
 
@@ -166,6 +169,33 @@ python3 spike/tests/ventus_zfinx_vf_static.py --spike-build spike/build --spike-
 
 最终单 binding LOD0/mip、38 项范围检查和多级 mip-linear 拒绝检查均通过，分别见 `lod0-regext-final/`、`mip-regext-final/`、`profile-regext-final/`、`mip-linear-regext-final/` 的 manifest；原 any-hit 场景仍保持同一 SHA256，见 `any-hit-regext-final/textured-any-hit-validation.txt`。T0 证据限定为本测试的两个固定 combined bindings，范围不扩展到 descriptor array、独立 image/sampler、动态索引、其他 descriptor set 或 TMU/RTL。
 
+### F01：跨 mip 线性混合（2026-10-07）
+
+模型增加 `Sampling::mip_filter`，默认仍为 nearest。`sample_lod` 的结果保存下/上 mip 和跨级权重；tap 的权重包含级内与跨级两部分。独立 oracle 在所有 view 级别上枚举一维 tent 权重，再结合独立的级内过滤 oracle，避免照抄两级选择代码。
+
+Mesa 本地提交 `cc0f2da` 将 sampler 的 `mipmapMode` 写入原 80 字节 descriptor 的第 76 字节处，替换原 reserved 字段；producer、consumer 和 static assertions 同步更新。`lowerTex` 在 NIR texture instruction 转 LLVM IR 时生成两级访存、级内过滤与跨级浮点混合。继续使用普通 LLVM load、算术和 select，不增加纹理指令，也不更改 image/mip 存储方式。
+
+目前软件 lowering 会计算两次级内采样，再选择/混合结果；nearest 时两次使用同一 mip，末级访问也保持在 view 范围内。这是功能版本，尚未优化额外访存或衡量性能。数学模型不模拟规范所述的固定 mipmapPrecisionBits 量化，GPU 使用 binary32；本轮采用既定绝对误差标准，不据此宣称完整 Vulkan 或硬件精度一致性。
+
+`gpu-mip-linear-check` **现在执行 360 配置的正向数值比较**，不再期待提交失败。它使用不同颜色的 mip、整数及其相邻 binary32 LOD、0.25/0.5/0.75 等权重、15 级链、view/clamp 和上传更新。`gpu-multi-linear` 使用原 432 配置及八阶段，并覆盖 linear/nearest 和 linear/linear 的 mip filter 组合；状态互换与共享 sampler 同样适用。
+
+最终证据均在 `artifacts/texture_model/mip-linear-implementation/`；以下结果来自主目录 Mesa 构建和默认 LLVM 配置：
+
+| 门禁 | 结果 | 子目录 |
+| --- | --- | --- |
+| mip-linear | 360 配置、184,320 分量，零差异 | `final-linear/` |
+| 双 binding linear/mixed | 432 配置、663,552 分量，零差异 | `final-multi-linear/` |
+| 原 LOD0 | 180 配置、92,160 分量，零差异 | `final-lod0/` |
+| 原 mip-nearest | 360 配置、184,320 分量，零差异 | `final-mip-nearest/` |
+| 原双 binding nearest | 432 配置、663,552 分量，零差异 | `final-multi-nearest/` |
+| 原范围检查 | 13 sampler + 8 image + 10 view + 7 shader 全部通过 | `final-profile/` |
+| 两项负向校验 | 各故意破坏一个分量，各报 1 mismatch、返回 1 | `final-linear-negative/`、`final-multi-linear-negative/` |
+| 原 textured any-hit | 160×96，原 SHA256 保持不变 | `final-any-hit/` |
+
+数值 manifest 保存实际加载库、工具与源码哈希、运行环境、ELF 和 CSV 哈希；新功能的最大绝对误差为 `1.192092896e-7`，容差 `1e-6`。主目录 `vt_nir_to_llvm_phi_test` 通过，构建和测试日志也保存在上述目录。负向校验 manifest 的 `FAIL` 表示按预期检测到了故意注入的错误，不能混算成正向通过。原拒绝门禁保留为历史证据。
+
+F01 仍要求 equal min/mag、零 bias、有限 UV/LOD、2D 单 layer/sample、RGBA8/BGRA8 UNORM 和 identity swizzle。下一切片为独立 min/mag（F02），其放大/缩小判定需依据 sampler clamp 后的 LOD，而非选中的 mip 编号。
+
 ## 代码组织与规范来源
 
 - `model.hpp` / `model.cpp`：功能模型，只使用 C++ 标准库。
@@ -175,5 +205,7 @@ python3 spike/tests/ventus_zfinx_vf_static.py --spike-build spike/build --spike-
 - 一级入口 `../texture_model.py`：host 构建与运行。
 
 模型语义依据 [Vulkan Sampling](https://docs.vulkan.org/spec/latest/chapters/textures.html)，特别是 Image Level(s) Selection、Texel Filtering 和 Texel Addressing。2026-10-05 核查了 [官方规范源文件](https://github.com/KhronosGroup/Vulkan-Docs/blob/main/chapters/textures.adoc) 的 preferred/alternative mip nearest 规则。没有将该文档的全部功能纳入本模型。
+
+F01 依据固定版本 [Vulkan-Docs v1.4.328](https://github.com/KhronosGroup/Vulkan-Docs/blob/v1.4.328/chapters/textures.adoc)，使用 Image Level(s) Selection 和 Texel Filtering 两节；本地源文件 SHA256 为 `0ad90c16ec0d2d56dc606dcae62591b9426524c462beab20ab828cfdaa338a93`。
 
 持续学习与跨层实现计划见外层仓库的 [纹理指南](../../../docs/architecture/VentusGPU_TEXTURE_IMPLEMENTATION_GUIDE.md)。

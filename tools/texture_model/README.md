@@ -21,8 +21,9 @@ python3 tools/texture_model.py demo
 | Image | 2D、单 layer、单 sample；完整或部分传统 mip 链 |
 | 格式 | RGBA8/BGRA8 UNORM 或 sRGB；RGBA 浮点结果，sRGB RGB 在过滤前解码，alpha 保持 UNORM |
 | 存储 | 各 mip 独立 offset、width、height、row pitch；允许行填充和非零偏移 |
-| 寻址 | U/V 独立的 repeat、mirrored repeat、clamp-to-edge |
+| 寻址 | U/V 独立的 repeat、mirrored repeat、clamp-to-edge、clamp-to-border |
 | Texel 过滤 | nearest 或 bilinear；独立 minFilter/magFilter，按 sampler clamp 后的 LOD 选择 |
+| Border color | 核心 float transparent black/opaque black/opaque white，逐 tap 替换后过滤；opaque black 采样仅覆盖 identity view |
 | LOD | 显式有限值；sampler 范围限制后映射至 view 的可访问 mip |
 | Mip 过滤 | nearest（精确半整数选择较低一级）或 linear（相邻两级混合）；与级内过滤独立 |
 | View swizzle | IDENTITY、R/G/B/A、ZERO/ONE；解码后通道置换/重复或浮点常量；适用于 sample/fetch |
@@ -52,7 +53,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 ## 验证
 
-测试包含十一组，普通和 ASan/UBSan 模式目前均通过 778,593 项检查：
+测试包含十二组，普通和 ASan/UBSan 模式目前均通过 1,375,170 项检查：
 
 1. 手算四点平均、非对称插值、repeat 接缝和 mirror/clamp 边缘。
 2. 负坐标、texel 边界两侧、精确边界、负零和巨大有限坐标。
@@ -65,6 +66,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 9. 两种 sRGB 通道顺序、全部 256 个编码值、alpha 精确保持 UNORM、过滤前解码的手算样例，以及 sRGB/min-mag/mip/address/view 独立 oracle。
 10. 整数 fetch 的独立颜色/字节地址 oracle、与 nearest 中心读取交叉核对，合法 view 子范围的尺寸/级数、非法整数坐标和 LOD 拒绝。
 11. 四种格式的全部 2,401 种 view component mappings，独立 sample/fetch oracle、常量精确性、trace 与属性查询不变。
+12. 三种 core float border color、角点/边缘手算、七种混合 border 寻址组合、独立延伸图像 oracle、huge finite UV、合法 swizzle 和非法状态。
 
 独立对照以 long double 在虚拟延伸图像上枚举 nearest 区间或 tent kernel，逐个真实 texel 累积贡献；不调用模型的坐标归约、四点选择或寻址函数。精确样例和 UNORM 解码做相应精确比较；过滤测试的每分量绝对误差上限为 `2e-7`，适用于该模型的 float 输出，不能直接当成未来 TMU 精度要求。
 
@@ -83,6 +85,9 @@ python3 tools/texture_model.py gpu-multi-linear
 python3 tools/texture_model.py gpu-min-mag
 python3 tools/texture_model.py gpu-multi-min-mag
 python3 tools/texture_model.py gpu-fetch-query
+python3 tools/texture_model.py gpu-border
+python3 tools/texture_model.py gpu-fetch-border
+python3 tools/texture_model.py gpu-multi-border
 python3 tools/texture_model.py gpu-swizzle
 python3 tools/texture_model.py gpu-fetch-swizzle
 python3 tools/texture_model.py gpu-multi-swizzle
@@ -267,6 +272,20 @@ Vulkan sampled/transfer image 创建、同格式 identity view、mip 内存范�
 
 最终主目录验收：host 普通/sanitizer 各 **11组、778,593检查**。新 sample/fetch 各 **2,880配置、1,474,560颜色分量**，fetch 另有 **1,105,920精确查询分量**；新双binding **432配置、663,552分量**，均零差异，最大误差 `1.192092896e-7`。每组18项格式检查，F01–F04及原门禁、38项范围检查、Mesa translation unit test 均通过。采样/双binding/查询负向校验各检测一个注入错误，原160×96 any-hit图像SHA256不变。证据汇总在 `artifacts/texture_model/view-swizzle-implementation/verification.json`，下一切片为F06。
 
+## F06：Clamp-to-border 与核心浮点 border color
+
+2026-10-07 增加 U/V 独立 `ClampToBorder` 和 `Sampling.border_color`：透明黑 `[0,0,0,0]`、不透明黑 `[0,0,0,1]`、不透明白 `[1,1,1,1]`。每个 tap 按其原整数坐标判断对应 border 轴是否越界，越界用 border color 替代，再参与 bilinear/mip-linear；不是仅凭中心UV决定整次采样是否返回 border。1×1 红色纹理在(0,0) bilinear时，透明黑得到 `[0.25,0,0,0.25]`，不透明黑得到 `[0.25,0,0,1]`，不透明白得到 `[1,0.75,0.75,1]`。
+
+Border UV 先限制到 `[-1,2]`，该范围保留所有边缘混合，远处的所有 tap 都是同一 border color，避免 huge finite UV 乘尺寸后转换整数溢出。模型 border tap 标记 `border=true`，它的 x/y/byte_offset 占位值不代表 image 地址。GPU 先 clamp 待读取的 tap 坐标到有效范围，可能仍执行有效texel的无条件load，但在过滤前选择 border replacement；不生成越界地址。这是功能实现，未做TMU/cache访问数或性能承诺。
+
+Sampler保存 borderColor，私有 descriptor offset76 的低8bits保存 mipmapMode、bits8..15保存 Vulkan borderColor；lowering分别提取，80字节descriptor、24字节mip entry、view mapping和解码表尾不变。这不是冻结的硬件接口，也未改变纹理存储。`vkCreateSampler`允许当前三种float border，主动使用border时拒绝integer/custom/非法color；不使用border时该字段仍可无效于采样计算。
+
+Core规范把 opaque-black sampler 与非identity view 的部分组合定义为未定义；当前模型对该采样组合诊断拒绝，GPU不承诺该组合结果，验收只使用identity/explicit-identity view。透明黑/不透明白验证非identity mappings。未启用 `VK_EXT_border_color_swizzle` 或自定义border扩展。Fetch/query不读取samplerword；对创建成功的sampler，border寻址与颜色均不影响合法整数读取/查询，fetch可以使用其自身合法非identity view。
+
+`gpu-border` 与 `gpu-fetch-border` 各 **6,720配置**，十组image/view × 四种格式 × 七种带border轴的寻址组合 × 三种color × 八种min/mag/mip状态。前者按color限定合法mapping并轮转九种corpus，后者不受opaque-black采样限制。包含边缘、负零、巨大finite binary32 UV、coherent上传和末级局部更新。`gpu-multi-border` 的432配置在两binding间交换border颜色、模式和clamp，覆盖混合sRGB/UNORM、双sRGB及共享image；有opaque-black时使用identity views确保sampler交换后仍合法。范围检查把旧border拒绝项换成integer-border拒绝，并新增非法bordercolor，总计39项。
+
+规范依据继续固定 Vulkan-Docs v1.4.328 的 Border Replacement、Wrapping Operation、Component Swizzle 和 Instruction/Sampler/Image View Validation。Host/GPU误差标准保持 `2e-7`/`1e-6`。
+
 ## 代码组织与规范来源
 
 - `model.hpp` / `model.cpp`：功能模型，只使用 C++ 标准库。
@@ -280,3 +299,8 @@ Vulkan sampled/transfer image 创建、同格式 identity view、mip 内存范�
 F01 依据固定版本 [Vulkan-Docs v1.4.328](https://github.com/KhronosGroup/Vulkan-Docs/blob/v1.4.328/chapters/textures.adoc)，使用 Image Level(s) Selection 和 Texel Filtering 两节；本地源文件 SHA256 为 `0ad90c16ec0d2d56dc606dcae62591b9426524c462beab20ab828cfdaa338a93`。
 
 持续学习与跨层实现计划见外层仓库的 [纹理指南](../../../docs/architecture/VentusGPU_TEXTURE_IMPLEMENTATION_GUIDE.md)。
+
+
+F06在TASK-1321修复LLVM leaf函数入口VGPR栈分配后完成验收。原来通用stackSize为0时跳过prologue，epilogue却仍释放VGPR frame；新增MIR回归独立验证有frame/无frame的入口与返回平衡。LLVM提交 `9d3d82603b4b`，未修改Spike、ISA编码/语义、默认优化或容差；历史调查及精确测试边界见根仓库 `docs/architecture/VentusGPU_TEXTURE_BORDER_CODEGEN_BLOCKER.md`。
+
+修复后重新执行全部18个正向GPU命令、三种负向控制、host普通/sanitizer各12组1,375,170检查及Mesa unit，均符合预期。新sample/fetch各6,720配置、3,440,640颜色分量，fetch另有2,580,480精确查询分量；multi432配置、663,552分量，零差异，最大误差1.192092896e-7。主目录补验sample/multi/39项范围检查/unit/原any-hit通过，原图hash完全一致。LLVM扩展89项检查仍有18项与修复前相同的历史失败，新增栈回归由失败变为通过，没有新增失败；不声明整套LLVM全绿。证据在 `artifacts/texture_model/border-implementation/completed-verification.json`；下一切片F07独立image/sampler。

@@ -445,7 +445,10 @@ public:
                     VkSamplerMipmapMode mode = VK_SAMPLER_MIPMAP_MODE_NEAREST) {
     const VkSamplerAddressMode modes[]{VK_SAMPLER_ADDRESS_MODE_REPEAT,
                                       VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT,
-                                      VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
+                                      VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                                      VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER};
+    const VkBorderColor colors[]{VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+                                 VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE};
     VkSamplerCreateInfo info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     info.magFilter = sampling.mag_filter == Filter::Nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
     info.minFilter = sampling.min_filter == Filter::Nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
@@ -455,6 +458,7 @@ public:
     info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     info.minLod = range.min;
     info.maxLod = range.max;
+    info.borderColor = colors[static_cast<unsigned>(sampling.border_color)];
     VkSampler result;
     check(vkCreateSampler(device, &info, nullptr, &result), "create sampler");
     samplers.push_back(result);
@@ -605,7 +609,8 @@ void sampler_checks(Experiment &experiment, unsigned &count) {
   verify("inactive-defaults", base, true);
   auto changed = base; changed.minFilter = VK_FILTER_CUBIC_EXT; verify("unsupported-min-filter", changed, false);
   changed = base; changed.magFilter = changed.minFilter = VK_FILTER_CUBIC_EXT; verify("cubic", changed, false);
-  changed = base; changed.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; verify("border-u", changed, false);
+  changed = base; changed.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; changed.borderColor=VK_BORDER_COLOR_INT_OPAQUE_BLACK; verify("integer-border-u", changed, false);
+  changed = base; changed.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; changed.borderColor=static_cast<VkBorderColor>(99); verify("invalid-border-v", changed, false);
   changed = base; changed.addressModeV = VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE; verify("mirror-clamp-v", changed, false);
   changed = base; changed.mipLodBias = 0.5f; verify("bias", changed, false);
   changed = base; changed.mipLodBias = std::numeric_limits<float>::quiet_NaN(); verify("nan-bias", changed, false);
@@ -749,7 +754,7 @@ unsigned srgb_format_checks(Experiment &experiment) {
 int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limit,
         bool inject_mismatch, bool mips = false, bool mip_linear = false, bool min_mag = false,
         bool srgb = false, bool sweep = false, bool fetch_query = false,
-        bool inject_query_mismatch = false, bool view_swizzle = false) {
+        bool inject_query_mismatch = false, bool view_swizzle = false, bool border_mode = false) {
   Experiment experiment;
   experiment.initialize();
   const unsigned format_checks = srgb || fetch_query || view_swizzle ? srgb_format_checks(experiment) : 0;
@@ -798,13 +803,14 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   experiment.submit();
   std::ofstream csv(csv_path);
   if (!csv) throw std::runtime_error("cannot open numeric result CSV");
-  csv << "case,path,width,height,format,address_u,address_v,mag_filter,min_filter,selected_filter,sampler_lod,request,u,v,input_lod,view_base,view_count,selected_mip,mip_upper,mip_weight,mip_filter,view_mapping,channel,reference,gpu,abs_error\n";
+  csv << "case,path,width,height,format,address_u,address_v,mag_filter,min_filter,selected_filter,sampler_lod,request,u,v,input_lod,view_base,view_count,selected_mip,mip_upper,mip_weight,mip_filter,view_mapping,border_color,channel,reference,gpu,abs_error\n";
   csv << std::setprecision(10);
   unsigned cases = 0;
   std::uint64_t samples = 0, components = 0, mismatches = 0, markers_failed = 0, buffer_failed = 0;
   double max_error = 0;
   std::uint64_t query_components = 0, query_failed = 0;
   std::array<unsigned,9> mapping_counts{};
+  std::array<unsigned,3> border_counts{};
   std::ofstream query_csv;
   if (fetch_query) {
     query_csv.open(std::string(csv_path) + ".queries.csv");
@@ -820,7 +826,8 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
       {16384,1,15,0,15,{0,1000}}, {16384,1,15,13,VK_REMAINING_MIP_LEVELS,{0,1000}}} : std::vector<Config>{
       {1,1,1,0,1,{0,0}}, {1,5,1,0,1,{0,0}}, {5,1,1,0,1,{0,0}},
       {3,5,1,0,1,{0,0}}, {4,4,1,0,1,{0,0}}};
-  const unsigned total_cases = configurations.size() * (min_mag ? 144 : 36) * (fetch_query || view_swizzle ? 2 : 1);
+  const unsigned total_cases = border_mode ? configurations.size()*4*7*8*3 :
+      configurations.size() * (min_mag ? 144 : 36) * (fetch_query || view_swizzle ? 2 : 1);
   const std::vector<Format> formats = fetch_query || view_swizzle ? std::vector<Format>{Format::RGBA8_UNORM,Format::BGRA8_UNORM,Format::RGBA8_SRGB,Format::BGRA8_SRGB}
       : srgb ? std::vector<Format>{Format::RGBA8_SRGB,Format::BGRA8_SRGB}
              : std::vector<Format>{Format::RGBA8_UNORM,Format::BGRA8_UNORM};
@@ -889,25 +896,33 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                             VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
                             VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
       experiment.submit();
-      for (auto u_mode : {AddressMode::Repeat, AddressMode::MirroredRepeat, AddressMode::ClampToEdge})
-        for (auto v_mode : {AddressMode::Repeat, AddressMode::MirroredRepeat, AddressMode::ClampToEdge})
+      const std::vector<AddressMode> modes = border_mode ? std::vector<AddressMode>{AddressMode::Repeat,AddressMode::MirroredRepeat,AddressMode::ClampToEdge,AddressMode::ClampToBorder}
+          : std::vector<AddressMode>{AddressMode::Repeat,AddressMode::MirroredRepeat,AddressMode::ClampToEdge};
+      for (auto u_mode : modes)
+        for (auto v_mode : modes)
+          for (unsigned border_index=0;border_index<(border_mode ? 3U : 1U);++border_index)
           for (unsigned filter_index = 0; filter_index < (min_mag ? 8U : 2U); ++filter_index) {
+            if (border_mode && u_mode!=AddressMode::ClampToBorder && v_mode!=AddressMode::ClampToBorder) continue;
             if (cases == limit) goto finished;
             const auto mag = static_cast<Filter>(min_mag ? (filter_index / 2) % 2 : filter_index);
             const auto min = static_cast<Filter>(min_mag ? filter_index % 2 : filter_index);
             const bool linear = mip_linear || (min_mag && filter_index >= 4);
-            const Sampling sampling{u_mode, v_mode, mag, min, linear ? MipFilter::Linear : MipFilter::Nearest};
+            Sampling sampling{u_mode, v_mode, mag, min, linear ? MipFilter::Linear : MipFilter::Nearest};
+            sampling.border_color=static_cast<BorderColor>(border_index);
             auto sampler = experiment.sampler(sampling, config.range, linear || (mips && !min_mag && view.level_count == 1) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
             View sampled_view=view;
-            if (view_swizzle) sampled_view.components=mappings[cases%mappings.size()];
-            experiment.descriptors(view_swizzle ? mapped_views[cases%mappings.size()] : texture,
+            const unsigned mapping_index=border_mode && border_index==1 && !fetch_query ? cases%2 : cases%mappings.size();
+            if (view_swizzle) sampled_view.components=mappings[mapping_index];
+            experiment.descriptors(view_swizzle ? mapped_views[mapping_index] : texture,
                 sampler, carrier, inputs, direct, output_address, uv.size(), mips ? 16 : 8);
             auto *actual = static_cast<float *>(direct.map);
             auto *indirect_values = static_cast<float *>(indirect.map);
             std::fill(actual, actual + uv.size() * 8, std::numeric_limits<float>::quiet_NaN());
             std::fill(indirect_values, indirect_values + uv.size() * 8, std::numeric_limits<float>::quiet_NaN());
             experiment.begin();
-            if (mips && !sweep && u_mode == AddressMode::Repeat && v_mode == AddressMode::Repeat && filter_index == 0) {
+            if (mips && !sweep && u_mode == AddressMode::Repeat &&
+                v_mode == (border_mode ? AddressMode::ClampToBorder : AddressMode::Repeat) &&
+                filter_index == 0 && border_index == 0) {
               // Update a mip subrectangle immediately before tracing in the same
               // command buffer. This also catches stale device texture uploads.
               auto &mip = image.levels.back();
@@ -983,13 +998,15 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                     << ',' << (mips ? mip_inputs[i][2] : 0) << ',' << view.base_mip << ',' << view.level_count << ',' << reference.mip
                     << ',' << reference.mip_upper << ',' << reference.mip_weight << ',' << static_cast<int>(sampling.mip_filter)
                     << ',' << packed_mapping(sampled_view.components)
+                    << ',' << static_cast<unsigned>(sampling.border_color)
                     << ',' << c << ',' << reference.rgba[c] << ',' << value << ',' << error << '\n';
                 ++components;
               }
               ++samples;
               }
             }
-            if (view_swizzle) ++mapping_counts[cases%mappings.size()];
+            if (view_swizzle) ++mapping_counts[mapping_index];
+            if (border_mode) ++border_counts[border_index];
             ++cases;
             std::cout << "CASE " << cases << "/" << std::min(limit, total_cases)
                       << " samples=" << samples << " mismatches=" << mismatches
@@ -1012,6 +1029,8 @@ finished:
             << " injected_query=" << inject_query_mismatch;
   if (view_swizzle)
     for (unsigned m=0;m<mapping_counts.size();++m) std::cout << " mapping" << m << '=' << mapping_counts[m];
+  if (border_mode)
+    for (unsigned b=0;b<border_counts.size();++b) std::cout << " border" << b << '=' << border_counts[b];
   std::cout << std::endl;
   return cases && !mismatches && !markers_failed && !buffer_failed && !query_failed ? 0 : 1;
 }
@@ -1051,7 +1070,7 @@ void record_upload(Experiment &experiment, const MultiResource &resource, bool i
 }
 
 int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
-              unsigned limit, bool inject_mismatch, bool mip_linear, bool min_mag, bool srgb, bool view_swizzle) {
+              unsigned limit, bool inject_mismatch, bool mip_linear, bool min_mag, bool srgb, bool view_swizzle, bool border_mode) {
   Experiment experiment;
   experiment.initialize();
   const unsigned format_checks = srgb || view_swizzle ? srgb_format_checks(experiment) : 0;
@@ -1095,6 +1114,7 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
     View view_a{pair == 2 ? 0U : 1U, pair == 1 ? 2U : pair == 2 ? 4U : 3U};
     View view_b{pair == 2 ? 2U : 0U, pair == 2 ? 2U : pair == 1 ? 3U : 2U};
     if (view_swizzle) {view_a.components=mappings[2+pair*2];view_b.components=mappings[3+pair*2];}
+    if (border_mode && pair!=0) {view_a.components={};view_b.components={};}
     auto texture_a = experiment.texture(image_a.levels[0].width, image_a.levels[0].height,
         vk_format(image_a.format), VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         image_a.levels.size(), view_a.base_mip, view_a.level_count);
@@ -1118,8 +1138,16 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
     for (unsigned u = 0; u < 3; ++u)
       for (unsigned v = 0; v < 3; ++v)
         for (unsigned filter = 0; filter < 2; ++filter) {
-          const Sampling sampling_a{static_cast<AddressMode>(u),static_cast<AddressMode>(v),static_cast<Filter>(filter),static_cast<Filter>(min_mag ? 1-filter : filter),mip_linear ? MipFilter::Linear : MipFilter::Nearest};
-          const Sampling sampling_b{static_cast<AddressMode>((v + 1) % 3),static_cast<AddressMode>((u + 2) % 3),static_cast<Filter>(1 - filter),static_cast<Filter>(min_mag ? filter : 1-filter),mip_linear && filter == 1 ? MipFilter::Linear : MipFilter::Nearest};
+          Sampling sampling_a{static_cast<AddressMode>(u),static_cast<AddressMode>(v),static_cast<Filter>(filter),static_cast<Filter>(min_mag ? 1-filter : filter),mip_linear ? MipFilter::Linear : MipFilter::Nearest};
+          Sampling sampling_b{static_cast<AddressMode>((v + 1) % 3),static_cast<AddressMode>((u + 2) % 3),static_cast<Filter>(1 - filter),static_cast<Filter>(min_mag ? filter : 1-filter),mip_linear && filter == 1 ? MipFilter::Linear : MipFilter::Nearest};
+          if (border_mode) {
+            sampling_a.address_v=AddressMode::ClampToBorder;
+            sampling_b.address_u=AddressMode::ClampToBorder;
+            if (u==2) sampling_a.address_u=AddressMode::ClampToBorder;
+            if (v==2) sampling_b.address_v=AddressMode::ClampToBorder;
+            sampling_a.border_color=static_cast<BorderColor>(pair);
+            sampling_b.border_color=static_cast<BorderColor>((pair+2)%3);
+          }
           const LodRange range_a{0,1000}, range_b{0.75,1.75};
           const auto sampler_a = experiment.sampler(sampling_a,range_a,sampling_a.mip_filter == MipFilter::Linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
           const auto sampler_b = experiment.sampler(sampling_b,range_b,sampling_b.mip_filter == MipFilter::Linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
@@ -1237,19 +1265,21 @@ int main(int argc, char **argv) {
     if (argc > 6 && std::string(argv[6]) == "checks")
       return profile_checks(argv[1], argv[2], argc - 7, argv + 7);
     const std::string mode=argc==7 ? argv[6] : "";
-    if (mode=="multi" || mode=="multi-linear" || mode=="multi-min-mag" || mode=="multi-srgb" || mode=="multi-swizzle")
+    if (mode=="multi" || mode=="multi-linear" || mode=="multi-min-mag" || mode=="multi-srgb" || mode=="multi-swizzle" || mode=="multi-border")
       return run_multi(argv[1],argv[2],argv[3],std::stoul(argv[4]),std::string(argv[5])=="1",
-          mode!="multi",mode=="multi-min-mag" || mode=="multi-srgb" || mode=="multi-swizzle",
-          mode=="multi-srgb" || mode=="multi-swizzle",mode=="multi-swizzle");
+          mode!="multi",mode=="multi-min-mag" || mode=="multi-srgb" || mode=="multi-swizzle" || mode=="multi-border",
+          mode=="multi-srgb" || mode=="multi-swizzle" || mode=="multi-border",
+          mode=="multi-swizzle" || mode=="multi-border",mode=="multi-border");
     const bool mip_linear=mode=="mip-linear";
     const bool srgb=mode=="srgb" || mode=="srgb-values";
-    const bool fetch_query=mode=="fetch-query" || mode=="fetch-swizzle";
-    const bool view_swizzle=mode=="swizzle" || mode=="fetch-swizzle";
+    const bool fetch_query=mode=="fetch-query" || mode=="fetch-swizzle" || mode=="fetch-border";
+    const bool border_mode=mode=="border" || mode=="fetch-border";
+    const bool view_swizzle=mode=="swizzle" || mode=="fetch-swizzle" || border_mode;
     const bool min_mag=mode=="min-mag" || srgb || fetch_query || view_swizzle;
     const bool mips=mode=="mips" || mip_linear || min_mag;
     if (argc!=6 && !mips) throw std::runtime_error("expected rgen.spv rmiss.spv numeric.csv case-limit inject-mismatch");
     return run(argv[1],argv[2],argv[3],std::stoul(argv[4]),std::string(argv[5])=="1",
-        mips,mip_linear,min_mag,srgb,mode=="srgb-values",fetch_query,std::string(argv[5])=="2",view_swizzle);
+        mips,mip_linear,min_mag,srgb,mode=="srgb-values",fetch_query,std::string(argv[5])=="2",view_swizzle,border_mode);
   } catch (const std::exception &error) {
     std::cerr << "FAIL " << error.what() << std::endl;
     return 1;

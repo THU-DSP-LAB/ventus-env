@@ -55,8 +55,9 @@ def run(args, compiler: str) -> int:
     linear_check = args.action == "gpu-mip-linear-check"
     min_mag = args.action == "gpu-min-mag"
     srgb = args.action in ("gpu-srgb", "gpu-srgb-values", "gpu-multi-srgb")
-    fetch_query = args.action in ("gpu-fetch-query", "gpu-fetch-swizzle")
-    view_swizzle = args.action in ("gpu-swizzle", "gpu-fetch-swizzle", "gpu-multi-swizzle")
+    fetch_query = args.action in ("gpu-fetch-query", "gpu-fetch-swizzle", "gpu-fetch-border")
+    border_mode = args.action in ("gpu-border", "gpu-fetch-border", "gpu-multi-border")
+    view_swizzle = args.action in ("gpu-swizzle", "gpu-fetch-swizzle", "gpu-multi-swizzle") or border_mode
     srgb_values = args.action == "gpu-srgb-values"
     multi_srgb = args.action == "gpu-multi-srgb"
     multi_min_mag = args.action == "gpu-multi-min-mag"
@@ -99,9 +100,9 @@ def run(args, compiler: str) -> int:
     command = [str(executable), str(output / "sample.rgen.spv"), str(output / "sample.rmiss.spv"),
                str(output / "numeric.csv"), str(args.case_limit), str(2 if args.inject_query_mismatch else int(args.inject_mismatch))]
     if mips:
-        command.append("fetch-swizzle" if fetch_query and view_swizzle else "swizzle" if view_swizzle else "fetch-query" if fetch_query else "srgb-values" if srgb_values else "srgb" if srgb else "min-mag" if min_mag else "mip-linear" if linear_check else "mips")
+        command.append("fetch-border" if border_mode and fetch_query else "border" if border_mode else "fetch-swizzle" if fetch_query and view_swizzle else "swizzle" if view_swizzle else "fetch-query" if fetch_query else "srgb-values" if srgb_values else "srgb" if srgb else "min-mag" if min_mag else "mip-linear" if linear_check else "mips")
     if multi:
-        command.append("multi-swizzle" if view_swizzle else "multi-srgb" if multi_srgb else "multi-min-mag" if multi_min_mag else "multi-linear" if multi_linear else "multi")
+        command.append("multi-border" if border_mode else "multi-swizzle" if view_swizzle else "multi-srgb" if multi_srgb else "multi-min-mag" if multi_min_mag else "multi-linear" if multi_linear else "multi")
     checks_only = args.action == "gpu-checks"
     bad_paths = []
     if checks_only:
@@ -154,7 +155,7 @@ def run(args, compiler: str) -> int:
     if not checked_frontier or not elf_paths:
         errors.append("checked, retained V5 ELF evidence is missing")
     if checks_only:
-        if summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "13" or summary.get("errors") != "0" or summary.get("images") != "8" or summary.get("views") != "10":
+        if summary.get("shaders") != str(len(bad_paths)) or summary.get("samplers") != "14" or summary.get("errors") != "0" or summary.get("images") != "8" or summary.get("views") != "10":
             errors.append("profile rejection checks incomplete")
     else:
         if summary.get("cases") != str(args.case_limit):
@@ -170,9 +171,20 @@ def run(args, compiler: str) -> int:
                             summary.get("query_failed") != "0"):
             errors.append("fetch/query format coverage or exact property comparison failed")
         if view_swizzle and not multi:
+            mapping_counts = [0] * 9
+            border_counts = [0] * 3
+            for case in range(args.case_limit):
+                color = (case // 8) % 3
+                mapping = case % 2 if border_mode and not fetch_query and color == 1 else case % 9
+                mapping_counts[mapping] += 1
+                border_counts[color] += 1
             for m in range(9):
-                if summary.get(f"mapping{m}") != str(max(0, (args.case_limit + 8 - m) // 9)):
+                if summary.get(f"mapping{m}") != str(mapping_counts[m]):
                     errors.append(f"view mapping {m} coverage incomplete")
+            if border_mode:
+                for color in range(3):
+                    if summary.get(f"border{color}") != str(border_counts[color]):
+                        errors.append(f"border color {color} coverage incomplete")
         if multi:
             if summary.get("mixed_results") != str(args.case_limit * 128):
                 errors.append("mixed-result coverage incomplete")
@@ -195,6 +207,8 @@ def run(args, compiler: str) -> int:
             profile += "; mixed sRGB/UNORM, both sRGB channel orders, shared sRGB image views"
         if view_swizzle:
             profile += "; independent view component mappings, mixed sRGB/UNORM and shared sRGB image"
+        if border_mode:
+            profile += "; per-binding float border colors and mixed border address modes, legal core mappings only"
     elif checks_only:
         profile = "API/compiler rejection checks (no execution)"
     elif mips:
@@ -206,6 +220,8 @@ def run(args, compiler: str) -> int:
             profile = "Vulkan V5 megakernel to Spike; legal integer fetch, exact view-relative dimensions/level queries, four UNORM/sRGB formats, irrelevant sampler changes"
         if view_swizzle:
             profile = ("integer fetch/property queries" if fetch_query else "independent min/mag/mip sampling") + "; four UNORM/sRGB formats, nine rotating view mapping corpus, mip/address/view/clamp/upload"
+        if border_mode:
+            profile += "; all seven border address pairs, three core float border colors; opaque-black sampling restricted to identity"
     else:
         profile = "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag"
     manifest = {

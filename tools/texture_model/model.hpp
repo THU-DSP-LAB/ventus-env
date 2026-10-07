@@ -15,7 +15,8 @@ constexpr bool is_bgra(Format format) {
 constexpr bool is_srgb(Format format) {
   return format == Format::RGBA8_SRGB || format == Format::BGRA8_SRGB;
 }
-enum class AddressMode { Repeat, MirroredRepeat, ClampToEdge };
+enum class AddressMode { Repeat, MirroredRepeat, ClampToEdge, ClampToBorder };
+enum class BorderColor { TransparentBlack, OpaqueBlack, OpaqueWhite };
 enum class Filter { Nearest, Bilinear };
 enum class MipFilter { Nearest, Linear };
 enum class Component { Identity, Zero, One, R, G, B, A };
@@ -42,6 +43,7 @@ struct Sampling {
   Filter mag_filter = Filter::Nearest;
   Filter min_filter = Filter::Nearest;
   MipFilter mip_filter = MipFilter::Nearest;
+  BorderColor border_color = BorderColor::TransparentBlack;
 
   Sampling() = default;
   // Existing equal-filter call sites retain their meaning.
@@ -75,6 +77,7 @@ struct Tap {
   double weight;
   Color color;
   std::uint32_t mip = 0;
+  bool border = false; // No image byte address for a border-replacement tap.
 };
 
 struct Result {

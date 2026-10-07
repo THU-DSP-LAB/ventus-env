@@ -14,7 +14,7 @@ void require(bool condition, const char *message) {
 
 void check_mode(AddressMode mode) {
   require(mode == AddressMode::Repeat || mode == AddressMode::MirroredRepeat ||
-              mode == AddressMode::ClampToEdge,
+              mode == AddressMode::ClampToEdge || mode == AddressMode::ClampToBorder,
           "unsupported address mode");
 }
 
@@ -22,6 +22,15 @@ void check_filters(const Sampling &sampling) {
   require((sampling.mag_filter == Filter::Nearest || sampling.mag_filter == Filter::Bilinear) &&
               (sampling.min_filter == Filter::Nearest || sampling.min_filter == Filter::Bilinear),
           "unsupported min/mag filter");
+  require(sampling.border_color == BorderColor::TransparentBlack ||
+              sampling.border_color == BorderColor::OpaqueBlack ||
+              sampling.border_color == BorderColor::OpaqueWhite, "unsupported border color");
+}
+
+Color border_color(BorderColor color) {
+  if (color == BorderColor::OpaqueWhite) return {1,1,1,1};
+  if (color == BorderColor::OpaqueBlack) return {0,0,0,1};
+  return {0,0,0,0};
 }
 
 // Reduce before multiplying by image dimensions or converting to an integer.
@@ -29,6 +38,8 @@ void check_filters(const Sampling &sampling) {
 double reduce(double value, AddressMode mode) {
   if (mode == AddressMode::ClampToEdge)
     return std::clamp(value, 0.0, 1.0);
+  if (mode == AddressMode::ClampToBorder)
+    return std::clamp(value, -1.0, 2.0);
   const double period = mode == AddressMode::Repeat ? 1.0 : 2.0;
   double reduced = std::fmod(value, period);
   if (reduced < 0)
@@ -39,7 +50,7 @@ double reduce(double value, AddressMode mode) {
 std::uint32_t address(std::int64_t i, std::uint32_t extent,
                       AddressMode mode) {
   const std::int64_t n = extent;
-  if (mode == AddressMode::ClampToEdge)
+  if (mode == AddressMode::ClampToEdge || mode == AddressMode::ClampToBorder)
     return static_cast<std::uint32_t>(std::clamp(i, std::int64_t{0}, n - 1));
   const std::int64_t period = mode == AddressMode::Repeat ? n : 2 * n;
   std::int64_t wrapped = i % period;
@@ -74,6 +85,16 @@ Tap read_at(const Image &image, const Level &level, std::uint32_t x,
 
 Tap read(const Image &image, const Level &level, const Sampling &sampling,
          std::int64_t raw_x, std::int64_t raw_y, double weight) {
+  if ((sampling.address_u == AddressMode::ClampToBorder &&
+       (raw_x < 0 || raw_x >= level.width)) ||
+      (sampling.address_v == AddressMode::ClampToBorder &&
+       (raw_y < 0 || raw_y >= level.height))) {
+    Tap tap{};
+    tap.raw_x = raw_x; tap.raw_y = raw_y;
+    tap.weight = weight; tap.border = true;
+    tap.color = border_color(sampling.border_color);
+    return tap;
+  }
   auto tap = read_at(image, level, address(raw_x, level.width, sampling.address_u),
                      address(raw_y, level.height, sampling.address_v), weight);
   tap.raw_x = raw_x;
@@ -193,6 +214,11 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
   validate(image);
   check_filters(sampling);
   validate_view(image, view);
+  if (sampling.border_color == BorderColor::OpaqueBlack)
+    for (unsigned c=0;c<4;++c)
+      require(view.components[c] == Component::Identity ||
+                  static_cast<unsigned>(view.components[c]) == static_cast<unsigned>(Component::R)+c,
+              "opaque black with nonidentity swizzle is outside the core sampling profile");
   require(std::isfinite(lod), "LOD must be finite");
   require(std::isfinite(range.min) && std::isfinite(range.max) &&
               range.min >= 0 && range.min <= range.max,

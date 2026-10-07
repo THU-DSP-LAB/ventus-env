@@ -102,6 +102,8 @@ std::vector<long double> axis_weights(unsigned n, long double u,
         else
           index = 2 * static_cast<int>(n) - 1 - index;
       }
+    } else if (mode == AddressMode::ClampToBorder) {
+      if (index < 0 || index >= static_cast<int>(n)) continue;
     } else {
       index = std::clamp(index, 0, static_cast<int>(n) - 1);
     }
@@ -115,6 +117,9 @@ Color oracle(const Image &image, unsigned mip, Sampling sampling, double u, doub
   const auto wx = axis_weights(level.width, u, sampling.address_u, sampling.mag_filter);
   const auto wy = axis_weights(level.height, v, sampling.address_v, sampling.mag_filter);
   std::array<long double, 4> total{};
+  long double coverage_x=0,coverage_y=0;
+  for (auto weight : wx) coverage_x+=weight;
+  for (auto weight : wy) coverage_y+=weight;
   for (unsigned y = 0; y < level.height; ++y)
     for (unsigned x = 0; x < level.width; ++x) {
       const auto p = level.offset + y * level.row_pitch + x * 4;
@@ -128,6 +133,12 @@ Color oracle(const Image &image, unsigned mip, Sampling sampling, double u, doub
         total[c] += wx[x] * wy[y] * decoded;
       }
     }
+  if (sampling.address_u == AddressMode::ClampToBorder || sampling.address_v == AddressMode::ClampToBorder) {
+    const long double outside=1-coverage_x*coverage_y;
+    if (sampling.border_color == BorderColor::OpaqueWhite)
+      for (auto &value : total) value+=outside;
+    else if (sampling.border_color == BorderColor::OpaqueBlack) total[3]+=outside;
+  }
   return {static_cast<float>(total[0]), static_cast<float>(total[1]),
           static_cast<float>(total[2]), static_cast<float>(total[3])};
 }
@@ -619,6 +630,66 @@ void view_swizzle() {
   }
 }
 
+void clamp_to_border() {
+  auto solid=make_image(1,1);
+  put(solid,solid.levels[0],0,0,{255,0,0,255});
+  Sampling state{AddressMode::ClampToBorder,AddressMode::ClampToBorder,Filter::Bilinear,MipFilter::Linear};
+  expect_color(sample_lod(solid,{0,1},state,0,0,0).rgba,{0.25,0,0,0.25},"three border taps at corner",0);
+  state.border_color=BorderColor::OpaqueBlack;
+  expect_color(sample_lod(solid,{0,1},state,0,0,0).rgba,{0.25,0,0,1},"opaque black preserves alpha",0);
+  state.border_color=BorderColor::OpaqueWhite;
+  expect_color(sample_lod(solid,{0,1},state,0,0,0).rgba,{1,0.75,0.75,1},"opaque white corner",0);
+  for (auto border : {BorderColor::TransparentBlack,BorderColor::OpaqueBlack,BorderColor::OpaqueWhite}) {
+    state.border_color=border;
+    const Color expected=border==BorderColor::OpaqueWhite ? Color{1,1,1,1} :
+                         border==BorderColor::OpaqueBlack ? Color{0,0,0,1} : Color{0,0,0,0};
+    for (double u : {-std::numeric_limits<double>::max(),-1e300,1e300,std::numeric_limits<double>::max()}) {
+      const auto result=sample_lod(solid,{0,1},state,u,-u,0);
+      expect_color(result.rgba,expected,"huge finite coordinates entirely border",0);
+      for (const auto &tap : result.taps) expect(tap.border,"huge border tap has no physical image read");
+    }
+  }
+  for (auto format : {Format::RGBA8_UNORM,Format::BGRA8_UNORM,Format::RGBA8_SRGB,Format::BGRA8_SRGB}) {
+    auto image=mip_image();image.format=format;
+    for (unsigned m=0;m<image.levels.size();++m)
+      for (unsigned y=0;y<image.levels[m].height;++y)
+        for (unsigned x=0;x<image.levels[m].width;++x)
+          put(image,image.levels[m],x,y,{static_cast<uint8_t>(37*x+11*y+31*m),
+              static_cast<uint8_t>(19*x+71*y+43*m),static_cast<uint8_t>(51*x+17*y+67*m),
+              static_cast<uint8_t>(23*x+53*y+97*m)});
+    for (auto u : {AddressMode::Repeat,AddressMode::MirroredRepeat,AddressMode::ClampToEdge,AddressMode::ClampToBorder})
+      for (auto v : {AddressMode::Repeat,AddressMode::MirroredRepeat,AddressMode::ClampToEdge,AddressMode::ClampToBorder}) {
+        if (u!=AddressMode::ClampToBorder && v!=AddressMode::ClampToBorder) continue;
+        for (auto border : {BorderColor::TransparentBlack,BorderColor::OpaqueBlack,BorderColor::OpaqueWhite})
+          for (auto mag : {Filter::Nearest,Filter::Bilinear})
+            for (auto min : {Filter::Nearest,Filter::Bilinear})
+              for (auto mip : {MipFilter::Nearest,MipFilter::Linear})
+                for (View view : {View{0,3},View{1,2},View{2,1}})
+                  for (double lod : {-10.,0.,0.25,0.5,0.75,1.,1.5,1000.})
+                    for (auto uv : {std::array<double,2>{-0.125,0.375},{0,0},{1,1},{0.5,0.5},{1.125,-0.125},{-2,2}}) {
+                      Sampling sampling{u,v,mag,min,mip};sampling.border_color=border;
+                      if (border!=BorderColor::OpaqueBlack) view.components={Component::A,Component::Zero,Component::One,Component::R};
+                      const auto result=sample_lod(image,view,sampling,uv[0],uv[1],lod);
+                      expect_color(result.rgba,lod_oracle(image,view,sampling,uv[0],uv[1],lod,{}),
+                          "independent border extended-image oracle before filter/mip/swizzle");
+                      double weight=0;
+                      for (const auto &tap : result.taps) {
+                        weight+=tap.weight;
+                        if (!tap.border) expect(tap.byte_offset+4<=image.data.size(),"physical border profile tap within backing");
+                      }
+                      expect(std::abs(weight-1)<1e-14,"border and physical weights sum to one");
+                    }
+      }
+    View mapped{0,3,{Component::A,Component::R,Component::G,Component::B}};
+    state.border_color=BorderColor::OpaqueBlack;
+    rejected([&]{sample_lod(image,mapped,state,0,0,0);},"core opaque black + nonidentity swizzle undefined");
+    expect_color(texel_fetch(image,mapped,0,0,0).rgba,mapped_oracle(oracle(image,0,{},0.1,1.0/6),mapped.components),
+                 "fetch has no border sampler");
+  }
+  state.border_color=static_cast<BorderColor>(99);
+  rejected([&]{sample_lod(solid,{0,1},state,0,0,0);},"unknown border color");
+}
+
 void invalid_inputs() {
   const auto image = four_colors();
   for (double invalid : {std::numeric_limits<double>::infinity(),
@@ -673,7 +744,7 @@ void invalid_inputs() {
 } // namespace
 
 int main() {
-  const std::array<std::pair<const char *, void (*)()>, 11> suites{{
+  const std::array<std::pair<const char *, void (*)()>, 12> suites{{
       {"hand-calculated filtering and seams", hand_calculated},
       {"negative UV, boundaries and huge finite UV", negative_and_boundary_coordinates},
       {"all 256 UNORM values in both formats", all_unorm_values},
@@ -684,6 +755,7 @@ int main() {
       {"sRGB decoding before filtering and unchanged alpha", srgb},
       {"integer texel fetch and view-relative property queries", fetch_and_queries},
       {"view component mappings after decode for sample/fetch", view_swizzle},
+      {"per-tap core float border replacement before filtering", clamp_to_border},
       {"invalid inputs and storage arithmetic", invalid_inputs}}};
   try {
     for (const auto &suite : suites) {

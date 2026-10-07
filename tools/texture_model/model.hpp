@@ -31,9 +31,18 @@ struct Image {
 struct Sampling {
   AddressMode address_u = AddressMode::Repeat;
   AddressMode address_v = AddressMode::Repeat;
-  // A single filter: the first profile requires equal min/mag filters.
-  Filter filter = Filter::Nearest;
+  Filter mag_filter = Filter::Nearest;
+  Filter min_filter = Filter::Nearest;
   MipFilter mip_filter = MipFilter::Nearest;
+
+  Sampling() = default;
+  // Existing equal-filter call sites retain their meaning.
+  Sampling(AddressMode u, AddressMode v, Filter filter,
+           MipFilter mip = MipFilter::Nearest)
+      : address_u(u), address_v(v), mag_filter(filter), min_filter(filter), mip_filter(mip) {}
+  Sampling(AddressMode u, AddressMode v, Filter mag, Filter min,
+           MipFilter mip = MipFilter::Nearest)
+      : address_u(u), address_v(v), mag_filter(mag), min_filter(min), mip_filter(mip) {}
 };
 
 struct View {
@@ -68,12 +77,15 @@ struct Result {
   double input_u = 0;
   double input_v = 0;
   double input_lod = 0;
+  double sampler_lod = 0;
   double clamped_lod = 0;
+  Filter filter = Filter::Nearest;
   std::vector<Tap> taps;
 };
 
 // Throws std::invalid_argument for inputs outside this model's profile.
 void validate(const Image &image);
+// Direct single-level helper uses mag_filter; min/mip selection needs sample_lod.
 Result sample_level(const Image &image, std::uint32_t mip,
                     const Sampling &sampling, double u, double v);
 // Explicit LOD is relative to the view. Mip-nearest uses Vulkan's preferred

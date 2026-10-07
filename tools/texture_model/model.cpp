@@ -18,6 +18,12 @@ void check_mode(AddressMode mode) {
           "unsupported address mode");
 }
 
+void check_filters(const Sampling &sampling) {
+  require((sampling.mag_filter == Filter::Nearest || sampling.mag_filter == Filter::Bilinear) &&
+              (sampling.min_filter == Filter::Nearest || sampling.min_filter == Filter::Bilinear),
+          "unsupported min/mag filter");
+}
+
 // Reduce before multiplying by image dimensions or converting to an integer.
 // This avoids undefined float-to-integer conversions for huge finite UVs.
 double reduce(double value, AddressMode mode) {
@@ -62,12 +68,10 @@ Tap read(const Image &image, const Level &level, const Sampling &sampling,
 }
 
 Result sample_validated(const Image &image, std::uint32_t mip,
-                        const Sampling &sampling, double u, double v) {
+                        const Sampling &sampling, double u, double v, Filter filter) {
   require(std::isfinite(u) && std::isfinite(v), "UV must be finite");
   check_mode(sampling.address_u);
   check_mode(sampling.address_v);
-  require(sampling.filter == Filter::Nearest || sampling.filter == Filter::Bilinear,
-          "unsupported filter");
   require(mip < image.levels.size(), "mip index out of range");
   const auto &level = image.levels[mip];
   const double x = reduce(u, sampling.address_u) * level.width;
@@ -77,7 +81,8 @@ Result sample_validated(const Image &image, std::uint32_t mip,
   result.mip_upper = mip;
   result.input_u = u;
   result.input_v = v;
-  if (sampling.filter == Filter::Nearest) {
+  result.filter = filter;
+  if (filter == Filter::Nearest) {
     result.taps.push_back(read(image, level, sampling,
                               static_cast<std::int64_t>(std::floor(x)),
                               static_cast<std::int64_t>(std::floor(y)), 1));
@@ -139,12 +144,14 @@ void validate(const Image &image) {
 Result sample_level(const Image &image, std::uint32_t mip,
                     const Sampling &sampling, double u, double v) {
   validate(image);
-  return sample_validated(image, mip, sampling, u, v);
+  check_filters(sampling);
+  return sample_validated(image, mip, sampling, u, v, sampling.mag_filter);
 }
 
 Result sample_lod(const Image &image, View view, const Sampling &sampling,
                   double u, double v, double lod, LodRange range) {
   validate(image);
+  check_filters(sampling);
   require(view.level_count > 0 && view.base_mip < image.levels.size() &&
               view.level_count <= image.levels.size() - view.base_mip,
           "view mip range outside image");
@@ -153,6 +160,9 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
               range.min >= 0 && range.min <= range.max,
           "invalid LOD range");
   const double clamped = std::clamp(lod, range.min, range.max);
+  // Vulkan chooses min/mag using lambda after sampler clamp, before view
+  // availability and mip rounding. Even a one-level view can be minified.
+  const Filter filter = clamped <= 0 ? sampling.mag_filter : sampling.min_filter;
   const double relative = std::clamp(clamped, 0.0,
                                     static_cast<double>(view.level_count - 1));
   // Preferred nearest(d') = ceil(d' + 0.5) - 1. Exact half selects lower.
@@ -163,13 +173,13 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
               sampling.mip_filter == MipFilter::Linear, "unsupported mip filter");
   const bool linear = sampling.mip_filter == MipFilter::Linear;
   const auto selected = static_cast<std::uint32_t>(low + (!linear && relative - low > 0.5));
-  Result result = sample_validated(image, view.base_mip + selected, sampling, u, v);
+  Result result = sample_validated(image, view.base_mip + selected, sampling, u, v, filter);
   if (linear) {
     result.mip_upper = view.base_mip + std::min(selected + 1, view.level_count - 1);
     result.mip_weight = relative - low;
     // Exact integer/end LODs retain the first sample without needless reads.
     if (result.mip_weight > 0 && result.mip_upper != result.mip) {
-      auto upper = sample_validated(image, result.mip_upper, sampling, u, v);
+      auto upper = sample_validated(image, result.mip_upper, sampling, u, v, filter);
       for (unsigned c = 0; c < 4; ++c)
         result.rgba[c] = static_cast<float>((1 - result.mip_weight) * result.rgba[c] +
                                            result.mip_weight * upper.rgba[c]);
@@ -181,6 +191,7 @@ Result sample_lod(const Image &image, View view, const Sampling &sampling,
     }
   }
   result.input_lod = lod;
+  result.sampler_lod = clamped;
   result.clamped_lod = relative;
   return result;
 }

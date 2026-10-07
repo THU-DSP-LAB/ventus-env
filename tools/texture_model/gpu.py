@@ -53,9 +53,11 @@ def run(args, compiler: str) -> int:
     elf_dir = output / "elf"
     elf_dir.mkdir()
     linear_check = args.action == "gpu-mip-linear-check"
+    min_mag = args.action == "gpu-min-mag"
+    multi_min_mag = args.action == "gpu-multi-min-mag"
     multi_linear = args.action == "gpu-multi-linear"
-    multi = args.action in ("gpu-multi", "gpu-multi-linear")
-    mips = args.action == "gpu-mips" or linear_check
+    multi = args.action.startswith("gpu-multi")
+    mips = args.action == "gpu-mips" or linear_check or min_mag
     rgen_name = "sample_multi.rgen" if multi else "sample_mip.rgen" if mips else "sample.rgen"
     for stage in ("rgen", "rmiss"):
         with (output / f"compile-{stage}.log").open("w") as log:
@@ -92,9 +94,9 @@ def run(args, compiler: str) -> int:
     command = [str(executable), str(output / "sample.rgen.spv"), str(output / "sample.rmiss.spv"),
                str(output / "numeric.csv"), str(args.case_limit), str(int(args.inject_mismatch))]
     if mips:
-        command.append("mip-linear" if linear_check else "mips")
+        command.append("min-mag" if min_mag else "mip-linear" if linear_check else "mips")
     if multi:
-        command.append("multi-linear" if multi_linear else "multi")
+        command.append("multi-min-mag" if multi_min_mag else "multi-linear" if multi_linear else "multi")
     checks_only = args.action == "gpu-checks"
     bad_paths = []
     if checks_only:
@@ -170,9 +172,19 @@ def run(args, compiler: str) -> int:
             errors.append("numeric comparison, completion marker, or buffer writeback failed")
     if returncode:
         errors.append(f"comparison process returned {returncode}")
+    if multi:
+        filters = "independent min/mag and linear/nearest mip filters" if multi_min_mag else "linear/nearest and linear/linear mip filters" if multi_linear else "mip-nearest"
+        profile = "two fixed combined bindings (set0:2,13), simultaneous samples and mix, view/sampler swaps and updates; " + filters
+    elif checks_only:
+        profile = "API/compiler rejection checks (no execution)"
+    elif mips:
+        filters = "four min/mag combinations and both mip filters" if min_mag else "mip-linear" if linear_check else "mip-nearest"
+        profile = "Vulkan V5 megakernel to Spike; 2D mip views, dynamic explicit LOD, " + filters
+    else:
+        profile = "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag"
     manifest = {
         "status": "PASS" if not errors else "FAIL", "recorded_at": datetime.now(timezone.utc).isoformat(),
-        "profile": ("two fixed combined bindings (set0:2,13), simultaneous samples and mix, view/sampler swaps and updates; " + ("linear/nearest and linear/linear mip filters" if multi_linear else "mip-nearest")) if multi else "API/compiler rejection checks (no execution)" if checks_only else ("Vulkan V5 megakernel to Spike; 2D mip views, dynamic explicit LOD, " + ("mip-linear" if linear_check else "mip-nearest") if mips else "Vulkan V5 megakernel to Spike; explicit LOD0, equal min/mag"),
+        "profile": profile,
         "readback": "direct SSBO and GLSL buffer-reference stores to coherent host-visible buffers",
         "summary": summary, "errors": errors, "timeout": timeout,
         "injected_mismatch": args.inject_mismatch, "checked_frontier": checked_frontier,

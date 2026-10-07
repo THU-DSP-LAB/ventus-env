@@ -22,13 +22,13 @@ python3 tools/texture_model.py demo
 | 格式 | RGBA8_UNORM、BGRA8_UNORM；RGBA 浮点结果 |
 | 存储 | 各 mip 独立 offset、width、height、row pitch；允许行填充和非零偏移 |
 | 寻址 | U/V 独立的 repeat、mirrored repeat、clamp-to-edge |
-| Texel 过滤 | nearest 或 bilinear；使用一个 filter，对应 min/mag 相同的 profile |
+| Texel 过滤 | nearest 或 bilinear；独立 minFilter/magFilter，按 sampler clamp 后的 LOD 选择 |
 | LOD | 显式有限值；sampler 范围限制后映射至 view 的可访问 mip |
 | Mip 过滤 | nearest（精确半整数选择较低一级）或 linear（相邻两级混合）；与级内过滤独立 |
 | Trace | 下/上 mip、跨级权重、输入 UV/LOD、受限后的相对 LOD；每个 tap 的绝对 mip、坐标、偏移、合并权重和颜色 |
 | 多资源 | 不依赖全局采样状态，可交替采样不同 Image 和 Sampling 对象 |
 
-`sample_level` 在指定的 image 绝对 mip 内采样。`sample_lod` 的 LOD 则相对 View；例如 `{base_mip=1, level_count=2}` 的 LOD 0 访问 image mip 1。每个 mip 的尺寸按 `max(1, previous/2)` 递减；可不提供后续级别，但不能在 1×1 之后继续追加重复 mip。
+`sample_level` 在指定的 image 绝对 mip 内用 `mag_filter` 采样，它是直接指定级别与级内过滤的 helper，不进行 LOD/min/mag 选择。`sample_lod` 的 LOD 则相对 View；例如 `{base_mip=1, level_count=2}` 的 LOD 0 访问 image mip 1。每个 mip 的尺寸按 `max(1, previous/2)` 递减；可不提供后续级别，但不能在 1×1 之后继续追加重复 mip。
 
 当前没有 LOD bias、导数、sRGB、压缩、比较过滤、layer array 或 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
 
@@ -40,6 +40,7 @@ python3 tools/texture_model.py demo
 - 对周期性 UV 先做有限范围归约，clamp 坐标先截到 `[0,1]`，避免将巨大有限值直接转换成整数。Trace 的 raw 坐标是这次归约后、整数寻址前的坐标，原始 UV 单独保留。
 - Mip nearest 采用 Vulkan 文本中的 preferred 选择：精确半整数向较低级；alternative 的半整数向较高级在规范中也有允许，但不是本模型的选择。使用分数比较实现，避免 `LOD+0.5` 的浮点舍入吞掉半整数附近的差别。
 - Mip linear 先将 LOD 限制到 sampler、view 范围，令 `l0=floor(LOD)`、`l1=min(l0+1,viewCount-1)`、`t=LOD-l0`。在两级分别按其尺寸进行 nearest/bilinear 采样，再返回 `(1-t)*C0+t*C1`；级内 bilinear 加跨级 linear 即 trilinear。整数 LOD、末级和单级 view 不引入其他级的颜色。`sample_level` 直接指定一个 mip，不使用 mip filter。
+- sampler clamp 后的 LOD（lambda）≤ 0 使用 `mag_filter`，> 0 使用 `min_filter`；这一步先于 view 范围限制与 mip 取整。两级采样使用同一个选中的级内 filter。正 lambda 最终选中相对 mip 0 或单级 view 时仍使用 minFilter。Trace 将 `sampler_lod` 与 view 限制后的 `clamped_lod` 分开保存。
 - 不模拟实际 TMU 的固定点权重或硬件时序。UNORM 解码和输出为 float；坐标与权重计算、插值累加为 double。这是明确的数学参考实现，不承诺与未来 TMU bit-identical。
 
 NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚举、无效 mip/view 和不足的 backing bytes，均抛出 `std::invalid_argument`。这是本地模型的输入诊断，不规定 Vulkan API 的返回码。巨大有限 UV 按已有 double 值处理；它们在输入类型中已经丢失的小数信息无法恢复。
@@ -48,7 +49,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 ## 验证
 
-测试包含七组，普通和 ASan/UBSan 模式目前均通过 98,976 项检查：
+测试包含八组，普通和 ASan/UBSan 模式目前均通过 170,285 项检查：
 
 1. 手算四点平均、非对称插值、repeat 接缝和 mirror/clamp 边缘。
 2. 负坐标、texel 边界两侧、精确边界、负零和巨大有限坐标。
@@ -57,6 +58,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 5. 每级不同颜色、view base mip、LOD clamp、半整数及其相邻浮点值、非零 mip 上的 bilinear，以及多个 Image 交替访问。
 6. 非法输入、截断数据、存储运算溢出风险及不合法 mip 链。
 7. Mip linear 手算与独立跨级 oracle；两种格式、全部寻址/级内过滤组合、view/clamp、小数/整数相邻 LOD、非二次幂/padding，检查跨级 tap 权重和整数 LOD 的精确退化。
+8. min/mag 手算及独立 LOD oracle；四种过滤组合、两种 mip filter、零点相邻值与负零、sampler clamp、view clamp 与 mip rounding 的区别。
 
 独立对照以 long double 在虚拟延伸图像上枚举 nearest 区间或 tent kernel，逐个真实 texel 累积贡献；不调用模型的坐标归约、四点选择或寻址函数。精确样例和 UNORM 解码做相应精确比较；过滤测试的每分量绝对误差上限为 `2e-7`，适用于该模型的 float 输出，不能直接当成未来 TMU 精度要求。
 
@@ -72,12 +74,14 @@ python3 tools/texture_model.py gpu --case-limit 1
 python3 tools/texture_model.py gpu-mips
 python3 tools/texture_model.py gpu-multi
 python3 tools/texture_model.py gpu-multi-linear
+python3 tools/texture_model.py gpu-min-mag
+python3 tools/texture_model.py gpu-multi-min-mag
 python3 tools/texture_model.py gpu-checks
 python3 tools/texture_model.py gpu-mip-linear-check
 python3 tools/texture_model.py gpu --case-limit 1 --inject-mismatch
 ```
 
-`gpu --case-limit 1 --inject-mismatch` 是比较器负向校验：故意修改读回的一个颜色分量，**必须返回 1**，不应作为普通成功测试执行。`--case-limit` 可限定前 1..180 种 LOD0 配置、1..360 种 mip 配置或 1..432 种多 binding 配置；`--timeout` 限制运行时间；`--out-dir` 指向空目录，以避免旧结果混入证据。默认输出位于 `artifacts/texture_model/gpu-<UTC>-<id>/`。
+`gpu --case-limit 1 --inject-mismatch` 是比较器负向校验：故意修改读回的一个颜色分量，**必须返回 1**，不应作为普通成功测试执行。`--case-limit` 可限定前 1..180 种 LOD0 配置、1..360 种 mip 配置、1..432 种多 binding 配置或 1..1440 种独立 min/mag 配置；`--timeout` 限制运行时间；`--out-dir` 指向空目录，以避免旧结果混入证据。默认输出位于 `artifacts/texture_model/gpu-<UTC>-<id>/`。
 
 此动作需要已构建的本地 Mesa `mesa/build-ventus`、driver `driver/build/driver/spike_device`、Spike `spike/build`、LLVM `llvm/build`、`llvm/build-rt-libclc/lib/crt0.o`，以及 PATH 上的 `glslangValidator`、host C++ 编译器、Vulkan headers/loader 和 `pkg-config vulkan`。`--mesa-build` 可选择另一份已有 Mesa build。它不构建或安装上述组件。
 
@@ -136,7 +140,7 @@ dyadic UV 能在本组尺寸下精确表示相关坐标计算，减少 nearest �
 
 两组数值门禁的最大绝对误差均为 `5.960464478e-8`。Mesa `vt_nir_to_llvm_phi_test` 与 host 模型 47,885 项检查（普通/ASan/UBSan）通过。软件执行证据对应 Mesa 本地提交 `7f5b850`。
 
-仍要求 min/mag 相同、零 bias、有限 UV/LOD、二维单 layer/sample、RGBA8/BGRA8 UNORM 和 identity swizzle。不支持导数选级、独立 sampler、数组/非一致 descriptor 索引、comparison、anisotropy、offset、projector、gather、texelFetch、sRGB 或压缩。host 模型的 NaN/Inf 异常诊断不是 GPU 运行时异常能力。不同 Image 在同一 binding 顺序替换已验证；多 binding 的专项验证见下一节。
+当前仍要求零 bias、有限 UV/LOD、非负 sampler minLOD、二维单 layer/sample、RGBA8/BGRA8 UNORM 和 identity swizzle；F02 已解除 min/mag 相同的要求。不支持导数选级、独立 sampler、数组/非一致 descriptor 索引、comparison、anisotropy、offset、projector、gather、texelFetch、sRGB 或压缩。host 模型的 NaN/Inf 异常诊断不是 GPU 运行时异常能力。不同 Image 在同一 binding 顺序替换已验证；多 binding 的专项验证见下一节。
 
 上传和执行顺序的证据限定在当前 coherent backing、串行提交的 Spike 实验路径；不证明一般 Vulkan barrier/layout、跨队列或缓存一致性。模型尚未成为 Spike 的纹理指令处理程序，也未接入 RTL。
 
@@ -195,6 +199,20 @@ Mesa 本地提交 `cc0f2da` 将 sampler 的 `mipmapMode` 写入原 80 字节 des
 数值 manifest 保存实际加载库、工具与源码哈希、运行环境、ELF 和 CSV 哈希；新功能的最大绝对误差为 `1.192092896e-7`，容差 `1e-6`。主目录 `vt_nir_to_llvm_phi_test` 通过，构建和测试日志也保存在上述目录。负向校验 manifest 的 `FAIL` 表示按预期检测到了故意注入的错误，不能混算成正向通过。原拒绝门禁保留为历史证据。
 
 F01 仍要求 equal min/mag、零 bias、有限 UV/LOD、2D 单 layer/sample、RGBA8/BGRA8 UNORM 和 identity swizzle。下一切片为独立 min/mag（F02），其放大/缩小判定需依据 sampler clamp 后的 LOD，而非选中的 mip 编号。
+
+### F02：独立 min/mag 与负零选级修复（2026-10-07）
+
+`Sampling` 现在保存 `mag_filter`、`min_filter`、`mip_filter`。三个参数的构造形式仍表示 equal min/mag；独立状态使用 `Sampling{uMode,vMode,magFilter,minFilter,mipFilter}`。这些是可调整的模型内部类型，不是设备 ABI。
+
+Mesa 在 sampler 创建与绑定处分别检查 min/mag 都为 nearest 或 linear；不再要求相等。descriptor 原本已保存两种 filter，布局保持不变。`lowerTex` 在 sampler clamp 后判断 `lambda>0`，选择 min 或 mag，再做 view clamp 和 mip 选择。没有新增指令，也没有修改 Spike、LLVM 优化或容差。
+
+新矩阵还发现并修复原 mip-nearest 的负零 LOD 缺陷。`-0.0` 在浮点比较中等于零，但位模式 `0x80000000` 的无符号整数比较会越过所有半级阈值，误选相对 mip 14。15 级链返回错误颜色，较短链可能读取 mip 表外并使 buffer/完成标记未写回。现在只对已经限制为非负的选级比较值清除符号位，因此 `-0.0` 正确选中相对 mip 0，并保留精确半整数的较低级规则。
+
+`gpu-min-mag` 覆盖 1,440 配置：原十组 image/view/clamp × 两种格式 × 九种寻址 × 四种 min/mag × 两种 mip filter。32 种 LOD 含负零、零两侧的最小 binary32 值、正 LOD 仍取 mip 0、整数/大有限值；source upload 和 SSBO/BDA 读回沿用现有门禁。`gpu-multi-min-mag` 用原 432 配置和八阶段交换不同 min/mag、mip filter 及 sampler clamp。
+
+规范和数值标准沿用 F01；额外依据 LOD Operation 与 Texel Filtering 对 lambda 的定义。修复前失败证据保留在 `artifacts/texture_model/min-mag-implementation/isolated-min-mag-smoke/` 与 `isolated-min-mag/`，修复后的最终验收见该目录的 `verification.json`。后续 F03 将扩展 sRGB。
+
+主目录默认 LLVM 的 `final-min-mag/` 检查 737,280 分量、`final-multi-min-mag/` 检查 663,552 分量，均零差异，最大误差 `1.192092896e-7`。F01 两组、原 LOD0/mip-nearest/双 binding nearest 和 38 项范围检查全部通过；两个负向门禁各报一个注入错误。模型普通/sanitizer 各 170,285 检查、Mesa translation unit test 通过，`final-any-hit/` 保持原 160×96 图像 SHA256。
 
 ## 代码组织与规范来源
 

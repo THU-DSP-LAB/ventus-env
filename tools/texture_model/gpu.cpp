@@ -425,7 +425,8 @@ public:
                                       VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT,
                                       VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
     VkSamplerCreateInfo info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    info.magFilter = info.minFilter = sampling.filter == Filter::Nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+    info.magFilter = sampling.mag_filter == Filter::Nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+    info.minFilter = sampling.min_filter == Filter::Nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
     info.mipmapMode = mode;
     info.addressModeU = modes[static_cast<unsigned>(sampling.address_u)];
     info.addressModeV = modes[static_cast<unsigned>(sampling.address_v)];
@@ -570,7 +571,7 @@ void sampler_checks(Experiment &experiment, unsigned &count) {
     std::cout << "CHECK sampler=" << label << " result=" << result << std::endl;
   };
   verify("inactive-defaults", base, true);
-  auto changed = base; changed.minFilter = VK_FILTER_LINEAR; verify("unequal-filters", changed, false);
+  auto changed = base; changed.minFilter = VK_FILTER_CUBIC_EXT; verify("unsupported-min-filter", changed, false);
   changed = base; changed.magFilter = changed.minFilter = VK_FILTER_CUBIC_EXT; verify("cubic", changed, false);
   changed = base; changed.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; verify("border-u", changed, false);
   changed = base; changed.addressModeV = VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE; verify("mirror-clamp-v", changed, false);
@@ -666,7 +667,7 @@ int profile_checks(const char *rgen, const char *rmiss, int bad_count, char **ba
 }
 
 int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limit,
-        bool inject_mismatch, bool mips = false, bool mip_linear = false) {
+        bool inject_mismatch, bool mips = false, bool mip_linear = false, bool min_mag = false) {
   Experiment experiment;
   experiment.initialize();
   experiment.empty_tlas();
@@ -685,7 +686,13 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
       std::nextafter(2.f,1.f), 2, std::nextafter(2.f,3.f), 2.5f,
       std::numeric_limits<float>::max(), 3,3.5f,4,4.5f,5,6,7,8,9,10,11,12,13,
       13.25f,13.75f,14};
-  const auto &lods = mip_linear ? linear_lods : nearest_lods;
+  const std::array<float,32> min_mag_lods{-100, -std::numeric_limits<float>::max(),
+      -std::numeric_limits<float>::denorm_min(), -0.f, 0,
+      std::numeric_limits<float>::denorm_min(), 0.25f, 0.49f, 0.5f,
+      std::nextafter(0.5f,1.f),0.75f,std::nextafter(1.f,0.f),1,
+      std::nextafter(1.f,2.f),1.5f,2,2.5f,3,4,5,6,7,8,9,10,11,12,13,
+      13.25f,13.75f,14,std::numeric_limits<float>::max()};
+  const auto &lods = min_mag ? min_mag_lods : mip_linear ? linear_lods : nearest_lods;
   std::vector<std::array<float, 4>> mip_inputs;
   for (unsigned i = 0; i < uv.size(); ++i)
     mip_inputs.push_back({uv[i][0], uv[i][1], lods[i % lods.size()], 0});
@@ -705,7 +712,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   experiment.submit();
   std::ofstream csv(csv_path);
   if (!csv) throw std::runtime_error("cannot open numeric result CSV");
-  csv << "case,path,width,height,format,address_u,address_v,filter,request,u,v,input_lod,view_base,view_count,selected_mip,mip_upper,mip_weight,mip_filter,channel,reference,gpu,abs_error\n";
+  csv << "case,path,width,height,format,address_u,address_v,mag_filter,min_filter,selected_filter,sampler_lod,request,u,v,input_lod,view_base,view_count,selected_mip,mip_upper,mip_weight,mip_filter,channel,reference,gpu,abs_error\n";
   csv << std::setprecision(10);
   unsigned cases = 0;
   std::uint64_t samples = 0, components = 0, mismatches = 0, markers_failed = 0, buffer_failed = 0;
@@ -719,7 +726,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
       {16384,1,15,0,15,{0,1000}}, {16384,1,15,13,VK_REMAINING_MIP_LEVELS,{0,1000}}} : std::vector<Config>{
       {1,1,1,0,1,{0,0}}, {1,5,1,0,1,{0,0}}, {5,1,1,0,1,{0,0}},
       {3,5,1,0,1,{0,0}}, {4,4,1,0,1,{0,0}}};
-  const unsigned total_cases = configurations.size() * 36;
+  const unsigned total_cases = configurations.size() * (min_mag ? 144 : 36);
   for (auto config : configurations)
     for (auto format : {Format::RGBA8_UNORM, Format::BGRA8_UNORM}) {
       const std::array<unsigned, 2> size{config.width, config.height};
@@ -760,17 +767,20 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
       experiment.submit();
       for (auto u_mode : {AddressMode::Repeat, AddressMode::MirroredRepeat, AddressMode::ClampToEdge})
         for (auto v_mode : {AddressMode::Repeat, AddressMode::MirroredRepeat, AddressMode::ClampToEdge})
-          for (auto filter : {Filter::Nearest, Filter::Bilinear}) {
+          for (unsigned filter_index = 0; filter_index < (min_mag ? 8U : 2U); ++filter_index) {
             if (cases == limit) goto finished;
-            const Sampling sampling{u_mode, v_mode, filter, mip_linear ? MipFilter::Linear : MipFilter::Nearest};
-            auto sampler = experiment.sampler(sampling, config.range, mip_linear || (mips && view.level_count == 1) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
+            const auto mag = static_cast<Filter>(min_mag ? (filter_index / 2) % 2 : filter_index);
+            const auto min = static_cast<Filter>(min_mag ? filter_index % 2 : filter_index);
+            const bool linear = mip_linear || (min_mag && filter_index >= 4);
+            const Sampling sampling{u_mode, v_mode, mag, min, linear ? MipFilter::Linear : MipFilter::Nearest};
+            auto sampler = experiment.sampler(sampling, config.range, linear || (mips && !min_mag && view.level_count == 1) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
             experiment.descriptors(texture, sampler, carrier, inputs, direct, output_address, uv.size(), mips ? 16 : 8);
             auto *actual = static_cast<float *>(direct.map);
             auto *indirect_values = static_cast<float *>(indirect.map);
             std::fill(actual, actual + uv.size() * 8, std::numeric_limits<float>::quiet_NaN());
             std::fill(indirect_values, indirect_values + uv.size() * 8, std::numeric_limits<float>::quiet_NaN());
             experiment.begin();
-            if (mips && u_mode == AddressMode::Repeat && v_mode == AddressMode::Repeat && filter == Filter::Nearest) {
+            if (mips && u_mode == AddressMode::Repeat && v_mode == AddressMode::Repeat && filter_index == 0) {
               // Update a mip subrectangle immediately before tracing in the same
               // command buffer. This also catches stale device texture uploads.
               auto &mip = image.levels.back();
@@ -825,7 +835,8 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                 }
                 csv << cases << ',' << (path ? "bda" : "ssbo") << ',' << size[0] << ',' << size[1] << ',' << static_cast<int>(format)
                     << ',' << static_cast<int>(u_mode) << ',' << static_cast<int>(v_mode)
-                    << ',' << static_cast<int>(filter) << ',' << i << ',' << uv[i][0] << ',' << uv[i][1]
+                    << ',' << static_cast<int>(mag) << ',' << static_cast<int>(min) << ',' << static_cast<int>(reference.filter)
+                    << ',' << reference.sampler_lod << ',' << i << ',' << uv[i][0] << ',' << uv[i][1]
                     << ',' << (mips ? mip_inputs[i][2] : 0) << ',' << view.base_mip << ',' << view.level_count << ',' << reference.mip
                     << ',' << reference.mip_upper << ',' << reference.mip_weight << ',' << static_cast<int>(sampling.mip_filter)
                     << ',' << c << ',' << reference.rgba[c] << ',' << value << ',' << error << '\n';
@@ -886,7 +897,7 @@ void record_upload(Experiment &experiment, const MultiResource &resource, bool i
 }
 
 int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
-              unsigned limit, bool inject_mismatch, bool mip_linear) {
+              unsigned limit, bool inject_mismatch, bool mip_linear, bool min_mag) {
   Experiment experiment;
   experiment.initialize();
   experiment.empty_tlas();
@@ -911,7 +922,7 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
   experiment.submit();
   std::ofstream csv(csv_path);
   if (!csv) throw std::runtime_error("cannot open multi-binding CSV");
-  csv << "case,pair,phase,path,output,resource_a,resource_b,view_a_base,view_b_base,mip_a,mip_b,mip_a_upper,mip_b_upper,mip_weight_a,mip_weight_b,request,u,v,lod_a,lod_b,address_a_u,address_a_v,filter_a,mip_filter_a,min_lod_a,max_lod_a,address_b_u,address_b_v,filter_b,mip_filter_b,min_lod_b,max_lod_b,channel,reference,gpu,abs_error\n";
+  csv << "case,pair,phase,path,output,resource_a,resource_b,view_a_base,view_b_base,mip_a,mip_b,mip_a_upper,mip_b_upper,mip_weight_a,mip_weight_b,request,u,v,lod_a,lod_b,address_a_u,address_a_v,mag_filter_a,min_filter_a,selected_filter_a,mip_filter_a,min_lod_a,max_lod_a,address_b_u,address_b_v,mag_filter_b,min_filter_b,selected_filter_b,mip_filter_b,min_lod_b,max_lod_b,channel,reference,gpu,abs_error\n";
   csv << std::setprecision(10);
   unsigned cases = 0;
   std::array<unsigned, 8> phase_counts{};
@@ -948,8 +959,8 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
     for (unsigned u = 0; u < 3; ++u)
       for (unsigned v = 0; v < 3; ++v)
         for (unsigned filter = 0; filter < 2; ++filter) {
-          const Sampling sampling_a{static_cast<AddressMode>(u),static_cast<AddressMode>(v),static_cast<Filter>(filter),mip_linear ? MipFilter::Linear : MipFilter::Nearest};
-          const Sampling sampling_b{static_cast<AddressMode>((v + 1) % 3),static_cast<AddressMode>((u + 2) % 3),static_cast<Filter>(1 - filter),mip_linear && filter == 1 ? MipFilter::Linear : MipFilter::Nearest};
+          const Sampling sampling_a{static_cast<AddressMode>(u),static_cast<AddressMode>(v),static_cast<Filter>(filter),static_cast<Filter>(min_mag ? 1-filter : filter),mip_linear ? MipFilter::Linear : MipFilter::Nearest};
+          const Sampling sampling_b{static_cast<AddressMode>((v + 1) % 3),static_cast<AddressMode>((u + 2) % 3),static_cast<Filter>(1 - filter),static_cast<Filter>(min_mag ? filter : 1-filter),mip_linear && filter == 1 ? MipFilter::Linear : MipFilter::Nearest};
           const LodRange range_a{0,1000}, range_b{0.75,1.75};
           const auto sampler_a = experiment.sampler(sampling_a,range_a,sampling_a.mip_filter == MipFilter::Linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
           const auto sampler_b = experiment.sampler(sampling_b,range_b,sampling_b.mip_filter == MipFilter::Linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
@@ -1027,9 +1038,11 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
                         << ',' << ra.mip_upper << ',' << rb.mip_upper << ',' << ra.mip_weight << ',' << rb.mip_weight
                         << ',' << i << ',' << request[0] << ',' << request[1] << ',' << request[2] << ',' << request[3]
                         << ',' << static_cast<int>(state_a.address_u) << ',' << static_cast<int>(state_a.address_v)
-                        << ',' << static_cast<int>(state_a.filter) << ',' << static_cast<int>(state_a.mip_filter) << ',' << clamp_a.min << ',' << clamp_a.max
+                        << ',' << static_cast<int>(state_a.mag_filter) << ',' << static_cast<int>(state_a.min_filter) << ',' << static_cast<int>(ra.filter)
+                        << ',' << static_cast<int>(state_a.mip_filter) << ',' << clamp_a.min << ',' << clamp_a.max
                         << ',' << static_cast<int>(state_b.address_u) << ',' << static_cast<int>(state_b.address_v)
-                        << ',' << static_cast<int>(state_b.filter) << ',' << static_cast<int>(state_b.mip_filter) << ',' << clamp_b.min << ',' << clamp_b.max
+                        << ',' << static_cast<int>(state_b.mag_filter) << ',' << static_cast<int>(state_b.min_filter) << ',' << static_cast<int>(rb.filter)
+                        << ',' << static_cast<int>(state_b.mip_filter) << ',' << clamp_b.min << ',' << clamp_b.max
                         << ',' << c << ',' << expected[output][c] << ',' << value << ',' << error << '\n';
                     ++components;
                   }
@@ -1064,12 +1077,13 @@ int main(int argc, char **argv) {
   try {
     if (argc > 6 && std::string(argv[6]) == "checks")
       return profile_checks(argv[1], argv[2], argc - 7, argv + 7);
-    if (argc == 7 && (std::string(argv[6]) == "multi" || std::string(argv[6]) == "multi-linear"))
-      return run_multi(argv[1],argv[2],argv[3],std::stoul(argv[4]),std::string(argv[5]) == "1",std::string(argv[6]) == "multi-linear");
+    if (argc == 7 && (std::string(argv[6]) == "multi" || std::string(argv[6]) == "multi-linear" || std::string(argv[6]) == "multi-min-mag"))
+      return run_multi(argv[1],argv[2],argv[3],std::stoul(argv[4]),std::string(argv[5]) == "1",std::string(argv[6]) != "multi",std::string(argv[6]) == "multi-min-mag");
     const bool mip_linear = argc == 7 && std::string(argv[6]) == "mip-linear";
-    const bool mips = argc == 7 && (std::string(argv[6]) == "mips" || mip_linear);
+    const bool min_mag = argc == 7 && std::string(argv[6]) == "min-mag";
+    const bool mips = argc == 7 && (std::string(argv[6]) == "mips" || mip_linear || min_mag);
     if (argc != 6 && !mips) throw std::runtime_error("expected rgen.spv rmiss.spv numeric.csv case-limit inject-mismatch");
-    return run(argv[1], argv[2], argv[3], std::stoul(argv[4]), std::string(argv[5]) == "1", mips, mip_linear);
+    return run(argv[1], argv[2], argv[3], std::stoul(argv[4]), std::string(argv[5]) == "1", mips, mip_linear, min_mag);
   } catch (const std::exception &error) {
     std::cerr << "FAIL " << error.what() << std::endl;
     return 1;

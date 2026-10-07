@@ -42,7 +42,7 @@ void rejected(const std::function<void()> &action, const std::string &message) {
 }
 
 void put(Image &image, const Level &level, unsigned x, unsigned y, Bytes rgba) {
-  if (image.format == Format::BGRA8_UNORM)
+  if (is_bgra(image.format))
     std::swap(rgba[0], rgba[2]);
   const auto offset = level.offset + y * level.row_pitch + x * 4;
   std::copy(rgba.begin(), rgba.end(), image.data.begin() + offset);
@@ -119,9 +119,13 @@ Color oracle(const Image &image, unsigned mip, Sampling sampling, double u, doub
     for (unsigned x = 0; x < level.width; ++x) {
       const auto p = level.offset + y * level.row_pitch + x * 4;
       for (unsigned c = 0; c < 4; ++c) {
-        const auto channel = image.format == Format::BGRA8_UNORM && (c == 0 || c == 2)
+        const auto channel = is_bgra(image.format) && (c == 0 || c == 2)
                                  ? 2 - c : c;
-        total[c] += wx[x] * wy[y] * image.data[p + channel] / 255.0L;
+        const long double encoded = image.data[p + channel] / 255.0L;
+        const long double decoded = is_srgb(image.format) && c < 3
+            ? (encoded <= 0.04045L ? encoded / 12.92L :
+               std::pow((encoded + 0.055L) / 1.055L, 2.4L)) : encoded;
+        total[c] += wx[x] * wy[y] * decoded;
       }
     }
   return {static_cast<float>(total[0]), static_cast<float>(total[1]),
@@ -447,6 +451,60 @@ void min_mag() {
                  sample_lod(image,{0,3},state,0.3,0.7,0); }, "unknown inactive min filter");
 }
 
+void srgb() {
+  for (auto format : {Format::RGBA8_SRGB, Format::BGRA8_SRGB}) {
+    auto pixel = make_image(1,1,format,8,16);
+    for (unsigned code = 0; code < 256; ++code) {
+      const Bytes bytes{static_cast<uint8_t>(code),static_cast<uint8_t>(255-code),
+                        static_cast<uint8_t>((code*37)%256),static_cast<uint8_t>(code)};
+      put(pixel,pixel.levels[0],0,0,bytes);
+      const auto result=sample_level(pixel,0,{},0.5,0.5);
+      expect_color(result.rgba,oracle(pixel,0,{},0.5,0.5),"all sRGB byte codes and channel order");
+      expect(result.rgba[3] == code/255.0f,"sRGB alpha retains exact UNORM decoding");
+    }
+    auto image=make_image(2,1,format,8,16);
+    put(image,image.levels[0],0,0,{0,0,0,0});
+    put(image,image.levels[0],1,0,{255,255,255,255});
+    Sampling state{AddressMode::Repeat,AddressMode::ClampToEdge,Filter::Bilinear,MipFilter::Linear};
+    expect_color(sample_lod(image,{0,1},state,0.5,0.5,0).rgba,{0.5,0.5,0.5,0.5},
+                 "decode RGB before spatial filtering; alpha stays linear",0);
+    auto upper=make_image(1,1,format,4,8);
+    put(upper,upper.levels[0],0,0,{128,128,128,128});
+    auto level=upper.levels[0];level.offset+=image.data.size();
+    image.data.insert(image.data.end(),upper.data.begin(),upper.data.end());image.levels.push_back(level);
+    const auto decoded=oracle(upper,0,{},0.5,0.5);
+    Color expected{};
+    for (unsigned c=0;c<4;++c) expected[c]=0.25f+decoded[c]*0.5f;
+    expect_color(sample_lod(image,{0,2},state,0.5,0.5,0.5).rgba,expected,
+                 "decode before spatial and cross-mip filtering");
+    auto patterned=mip_image();patterned.format=format;
+    for (unsigned m=0;m<patterned.levels.size();++m) {
+      const auto &mip=patterned.levels[m];
+      for (unsigned y=0;y<mip.height;++y)
+        for (unsigned x=0;x<mip.width;++x)
+          put(patterned,mip,x,y,{static_cast<uint8_t>((x*73+y*11+m*37)%256),
+              static_cast<uint8_t>((x*17+y*59+m*83)%256),
+              static_cast<uint8_t>((x*31+y*43+m*101)%256),
+              static_cast<uint8_t>((x*97+y*7+m*29)%256)});
+    }
+    for (auto u : {AddressMode::Repeat,AddressMode::MirroredRepeat,AddressMode::ClampToEdge})
+      for (auto v : {AddressMode::Repeat,AddressMode::MirroredRepeat,AddressMode::ClampToEdge})
+        for (auto mag : {Filter::Nearest,Filter::Bilinear})
+          for (auto min : {Filter::Nearest,Filter::Bilinear})
+            for (auto mip : {MipFilter::Nearest,MipFilter::Linear})
+              for (View view : {View{0,3},View{1,2},View{1,1}})
+                for (LodRange range : {LodRange{0,1000},LodRange{0.75,1.75}})
+                  for (double lod : {-10.0,-0.0,0.25,0.5,0.75,1.0,1.5,1000.0})
+                    for (const auto &uv : {std::array<double,2>{-0.125,1.125},
+                                          std::array<double,2>{0.375,0.5}}) {
+                      Sampling sampling{u,v,mag,min,mip};
+                      expect_color(sample_lod(patterned,view,sampling,uv[0],uv[1],lod,range).rgba,
+                          lod_oracle(patterned,view,sampling,uv[0],uv[1],lod,range),
+                          "independent sRGB/min-mag/mip/address/view oracle");
+                    }
+  }
+}
+
 void invalid_inputs() {
   const auto image = four_colors();
   for (double invalid : {std::numeric_limits<double>::infinity(),
@@ -501,7 +559,7 @@ void invalid_inputs() {
 } // namespace
 
 int main() {
-  const std::array<std::pair<const char *, void (*)()>, 8> suites{{
+  const std::array<std::pair<const char *, void (*)()>, 9> suites{{
       {"hand-calculated filtering and seams", hand_calculated},
       {"negative UV, boundaries and huge finite UV", negative_and_boundary_coordinates},
       {"all 256 UNORM values in both formats", all_unorm_values},
@@ -509,6 +567,7 @@ int main() {
       {"explicit LOD, view ranges and multiple images", lod_and_views},
       {"mip-linear/trilinear independent oracle and trace", mip_linear},
       {"independent min/mag selection before view clamp", min_mag},
+      {"sRGB decoding before filtering and unchanged alpha", srgb},
       {"invalid inputs and storage arithmetic", invalid_inputs}}};
   try {
     for (const auto &suite : suites) {

@@ -61,9 +61,16 @@ Tap read(const Image &image, const Level &level, const Sampling &sampling,
   tap.weight = weight;
   // Byte reads work at arbitrary host alignment and do not assume endianness.
   const auto *p = image.data.data() + tap.byte_offset;
-  const bool bgra = image.format == Format::BGRA8_UNORM;
+  const bool bgra = is_bgra(image.format);
   tap.color = {p[bgra ? 2 : 0] / 255.0f, p[1] / 255.0f,
                p[bgra ? 0 : 2] / 255.0f, p[3] / 255.0f};
+  if (is_srgb(image.format)) {
+    for (unsigned c = 0; c < 3; ++c) {
+      const double encoded = p[bgra && c != 1 ? 2-c : c] / 255.0;
+      tap.color[c] = static_cast<float>(encoded <= 0.04045 ? encoded / 12.92 :
+                                       std::pow((encoded + 0.055) / 1.055, 2.4));
+    }
+  }
   return tap;
 }
 
@@ -115,7 +122,8 @@ Result sample_validated(const Image &image, std::uint32_t mip,
 } // namespace
 
 void validate(const Image &image) {
-  require(image.format == Format::RGBA8_UNORM || image.format == Format::BGRA8_UNORM,
+  require(image.format == Format::RGBA8_UNORM || image.format == Format::BGRA8_UNORM ||
+              image.format == Format::RGBA8_SRGB || image.format == Format::BGRA8_SRGB,
           "unsupported format");
   require(!image.levels.empty(), "image needs at least one mip");
   for (std::size_t i = 0; i < image.levels.size(); ++i) {

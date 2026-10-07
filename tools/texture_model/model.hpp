@@ -8,7 +8,13 @@
 
 namespace ventus::texture {
 
-enum class Format { RGBA8_UNORM, BGRA8_UNORM };
+enum class Format { RGBA8_UNORM, BGRA8_UNORM, RGBA8_SRGB, BGRA8_SRGB };
+constexpr bool is_bgra(Format format) {
+  return format == Format::BGRA8_UNORM || format == Format::BGRA8_SRGB;
+}
+constexpr bool is_srgb(Format format) {
+  return format == Format::RGBA8_SRGB || format == Format::BGRA8_SRGB;
+}
 enum class AddressMode { Repeat, MirroredRepeat, ClampToEdge };
 enum class Filter { Nearest, Bilinear };
 enum class MipFilter { Nearest, Linear };

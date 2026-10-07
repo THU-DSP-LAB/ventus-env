@@ -484,6 +484,16 @@ public:
   }
 };
 
+VkFormat vk_format(Format format) {
+  switch (format) {
+  case Format::RGBA8_UNORM: return VK_FORMAT_R8G8B8A8_UNORM;
+  case Format::BGRA8_UNORM: return VK_FORMAT_B8G8R8A8_UNORM;
+  case Format::RGBA8_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
+  case Format::BGRA8_SRGB: return VK_FORMAT_B8G8R8A8_SRGB;
+  }
+  throw std::runtime_error("unknown fixture format");
+}
+
 Image fixture(unsigned width, unsigned height, Format format) {
   // Source offset and padded rows exercise Vulkan's buffer-to-image copy.
   const Level level{width, height, 16, (width + 3) * 4ULL};
@@ -495,7 +505,7 @@ Image fixture(unsigned width, unsigned height, Format format) {
           static_cast<std::uint8_t>((x * 89 + y * 11 + 23) % 256),
           static_cast<std::uint8_t>((x * 13 + y * 53 + 251) % 256),
           static_cast<std::uint8_t>((x * 31 + y * 29 + 19) % 256)};
-      if (format == Format::BGRA8_UNORM) std::swap(color[0], color[2]);
+      if (is_bgra(format)) std::swap(color[0], color[2]);
       std::copy(color.begin(), color.end(), image.data.begin() + level.offset + y * level.row_pitch + x * 4);
     }
   return image;
@@ -666,14 +676,67 @@ int profile_checks(const char *rgen, const char *rmiss, int bad_count, char **ba
   return 0;
 }
 
+unsigned srgb_format_checks(Experiment &experiment) {
+  unsigned checks = 0;
+  for (auto format : {VK_FORMAT_R8G8B8A8_UNORM,VK_FORMAT_B8G8R8A8_UNORM,
+                     VK_FORMAT_R8G8B8A8_SRGB,VK_FORMAT_B8G8R8A8_SRGB}) {
+    const bool srgb = format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_B8G8R8A8_SRGB;
+    VkFormatProperties3 extended{VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3};
+    VkFormatProperties2 properties{VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,&extended};
+    vkGetPhysicalDeviceFormatProperties2(experiment.physical,format,&properties);
+    const auto expected = VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
+        VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+        VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
+    if ((extended.linearTilingFeatures & expected) != expected ||
+        (extended.optimalTilingFeatures & expected) != expected ||
+        (properties.formatProperties.linearTilingFeatures & expected) != expected ||
+        (properties.formatProperties.optimalTilingFeatures & expected) != expected ||
+        (srgb && ((extended.linearTilingFeatures | extended.optimalTilingFeatures) & VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT)))
+      throw std::runtime_error("sampled format feature query inconsistent");
+    ++checks;
+    for (auto tiling : {VK_IMAGE_TILING_LINEAR,VK_IMAGE_TILING_OPTIMAL}) {
+      VkImageFormatProperties limits{};
+      check(vkGetPhysicalDeviceImageFormatProperties(experiment.physical,format,VK_IMAGE_TYPE_2D,
+          tiling,VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,0,&limits),"query sampled color format");
+      if (limits.maxMipLevels != 15 || limits.maxArrayLayers != 1 || limits.sampleCounts != VK_SAMPLE_COUNT_1_BIT)
+        throw std::runtime_error("sampled format limits inconsistent");
+      ++checks;
+      if (srgb) {
+        if (vkGetPhysicalDeviceImageFormatProperties(experiment.physical,format,VK_IMAGE_TYPE_2D,
+            tiling,VK_IMAGE_USAGE_STORAGE_BIT,0,&limits) != VK_ERROR_FORMAT_NOT_SUPPORTED)
+          throw std::runtime_error("sRGB storage query silently accepted");
+        ++checks;
+      }
+    }
+    if (srgb) {
+      VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+      info.imageType=VK_IMAGE_TYPE_2D;info.format=format;info.extent={2,1,1};
+      info.mipLevels=1;info.arrayLayers=1;info.samples=VK_SAMPLE_COUNT_1_BIT;
+      info.tiling=VK_IMAGE_TILING_OPTIMAL;info.usage=VK_IMAGE_USAGE_STORAGE_BIT;
+      VkImage image=VK_NULL_HANDLE;
+      const auto result=vkCreateImage(experiment.device,&info,nullptr,&image);
+      if (image) vkDestroyImage(experiment.device,image,nullptr);
+      if (result != VK_ERROR_FEATURE_NOT_PRESENT) throw std::runtime_error("sRGB storage image silently accepted");
+      ++checks;
+    }
+  }
+  std::cout << "CHECK formats=" << checks << " errors=0" << std::endl;
+  return checks;
+}
+
 int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limit,
-        bool inject_mismatch, bool mips = false, bool mip_linear = false, bool min_mag = false) {
+        bool inject_mismatch, bool mips = false, bool mip_linear = false, bool min_mag = false,
+        bool srgb = false, bool sweep = false) {
   Experiment experiment;
   experiment.initialize();
+  const unsigned format_checks = srgb ? srgb_format_checks(experiment) : 0;
   experiment.empty_tlas();
   experiment.setup_pipeline(rgen, rmiss);
   auto uv = requests();
-  if (mips) {
+  if (sweep) {
+    uv.clear();
+    for (unsigned i=0;i<256;++i) uv.push_back({(i+0.5f)/256,0.5f});
+  } else if (mips) {
     uv[18] = {std::numeric_limits<float>::max(), -std::numeric_limits<float>::max()};
     uv[19] = {-8388608.f, 16777216.f};
   }
@@ -695,7 +758,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   const auto &lods = min_mag ? min_mag_lods : mip_linear ? linear_lods : nearest_lods;
   std::vector<std::array<float, 4>> mip_inputs;
   for (unsigned i = 0; i < uv.size(); ++i)
-    mip_inputs.push_back({uv[i][0], uv[i][1], lods[i % lods.size()], 0});
+    mip_inputs.push_back({uv[i][0], uv[i][1], sweep ? 0 : lods[i % lods.size()], 0});
   auto inputs = experiment.buffer(uv.size() * (mips ? 16 : 8), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   std::memcpy(inputs.map, mips ? static_cast<const void *>(mip_inputs.data()) : static_cast<const void *>(uv.data()), uv.size() * (mips ? 16 : 8));
   auto direct = experiment.buffer(uv.size() * 32, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -718,7 +781,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   std::uint64_t samples = 0, components = 0, mismatches = 0, markers_failed = 0, buffer_failed = 0;
   double max_error = 0;
   struct Config { unsigned width, height, levels, base, count; LodRange range; };
-  const std::vector<Config> configurations = mips ? std::vector<Config>{
+  const std::vector<Config> configurations = sweep ? std::vector<Config>{{256,1,1,0,1,{0,1000}}} : mips ? std::vector<Config>{
       {5,3,3,0,3,{0,1000}}, {5,3,3,1,VK_REMAINING_MIP_LEVELS,{0,1000}},
       {8,4,4,0,4,{0.75,1.75}}, {8,4,4,1,2,{2,2}},
       {1,8,3,0,3,{0,0.5}}, {1,8,3,2,1,{0,1000}},
@@ -727,13 +790,22 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
       {1,1,1,0,1,{0,0}}, {1,5,1,0,1,{0,0}}, {5,1,1,0,1,{0,0}},
       {3,5,1,0,1,{0,0}}, {4,4,1,0,1,{0,0}}};
   const unsigned total_cases = configurations.size() * (min_mag ? 144 : 36);
+  const std::array<Format,2> formats = srgb ? std::array<Format,2>{Format::RGBA8_SRGB,Format::BGRA8_SRGB}
+                                          : std::array<Format,2>{Format::RGBA8_UNORM,Format::BGRA8_UNORM};
   for (auto config : configurations)
-    for (auto format : {Format::RGBA8_UNORM, Format::BGRA8_UNORM}) {
+    for (auto format : formats) {
       const std::array<unsigned, 2> size{config.width, config.height};
       const View view{config.base, config.count == VK_REMAINING_MIP_LEVELS ? config.levels - config.base : config.count};
       auto image = mip_fixture(size[0], size[1], config.levels, format);
-      const auto vk_format = format == Format::RGBA8_UNORM ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_B8G8R8A8_UNORM;
-      auto texture = experiment.texture(size[0], size[1], vk_format,
+      if (sweep) {
+        for (unsigned x=0;x<256;++x) {
+          std::array<uint8_t,4> color{static_cast<uint8_t>(x),static_cast<uint8_t>(255-x),
+                                    static_cast<uint8_t>((x*37)%256),static_cast<uint8_t>(x)};
+          if (is_bgra(format)) std::swap(color[0],color[2]);
+          std::copy(color.begin(),color.end(),image.data.begin()+image.levels[0].offset+x*4);
+        }
+      }
+      auto texture = experiment.texture(size[0], size[1], vk_format(format),
                                         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, config.levels, config.base, config.count);
       auto staging = experiment.buffer(image.data.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
       if (mips) std::memset(staging.map, 0xee, image.data.size());
@@ -780,7 +852,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
             std::fill(actual, actual + uv.size() * 8, std::numeric_limits<float>::quiet_NaN());
             std::fill(indirect_values, indirect_values + uv.size() * 8, std::numeric_limits<float>::quiet_NaN());
             experiment.begin();
-            if (mips && u_mode == AddressMode::Repeat && v_mode == AddressMode::Repeat && filter_index == 0) {
+            if (mips && !sweep && u_mode == AddressMode::Repeat && v_mode == AddressMode::Repeat && filter_index == 0) {
               // Update a mip subrectangle immediately before tracing in the same
               // command buffer. This also catches stale device texture uploads.
               auto &mip = image.levels.back();
@@ -858,7 +930,7 @@ finished:
   std::cout << std::setprecision(10) << "SUMMARY cases=" << cases << " samples=" << samples
             << " components=" << components << " mismatches=" << mismatches
             << " markers_failed=" << markers_failed << " buffer_failed=" << buffer_failed << " max_abs_error=" << max_error
-            << " tolerance=" << tolerance << " injected=" << inject_mismatch << std::endl;
+            << " tolerance=" << tolerance << " injected=" << inject_mismatch << " format_checks=" << format_checks << std::endl;
   return cases && !mismatches && !markers_failed && !buffer_failed ? 0 : 1;
 }
 
@@ -897,9 +969,10 @@ void record_upload(Experiment &experiment, const MultiResource &resource, bool i
 }
 
 int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
-              unsigned limit, bool inject_mismatch, bool mip_linear, bool min_mag) {
+              unsigned limit, bool inject_mismatch, bool mip_linear, bool min_mag, bool srgb) {
   Experiment experiment;
   experiment.initialize();
+  const unsigned format_checks = srgb ? srgb_format_checks(experiment) : 0;
   experiment.empty_tlas();
   experiment.setup_pipeline(rgen, rmiss, true);
   const auto uv = requests();
@@ -933,22 +1006,23 @@ int run_multi(const char *rgen, const char *rmiss, const char *csv_path,
       "swap-samplers","shared-sampler","update-a","redispatch","restore-a"};
   for (unsigned pair = 0; pair < 3; ++pair) {
     auto image_a = mip_fixture(pair == 1 ? 1 : 8, pair == 1 ? 8 : 4,
-                              pair == 1 ? 3 : 4, Format::RGBA8_UNORM);
-    auto image_b = mip_fixture(pair == 1 ? 5 : 3, pair == 1 ? 1 : 5, 3, Format::BGRA8_UNORM);
+                              pair == 1 ? 3 : 4, srgb ? Format::RGBA8_SRGB : Format::RGBA8_UNORM);
+    auto image_b = mip_fixture(pair == 1 ? 5 : 3, pair == 1 ? 1 : 5, 3,
+                              srgb && pair == 1 ? Format::BGRA8_SRGB : Format::BGRA8_UNORM);
     const auto original_a = image_a.data;
     const View view_a{pair == 2 ? 0U : 1U, pair == 1 ? 2U : pair == 2 ? 4U : 3U};
     const View view_b{pair == 2 ? 2U : 0U, pair == 2 ? 2U : pair == 1 ? 3U : 2U};
     auto texture_a = experiment.texture(image_a.levels[0].width, image_a.levels[0].height,
-        VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        vk_format(image_a.format), VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         image_a.levels.size(), view_a.base_mip, view_a.level_count);
     auto staging_a = experiment.buffer(image_a.data.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
     MultiResource resource_a{&image_a,texture_a,staging_a,view_a};
     MultiResource resource_b{};
     if (pair == 2) {
-      resource_b = {&image_a,experiment.additional_view(texture_a,VK_FORMAT_R8G8B8A8_UNORM,view_b),staging_a,view_b};
+      resource_b = {&image_a,experiment.additional_view(texture_a,vk_format(image_a.format),view_b),staging_a,view_b};
     } else {
       auto texture_b = experiment.texture(image_b.levels[0].width,image_b.levels[0].height,
-          VK_FORMAT_B8G8R8A8_UNORM,VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+          vk_format(image_b.format),VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
           image_b.levels.size(),view_b.base_mip,view_b.level_count);
       resource_b = {&image_b,texture_b,experiment.buffer(image_b.data.size(),VK_BUFFER_USAGE_TRANSFER_SRC_BIT),view_b};
     }
@@ -1064,7 +1138,7 @@ multi_finished:
   std::cout << std::setprecision(10) << "SUMMARY cases=" << cases << " samples=" << samples
       << " mixed_results=" << mixed_results << " components=" << components << " mismatches=" << mismatches << " markers_failed=" << markers_failed
       << " buffer_failed=" << buffer_failed << " max_abs_error=" << max_error << " tolerance=" << tolerance
-      << " injected=" << inject_mismatch;
+      << " injected=" << inject_mismatch << " format_checks=" << format_checks;
   for (unsigned phase = 0; phase < phase_counts.size(); ++phase) std::cout << " phase" << phase << '=' << phase_counts[phase];
   for (unsigned pair = 0; pair < pair_counts.size(); ++pair) std::cout << " pair" << pair << '=' << pair_counts[pair];
   std::cout << std::endl;
@@ -1077,13 +1151,14 @@ int main(int argc, char **argv) {
   try {
     if (argc > 6 && std::string(argv[6]) == "checks")
       return profile_checks(argv[1], argv[2], argc - 7, argv + 7);
-    if (argc == 7 && (std::string(argv[6]) == "multi" || std::string(argv[6]) == "multi-linear" || std::string(argv[6]) == "multi-min-mag"))
-      return run_multi(argv[1],argv[2],argv[3],std::stoul(argv[4]),std::string(argv[5]) == "1",std::string(argv[6]) != "multi",std::string(argv[6]) == "multi-min-mag");
+    if (argc == 7 && (std::string(argv[6]) == "multi" || std::string(argv[6]) == "multi-linear" || std::string(argv[6]) == "multi-min-mag" || std::string(argv[6]) == "multi-srgb"))
+      return run_multi(argv[1],argv[2],argv[3],std::stoul(argv[4]),std::string(argv[5]) == "1",std::string(argv[6]) != "multi",std::string(argv[6]) == "multi-min-mag" || std::string(argv[6]) == "multi-srgb",std::string(argv[6]) == "multi-srgb");
     const bool mip_linear = argc == 7 && std::string(argv[6]) == "mip-linear";
-    const bool min_mag = argc == 7 && std::string(argv[6]) == "min-mag";
+    const bool srgb = argc == 7 && (std::string(argv[6]) == "srgb" || std::string(argv[6]) == "srgb-values");
+    const bool min_mag = argc == 7 && (std::string(argv[6]) == "min-mag" || srgb);
     const bool mips = argc == 7 && (std::string(argv[6]) == "mips" || mip_linear || min_mag);
     if (argc != 6 && !mips) throw std::runtime_error("expected rgen.spv rmiss.spv numeric.csv case-limit inject-mismatch");
-    return run(argv[1], argv[2], argv[3], std::stoul(argv[4]), std::string(argv[5]) == "1", mips, mip_linear, min_mag);
+    return run(argv[1], argv[2], argv[3], std::stoul(argv[4]), std::string(argv[5]) == "1", mips, mip_linear, min_mag,srgb,argc == 7 && std::string(argv[6]) == "srgb-values");
   } catch (const std::exception &error) {
     std::cerr << "FAIL " << error.what() << std::endl;
     return 1;

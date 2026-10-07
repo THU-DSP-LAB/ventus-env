@@ -19,7 +19,7 @@ python3 tools/texture_model.py demo
 | 功能 | 行为 |
 | --- | --- |
 | Image | 2D、单 layer、单 sample；完整或部分传统 mip 链 |
-| 格式 | RGBA8_UNORM、BGRA8_UNORM；RGBA 浮点结果 |
+| 格式 | RGBA8/BGRA8 UNORM 或 sRGB；RGBA 浮点结果，sRGB RGB 在过滤前解码，alpha 保持 UNORM |
 | 存储 | 各 mip 独立 offset、width、height、row pitch；允许行填充和非零偏移 |
 | 寻址 | U/V 独立的 repeat、mirrored repeat、clamp-to-edge |
 | Texel 过滤 | nearest 或 bilinear；独立 minFilter/magFilter，按 sampler clamp 后的 LOD 选择 |
@@ -30,7 +30,7 @@ python3 tools/texture_model.py demo
 
 `sample_level` 在指定的 image 绝对 mip 内用 `mag_filter` 采样，它是直接指定级别与级内过滤的 helper，不进行 LOD/min/mag 选择。`sample_lod` 的 LOD 则相对 View；例如 `{base_mip=1, level_count=2}` 的 LOD 0 访问 image mip 1。每个 mip 的尺寸按 `max(1, previous/2)` 递减；可不提供后续级别，但不能在 1×1 之后继续追加重复 mip。
 
-当前没有 LOD bias、导数、sRGB、压缩、比较过滤、layer array 或 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
+当前没有 LOD bias、导数、压缩、比较过滤、layer array 或 descriptor binding 解析。多 Image 的纯函数测试不等于 Vulkan descriptor array 或 non-uniform indexing 已实现。
 
 ## 计算规则与数值边界
 
@@ -41,6 +41,7 @@ python3 tools/texture_model.py demo
 - Mip nearest 采用 Vulkan 文本中的 preferred 选择：精确半整数向较低级；alternative 的半整数向较高级在规范中也有允许，但不是本模型的选择。使用分数比较实现，避免 `LOD+0.5` 的浮点舍入吞掉半整数附近的差别。
 - Mip linear 先将 LOD 限制到 sampler、view 范围，令 `l0=floor(LOD)`、`l1=min(l0+1,viewCount-1)`、`t=LOD-l0`。在两级分别按其尺寸进行 nearest/bilinear 采样，再返回 `(1-t)*C0+t*C1`；级内 bilinear 加跨级 linear 即 trilinear。整数 LOD、末级和单级 view 不引入其他级的颜色。`sample_level` 直接指定一个 mip，不使用 mip filter。
 - sampler clamp 后的 LOD（lambda）≤ 0 使用 `mag_filter`，> 0 使用 `min_filter`；这一步先于 view 范围限制与 mip 取整。两级采样使用同一个选中的级内 filter。正 lambda 最终选中相对 mip 0 或单级 view 时仍使用 minFilter。Trace 将 `sampler_lod` 与 view 限制后的 `clamped_lod` 分开保存。
+- sRGB 的 RGB 字节先归一化为 `e=byte/255`，当 `e≤0.04045` 时解码为 `e/12.92`，否则为 `((e+0.055)/1.055)^2.4`。每个 tap 先解码再参与级内和跨级过滤；alpha 直接按 UNORM 解码。Trace 的 tap 颜色也处于线性空间，存储字节不改写。
 - 不模拟实际 TMU 的固定点权重或硬件时序。UNORM 解码和输出为 float；坐标与权重计算、插值累加为 double。这是明确的数学参考实现，不承诺与未来 TMU bit-identical。
 
 NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚举、无效 mip/view 和不足的 backing bytes，均抛出 `std::invalid_argument`。这是本地模型的输入诊断，不规定 Vulkan API 的返回码。巨大有限 UV 按已有 double 值处理；它们在输入类型中已经丢失的小数信息无法恢复。
@@ -49,7 +50,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 
 ## 验证
 
-测试包含八组，普通和 ASan/UBSan 模式目前均通过 170,285 项检查：
+测试包含九组，普通和 ASan/UBSan 模式目前均通过 228,157 项检查：
 
 1. 手算四点平均、非对称插值、repeat 接缝和 mirror/clamp 边缘。
 2. 负坐标、texel 边界两侧、精确边界、负零和巨大有限坐标。
@@ -59,6 +60,7 @@ NaN/Infinity UV、LOD、LOD 范围，负的最小 LOD、反向范围、未知枚
 6. 非法输入、截断数据、存储运算溢出风险及不合法 mip 链。
 7. Mip linear 手算与独立跨级 oracle；两种格式、全部寻址/级内过滤组合、view/clamp、小数/整数相邻 LOD、非二次幂/padding，检查跨级 tap 权重和整数 LOD 的精确退化。
 8. min/mag 手算及独立 LOD oracle；四种过滤组合、两种 mip filter、零点相邻值与负零、sampler clamp、view clamp 与 mip rounding 的区别。
+9. 两种 sRGB 通道顺序、全部 256 个编码值、alpha 精确保持 UNORM、过滤前解码的手算样例，以及 sRGB/min-mag/mip/address/view 独立 oracle。
 
 独立对照以 long double 在虚拟延伸图像上枚举 nearest 区间或 tent kernel，逐个真实 texel 累积贡献；不调用模型的坐标归约、四点选择或寻址函数。精确样例和 UNORM 解码做相应精确比较；过滤测试的每分量绝对误差上限为 `2e-7`，适用于该模型的 float 输出，不能直接当成未来 TMU 精度要求。
 
@@ -76,12 +78,15 @@ python3 tools/texture_model.py gpu-multi
 python3 tools/texture_model.py gpu-multi-linear
 python3 tools/texture_model.py gpu-min-mag
 python3 tools/texture_model.py gpu-multi-min-mag
+python3 tools/texture_model.py gpu-srgb
+python3 tools/texture_model.py gpu-srgb-values
+python3 tools/texture_model.py gpu-multi-srgb
 python3 tools/texture_model.py gpu-checks
 python3 tools/texture_model.py gpu-mip-linear-check
 python3 tools/texture_model.py gpu --case-limit 1 --inject-mismatch
 ```
 
-`gpu --case-limit 1 --inject-mismatch` 是比较器负向校验：故意修改读回的一个颜色分量，**必须返回 1**，不应作为普通成功测试执行。`--case-limit` 可限定前 1..180 种 LOD0 配置、1..360 种 mip 配置、1..432 种多 binding 配置或 1..1440 种独立 min/mag 配置；`--timeout` 限制运行时间；`--out-dir` 指向空目录，以避免旧结果混入证据。默认输出位于 `artifacts/texture_model/gpu-<UTC>-<id>/`。
+`gpu --case-limit 1 --inject-mismatch` 是比较器负向校验：故意修改读回的一个颜色分量，**必须返回 1**，不应作为普通成功测试执行。`--case-limit` 可限定前 1..180 种 LOD0 配置、1..360 种 mip 配置、1..432 种多 binding 配置、1..1440 种独立 min/mag/sRGB 配置或 1..144 种 sRGB 全编码值配置；`--timeout` 限制运行时间；`--out-dir` 指向空目录，以避免旧结果混入证据。默认输出位于 `artifacts/texture_model/gpu-<UTC>-<id>/`。
 
 此动作需要已构建的本地 Mesa `mesa/build-ventus`、driver `driver/build/driver/spike_device`、Spike `spike/build`、LLVM `llvm/build`、`llvm/build-rt-libclc/lib/crt0.o`，以及 PATH 上的 `glslangValidator`、host C++ 编译器、Vulkan headers/loader 和 `pkg-config vulkan`。`--mesa-build` 可选择另一份已有 Mesa build。它不构建或安装上述组件。
 
@@ -210,9 +215,23 @@ Mesa 在 sampler 创建与绑定处分别检查 min/mag 都为 nearest 或 linea
 
 `gpu-min-mag` 覆盖 1,440 配置：原十组 image/view/clamp × 两种格式 × 九种寻址 × 四种 min/mag × 两种 mip filter。32 种 LOD 含负零、零两侧的最小 binary32 值、正 LOD 仍取 mip 0、整数/大有限值；source upload 和 SSBO/BDA 读回沿用现有门禁。`gpu-multi-min-mag` 用原 432 配置和八阶段交换不同 min/mag、mip filter 及 sampler clamp。
 
-规范和数值标准沿用 F01；额外依据 LOD Operation 与 Texel Filtering 对 lambda 的定义。修复前失败证据保留在 `artifacts/texture_model/min-mag-implementation/isolated-min-mag-smoke/` 与 `isolated-min-mag/`，修复后的最终验收见该目录的 `verification.json`。后续 F03 将扩展 sRGB。
+规范和数值标准沿用 F01；额外依据 LOD Operation 与 Texel Filtering 对 lambda 的定义。修复前失败证据保留在 `artifacts/texture_model/min-mag-implementation/isolated-min-mag-smoke/` 与 `isolated-min-mag/`，修复后的最终验收见该目录的 `verification.json`。后续 F03 扩展的 sRGB 见下节。
 
 主目录默认 LLVM 的 `final-min-mag/` 检查 737,280 分量、`final-multi-min-mag/` 检查 663,552 分量，均零差异，最大误差 `1.192092896e-7`。F01 两组、原 LOD0/mip-nearest/双 binding nearest 和 38 项范围检查全部通过；两个负向门禁各报一个注入错误。模型普通/sanitizer 各 170,285 检查、Mesa translation unit test 通过，`final-any-hit/` 保持原 160×96 图像 SHA256。
+
+## F03：RGBA8/BGRA8 sRGB
+
+2026-10-07 增加 `RGBA8_SRGB`、`BGRA8_SRGB`。RGB 每个 texel 先按 sRGB EOTF 解码至线性空间，再进行 nearest/bilinear 与跨 mip 过滤；alpha 始终是 UNORM。以黑、白两个 texel 的平均为例，正确线性结果是 0.5，而不是先平均编码值再解码所得的约 0.214。
+
+模型用 double 分段公式和 `std::pow`，独立 oracle 用 long double；GPU 从实际 image 字节取出通道，再读取 Mesa 的 256 项 float 解码表。该表由驱动随 dispatch 上传在 view-relative mip 表之后：`decoder = mip_table_addr + view_level_count * 24`，共 1,024 字节。80 字节 descriptor 与 24 字节 mip entry 不变，image 原始字节、mip offset/row pitch 不变。UNORM view 也有有效表尾，以保证当前无条件生成的查表 load 地址有效；UNORM 结果仍使用原解码算术。CPU 不替 GPU 计算采样结果；没有新增 ISA、`pow` 运行库或安装组件。额外元数据与查表成本尚未做性能优化。
+
+Vulkan sampled/transfer image 创建、同格式 identity view、mip 内存范围和格式能力查询已支持这两种 sRGB。只声明 sampled、linear-filter 与 transfer 能力；sRGB storage、color attachment、格式重解释等仍拒绝。也补上原 UNORM format query 遗漏的 sampled/linear-filter 标志。未据此声称完整 Vulkan 格式一致性。
+
+三个入口覆盖不同目的：`gpu-srgb` 有 1,440 配置，复用 F02 的所有 min/mag/mip/address/view/clamp 和上传更新组合；`gpu-srgb-values` 有 144 配置，每次读取 256×1 纹理的全部编码值中心；`gpu-multi-srgb` 有 432 配置，覆盖 sRGB+UNORM、RGBA/BGRA sRGB、同一 sRGB image 的不同 view，以及八阶段交换/共享/更新。每组还执行 18 项格式属性、image-format 查询和 sRGB storage 拒绝检查，实际结果从 SSBO/BDA 分别读回。
+
+规范使用 Vulkan-Docs v1.4.328 的 [Formats](https://github.com/KhronosGroup/Vulkan-Docs/blob/v1.4.328/chapters/formats.adoc) 和 [Texel Decode](https://github.com/KhronosGroup/Vulkan-Docs/blob/v1.4.328/chapters/images.adoc)，传递函数依据 Khronos DataFormat 的 `TRANSFER_SRGB_EOTF`。后者取源码快照 SHA256 `f0d612c91c45927980f94d76ad138235a6da85c098fbeeecd7a08624ad4009ce`，避免把 main 当作固定版本；三个快照、哈希及运行证据保存在 `artifacts/texture_model/srgb-implementation/`。Host/GPU 容差保持 `2e-7`/`1e-6`，不代表未来 TMU 精度。
+
+最终主目录默认 LLVM 验收：host 普通/sanitizer 各 **9 组、228,157 检查**。`gpu-srgb` **1,440 配置、737,280 分量**，`gpu-srgb-values` **144 配置、294,912 分量**，`gpu-multi-srgb` **432 配置、663,552 分量**，全部零差异，最大绝对误差 `1.192092896e-7`。每组 18 项格式检查均通过；F01/F02 和原 LOD0/mip-nearest/双 binding nearest、38 项范围检查、Mesa translation unit test 均通过。两个比较器负向校验各检测一个注入错误，原 any-hit 160×96 图像仍为 SHA256 `88b724540dc17b23161c638ebcbb71e9acaf73ff098b43764f9edf17cd5bebb0`。汇总为 `artifacts/texture_model/srgb-implementation/verification.json`，下一切片是 F04 整数读取与查询。
 
 ## 代码组织与规范来源
 

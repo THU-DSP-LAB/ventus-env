@@ -2,7 +2,7 @@
 
 Use through tools/rtcore.py report. Input is a completed regression run directory,
 not a standalone unvalidated PMU JSON. Matplotlib is imported only when plotting.
-State names describe the current 15-state schema; no stage/ray-type attribution
+State names describe the current 16-state schema; no stage/ray-type attribution
 or session-only IU utilization is inferred from marginal histograms.
 """
 from __future__ import annotations
@@ -20,7 +20,7 @@ from .rtcore_regression.perf import load_snapshot, summarize
 STATES = ["Idle", "RayLoad", "HeaderRequest", "HeaderPending", "StackReady",
           "NodePending", "BoxInflight", "BoxPush", "TriangleInflight", "Terminal",
           "ResumePending", "InstanceTransform", "BlasHeaderRequest",
-          "BlasHeaderPending", "AabbCandidate"]
+          "BlasHeaderPending", "AabbCandidate", "ContinuationInit"]
 
 
 def histogram(values):
@@ -250,7 +250,7 @@ def generate(runs, cases, geometry, output, plt):
         lane_heatmap(plt, series, output / filename, f"{case} · lane 同地址复用")
         md += ["### 逐 lane 复用", "", f"![逐lane复用]({filename})", "",
                "热力图每列独立归一化，样本是 (lane, 地址, session)，不是条目的缓存命中次数。原始样本量见 CSV。", ""]
-        totals = [sum(s["statistics"]["counters"].get(f"state_{i}_lane_cycles", 0) for i in range(15)) for _, s in series]
+        totals = [sum(s["statistics"]["counters"].get(f"state_{i}_lane_cycles", 0) for i in range(len(STATES))) for _, s in series]
         md += ["### 状态占用", "", table(["状态（lane-cycle %）", *[label for label, _ in series]],
                [[name, *[s["statistics"]["counters"].get(f"state_{i}_lane_cycles", 0) / n * 100 if n else None
                             for (_, s), n in zip(series, totals)]] for i, name in enumerate(STATES)]), ""]

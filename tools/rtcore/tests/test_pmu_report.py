@@ -1,10 +1,14 @@
 """Exact-bin statistics and presentation helpers; no plotting dependency needed."""
 import unittest
 
-from ..pmu_report import describe, histogram, table
+from ..pmu_report import STATES, describe, histogram, table
 
 
 class StatisticsTests(unittest.TestCase):
+    def test_continuation_state_matches_scheduler(self):
+        self.assertEqual(len(STATES), 16)
+        self.assertEqual(STATES[15], "ContinuationInit")
+
     def test_numeric_order_not_lexicographic(self):
         self.assertEqual(histogram({"10": 2, "2": 3, "0": 0}), [(2, 3), (10, 2)])
 

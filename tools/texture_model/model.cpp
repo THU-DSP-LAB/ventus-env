@@ -521,6 +521,41 @@ std::array<std::uint32_t,2> texture_cube_size(const Image &image,View view,std::
   return texture_size(image,view,lod);
 }
 
+QuadGradients quad_gradients(const Quad &quad, QuadDerivative mode) {
+  require(quad.active_mask == 0xf, "explicit quad requires all four active slots");
+  require(mode == QuadDerivative::Fine || mode == QuadDerivative::Coarse,
+          "unknown quad derivative mode");
+  for (const auto &uv : quad.uv)
+    for (float component : uv)
+      require(std::isfinite(component), "quad UV must be finite binary32");
+  QuadGradients result{};
+  for (unsigned lane = 0; lane < 4; ++lane) {
+    const unsigned row = mode == QuadDerivative::Fine ? lane & 2u : 0;
+    const unsigned column = mode == QuadDerivative::Fine ? lane & 1u : 0;
+    for (unsigned c = 0; c < 2; ++c) {
+      result[lane].dx[c] = quad.uv[row + 1][c] - quad.uv[row][c];
+      result[lane].dy[c] = quad.uv[column + 2][c] - quad.uv[column][c];
+      require(std::isfinite(result[lane].dx[c]) && std::isfinite(result[lane].dy[c]),
+              "quad difference overflows finite binary32 profile");
+    }
+  }
+  return result;
+}
+
+std::array<Result, 4> sample_quad(const Image &image, View view,
+                                const Sampling &sampling, const Quad &quad,
+                                QuadDerivative mode, LodRange range) {
+  require(!image.volume && image.layer_count == 1 && !is_depth(image.format),
+          "explicit quad sampling requires single-layer color 2D");
+  const auto gradients = quad_gradients(quad, mode);
+  std::array<Result, 4> result;
+  for (unsigned lane = 0; lane < 4; ++lane)
+    result[lane] = sample_grad(image, view, sampling, quad.uv[lane][0], quad.uv[lane][1],
+        {gradients[lane].dx[0], gradients[lane].dx[1]},
+        {gradients[lane].dy[0], gradients[lane].dy[1]}, range);
+  return result;
+}
+
 Result sample_grad(const Image &image, View view, const Sampling &sampling,
                    double u, double v, std::array<double,2> dx,
                    std::array<double,2> dy, LodRange range, TexelOffset offset, double layer) {

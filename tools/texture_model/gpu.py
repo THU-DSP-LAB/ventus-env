@@ -125,6 +125,12 @@ def run(args, compiler: str) -> int:
         text = text.replace("uint i = gl_LaunchIDEXT.x;", "uint i = gl_LaunchIDEXT.x;" + declaration)
         rgen_path = output / "gradients.rgen"
         rgen_path.write_text(text)
+    if args.quad:
+        from .quad import shader
+        text = shader(rgen_path.read_text(), args.quad,
+                      args.inject_quad_neighbor_mismatch, args.inject_quad_sign_mismatch)
+        rgen_path = output / "explicit-quad.rgen"
+        rgen_path.write_text(text)
     if args.offset is not None:
         vector = [0,0] if args.inject_offset_mismatch else args.offset
         operand = f"ivec2({vector[0]}, {vector[1]})"
@@ -301,6 +307,10 @@ def run(args, compiler: str) -> int:
         env["VENTUS_TEXTURE_GRADIENTS"] = "1"
         if args.constant_gradient is not None:
             env["VENTUS_TEXTURE_CONSTANT_GRADIENT"] = ",".join(map(str,args.constant_gradient))
+    if args.quad:
+        env["VENTUS_TEXTURE_EXPLICIT_QUAD"] = args.quad
+        if not args.quad_without_opt_in:
+            env["VENTUS_VK_TEXTURE_EXPLICIT_QUAD"] = "1"
     if args.offset is not None:
         env["VENTUS_TEXTURE_OFFSET"] = ",".join(map(str,args.offset))
     env["VENTUS_TEXTURE_LOD_BIAS"] = str(args.lod_bias)
@@ -392,6 +402,30 @@ def run(args, compiler: str) -> int:
         gradient_ir = "\n".join(path.read_text() for path in elf_dir.glob("*.emit.ll"))
         if not re.search(r"OpImageSampleExplicitLod .*\bGrad\b", spirv_gradient) or "fdiv float" not in gradient_ir:
             errors.append("SPIR-V Grad or software footprint/log2 arithmetic evidence missing")
+    if args.quad:
+        # Validate executed ELF encodings, not just a surviving LLVM declaration.
+        assembly = []
+        for executable in elf_paths:
+            decoded = subprocess.run([str(paths["llvm_objdump"]), "-d", "--mattr=+ventus", str(executable)],
+                                     capture_output=True, text=True, check=False)
+            if decoded.returncode:
+                errors.append("actual quad ELF disassembly failed")
+            assembly.append(decoded.stdout)
+        disassembly = "\n".join(assembly)
+        (output / "quad-disassembly.txt").write_text(disassembly)
+        for mask in (1, 2):
+            if not re.search(r"shuffle\.bfly\s+[^\n]*, " + str(mask) + r"\s*$", disassembly, re.MULTILINE):
+                errors.append("actual quad ELF lacks shuffle XOR mask " + str(mask))
+        spirv_quad = (output / "sample.rgen.spvasm").read_text()
+        operation = "OpGroupNonUniformQuadSwap" if args.quad == "fine" else "OpGroupNonUniformQuadBroadcast"
+        if operation not in spirv_quad or "llvm.riscv.ventus.shuffle.bfly.i32" not in gradient_ir:
+            errors.append("quad SPIR-V or actual LLVM shuffle evidence missing")
+        if summary.get("quad_gradient_components") != str(args.case_limit*64*2*4):
+            errors.append("quad derivative readback coverage incomplete")
+        if any(summary.get(name) != "0" for name in ("quad_gradient_failed", "quad_lod_failed")):
+            errors.append("quad gradient/footprint/LOD readback comparison failed")
+        if summary.get("full_warps") != "2" or summary.get("quad_groups") != "16" or summary.get("quad_mode") != args.quad:
+            errors.append("complete same-warp quad profile missing")
     if arrays:
         final_case = args.case_limit - 1
         selector_case = final_case - int(multi and final_case % 8 == 6)
@@ -538,6 +572,8 @@ def run(args, compiler: str) -> int:
         profile += "; sampled image in set0, sampler in set1 bindings6/7; samplerless layout for fetch/query"
     if args.gradients:
         profile += "; explicit isotropic 2D gradients scaled by view base dimensions; sampler bias/clamp; ordinary LLVM arithmetic and texel loads"
+    if args.quad:
+        profile += "; private complete four-UV " + args.quad + " derivatives; all 64 lanes live; real shuffle; poisoned unused host gradients; not implicit derivatives or a public subgroup promise"
     if args.offset is not None:
         profile += "; constant signed texel offsets[-8,7] before integer addressing in each accessed mip"
     if args.volume:
@@ -586,6 +622,10 @@ def run(args, compiler: str) -> int:
         "texel_offset": args.offset,
         "injected_offset_mismatch": args.inject_offset_mismatch,
         "explicit_gradients": args.gradients,
+        "explicit_quad": args.quad,
+        "injected_quad_neighbor_mismatch": args.inject_quad_neighbor_mismatch,
+        "injected_quad_sign_mismatch": args.inject_quad_sign_mismatch,
+        "quad_without_opt_in": args.quad_without_opt_in,
         "constant_gradient": args.constant_gradient,
         "gradient_color_tolerance": 4e-6 if args.gradients else None,
         "injected_gradient_mismatch": args.inject_gradient_mismatch,
@@ -608,11 +648,12 @@ def run(args, compiler: str) -> int:
         "loaded_libraries": [str(path) for path in libraries],
         "binary_sha256": {name: digest(path) for name, path in paths.items()},
         "source_sha256": {name: digest(source / name) for name in
-                          ("model.hpp", "model.cpp", "gpu.cpp", "gpu.py", "sample.rgen", "sample_mip.rgen", "sample_multi.rgen", "sample_fetch.rgen", "sample_separate.rgen", "sample_fetch_separate.rgen", "sample_multi_separate.rgen", "sample.rmiss")},
+                          ("model.hpp", "model.cpp", "gpu.cpp", "gpu.py", "quad.py", "quad_fixture.hpp", "sample.rgen", "sample_mip.rgen", "sample_multi.rgen", "sample_fetch.rgen", "sample_separate.rgen", "sample_fetch_separate.rgen", "sample_multi_separate.rgen", "sample.rmiss")},
         "entrypoint_sha256": digest(root / "tools/texture_model.py"),
         "rejection_shader_sha256": {path.name: digest(path) for path in bad_paths},
         "elf_sha256": {path.name: digest(path) for path in elf_paths},
         "numeric_csv_sha256": digest(output / "numeric.csv") if (output / "numeric.csv").exists() else None,
+        "quad_csv_sha256": digest(output / "numeric.csv.quad.csv") if (output / "numeric.csv.quad.csv").exists() else None,
         "query_csv_sha256": digest(output / "numeric.csv.queries.csv") if (output / "numeric.csv.queries.csv").exists() else None,
     }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

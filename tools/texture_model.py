@@ -50,6 +50,10 @@ def main() -> int:
     parser.add_argument("--inject-offset-mismatch", action="store_true", help="offset negative control: replace shader offset with zero")
     parser.add_argument("--constant-gradient", type=float, nargs=4, help="use compile-time dx.xy and dy.xy derivatives instead of the per-invocation gradient corpus")
     parser.add_argument("--gradients", action="store_true", help="use explicit 2D textureGrad with per-invocation gradient corpus in sampling GPU profiles")
+    parser.add_argument("--quad", choices=("fine", "coarse"), help="private complete same-warp four-UV experiment; not implicit derivatives")
+    parser.add_argument("--inject-quad-neighbor-mismatch", action="store_true")
+    parser.add_argument("--inject-quad-sign-mismatch", action="store_true")
+    parser.add_argument("--quad-without-opt-in", action="store_true", help="negative compiler control: quad shader without private opt-in")
     parser.add_argument("--inject-gradient-mismatch", action="store_true", help="gradient negative control: replace shader gradients with zero")
     parser.add_argument("--lod-bias", type=float, default=0, help="finite sampler bias in [-16,16]; multi profiles use opposite biases for the two samplers")
     parser.add_argument("--inject-bias-mismatch", action="store_true", help="bias negative control: give GPU samplers zero bias while oracle retains requested bias")
@@ -64,6 +68,14 @@ def main() -> int:
     parser.add_argument("--inject-mismatch", action="store_true", help="gpu checker negative control; must fail")
     parser.add_argument("--inject-query-mismatch", action="store_true", help="fetch/query checker negative control; must fail")
     args = parser.parse_args()
+    if args.quad:
+        if (args.action not in ("gpu-min-mag", "gpu-srgb", "gpu-swizzle", "gpu-border") or
+                args.cube or args.volume or args.depth or args.gather or args.image_layers is not None or
+                args.offset is not None or args.constant_gradient is not None or args.inject_gradient_mismatch):
+            parser.error("quad experiment requires complete uniform single-layer color 2D sampling")
+        args.gradients = True
+    elif args.inject_quad_neighbor_mismatch or args.inject_quad_sign_mismatch or args.quad_without_opt_in:
+        parser.error("quad controls require --quad")
     if args.gather and (args.action in ("test","demo","gpu","gpu-checks","gpu-srgb-values") or args.action.startswith("gpu-fetch") or args.cube or args.volume or args.gradients or args.offset is not None or args.inject_depth_order_mismatch or args.inject_bias_mismatch):
         parser.error("gather requires a mip-capable 2D/array sampling profile; offsets/Grad/other dimensions are separate")
     if (args.gather_component!=0 or args.inject_gather_order_mismatch or args.inject_gather_filter_mismatch or args.inject_gather_level_mismatch) and not args.gather:

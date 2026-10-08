@@ -25,6 +25,18 @@ enum class Component { Identity, Zero, One, R, G, B, A };
 using ComponentMapping = std::array<Component, 4>;
 using Color = std::array<float, 4>;
 using TexelOffset = std::array<std::int32_t, 2>;
+enum class QuadDerivative { Fine, Coarse };
+// Explicit logical slots 0=(0,0), 1=(1,0), 2=(0,1), 3=(1,1).
+// Complete binary32 inputs only; this does not define a hardware launch ABI.
+struct Quad {
+  std::array<std::array<float, 2>, 4> uv{};
+  std::uint8_t active_mask = 0xf;
+};
+struct QuadGradient {
+  std::array<float, 2> dx{}, dy{};
+};
+using QuadGradients = std::array<QuadGradient, 4>;
+QuadGradients quad_gradients(const Quad &quad, QuadDerivative mode);
 inline constexpr std::int32_t min_texel_offset = -8, max_texel_offset = 7;
 
 struct Level {
@@ -173,6 +185,10 @@ Result sample_grad(const Image &image, View view, const Sampling &sampling,
                    double u, double v, std::array<double,2> dx,
                    std::array<double,2> dy, LodRange range = {},
                    TexelOffset offset = {}, double layer = 0);
+// Explicit complete-quad experiment: color 2D, one layer, uniform resource/state.
+std::array<Result, 4> sample_quad(const Image &image, View view,
+                                const Sampling &sampling, const Quad &quad,
+                                QuadDerivative mode, LodRange range = {});
 // Integer operations use relative view LOD and never consult a sampler.
 // Coordinates and LOD must be in range; invalid input throws.
 Result texel_fetch(const Image &image, View view, std::int32_t x,

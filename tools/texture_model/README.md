@@ -578,3 +578,41 @@ Mesa 解析已有 `nir_texop_tg4`，直接在 NIR→LLVM 层生成普通 load、
 模型 gather helper 复用既有二维 footprint/layer 选择，再收集四个独立 tap；trace 标记 `from_gather`，tap 按返回顺序记录，`weight=1` 表示独立返回值，不应求和作 normalized filter。独立 oracle 用 signed floor blocks 解析虚拟格网、直接解码原始字节、独立通道映射和布尔真值表；模型旧 swizzle 全枚举仍保留，gather 使用六种代表映射。反例分别颠倒实际 shader 的邻点次序、故意把期望改为加权平均或改用 view 下一 mip；应返回 1 并出现实际数值差异。Gather 忽略 bias，旧 bias-mismatch 反例不适用。
 
 最终隔离/主目录共 61 个 GPU 命令（54 正向、7 预期失败反例），正向零差异，最大误差 `1.192092896e-7`，旧 `1e-6` 上限保持。20 组、42,564,240 host 检查在普通/ASan/UBSan 模式通过。颜色顺序/错误平均/错误级别反例检出 4,096/4,080/4,096 差异，深度顺序/错误平均检出 1,056/1,520 差异，忽略层检出 3,072 差异；输出 marker/buffer 比对保持正确。129 项 API/compiler/copy/limits 检查、隔离/主目录 Mesa unit 与原 any-hit exact SHA 均通过，源码/库哈希冻结检查一致。Mesa 本地提交 `97e50fa`，LLVM/Spike 未改；证据 `artifacts/texture_model/gather-implementation/verification.json`，smoke 排除。E07 两切片完成；E08 需先选择 quad/导数执行环境。
+
+
+## 完整逻辑 quad 的 fine/coarse 差分实验
+
+在 `model.hpp` 中增加 `Quad`、`quad_gradients` 和 `sample_quad`。四个逻辑槽位固定为：
+
+```text
+0=(0,0) ── 1=(1,0)
+   │          │
+2=(0,1) ── 3=(1,1)
+```
+
+fine 的 dx 在每一行都按右减左，dy 在每一列都按下减上；右侧/下侧调用不会把差分方向翻转。coarse 在本实验固定使用 `UV1-UV0`、`UV2-UV0`，四个槽位共享这两个梯度。这是明确选定的 coarse 参考策略，不声称所有实现都必须选左上槽位。减法和梯度值使用 binary32。模型拒绝缺失槽位、非有限输入和差分溢出；`sample_quad` 当前限定单层颜色 2D，并复用已有 `sample_grad` 的视图尺寸缩放、LOD、bias、clamp、mip 和空间过滤。
+
+实际 GPU 实验由 raygen 启动 64 个调用，local size 仍为 32×1×1；每四个连续物理 lane **显式约定为实验输入的四个槽位**，一共两个完整 warp、16 个逻辑 quad。这不表示现有 RT 屏幕坐标已经形成 2×2 邻居。输入包含正/负/零梯度和非仿射第四角，能够区分 fine 与 coarse。
+
+Shader 通过现有 NIR quad swap/broadcast 获取 UV；Mesa 在私有选项 `VENTUS_VK_TEXTURE_EXPLICIT_QUAD=1` 下将 32 位 raygen quad 操作转换为既有 `llvm.riscv.ventus.shuffle.bfly.i32`，使用立即数 XOR 1/2（diagonal 使用 3）。coarse broadcast 先选择目标列再选择目标行，每组独立广播，不会取整个 warp 的 lane 0。随后 shader 用普通减法计算梯度并调用 `textureGrad`；既有 Mesa 软件采样路径计算 LOD 并产生普通算术/load 指令。未新增纹理或导数 ISA，也未修改 LLVM/Spike。
+
+实验从 SSBO 和 buffer device address 两条路径读回颜色、signed dx/dy、footprint 和诊断 LOD。未使用的 host 梯度字段被填为 NaN，shader 必须只读 UV；梯度逐分量精确比较，footprint 与 LOD 另有独立数值对照。诊断 LOD 是 shader 计算并输出的量，并非读取内部纹理单元状态；实际颜色仍由 `textureGrad` 路径输出。保存 SPIR-V、LLVM IR、最终 ELF 反汇编、数值 CSV 与源文件/运行库哈希。
+
+```bash
+python3 tools/texture_model.py test
+python3 tools/texture_model.py test --sanitize
+python3 tools/texture_model.py gpu-min-mag --quad fine --out-dir artifacts/texture_model/quad-fine
+python3 tools/texture_model.py gpu-min-mag --quad coarse --out-dir artifacts/texture_model/quad-coarse
+python3 tools/texture_model.py gpu-min-mag --quad fine --case-limit 8 --inject-quad-neighbor-mismatch --out-dir artifacts/texture_model/quad-wrong-neighbor
+python3 tools/texture_model.py gpu-min-mag --quad fine --case-limit 8 --inject-quad-sign-mismatch --out-dir artifacts/texture_model/quad-wrong-sign
+python3 tools/texture_model.py gpu-min-mag --quad fine --case-limit 1 --quad-without-opt-in --out-dir artifacts/texture_model/quad-disabled
+```
+
+后面三个命令预期返回 1。错误差分方向可能保持相同 LOD/颜色，所以必须保留 signed 梯度的数值门禁。没有私有开关的 live quad 操作会明确编译失败。标准 `ddx/ddy` 及其 fine/coarse intrinsic 当前也明确失败，避免把 unsupported/undef 当成成功支持。无关阶段、动态 broadcast 槽位、非 32 位输入均被拒绝。
+
+**使用边界：**只覆盖完整、同 warp、统一控制流、统一 image/sampler 的逻辑 quad。没有对外开启 Vulkan subgroup/导数功能，没有 helper invocation、跨 warp 通信、缺失/不活跃邻居或分支内导数承诺。给调用添加 `convergent` 只是表达意图，尚未解决能力审计发现的 divergent-CFG 合并问题；本实验不依赖那个缺失的契约。后续通用隐式 LOD 仍须先确定 compute derivative group 或 fragment raster/quad/helper 的执行语义。
+
+验收证据保存在 `artifacts/texture_model/quad-implementation/verification.json`；该文件列出最终命令、覆盖数量、负向门禁、原有回归及本地整合版本。首轮 smoke 不计入最终验收。
+
+
+本轮验收：普通与 ASan/UBSan 模型各 **21 组、42,658,996 检查**；隔离/主目录共 **28 个 GPU/API 命令（20 正向、8 预期失败）**。fine/coarse 在两个目录各完整检查 1,440 配置；另检查 sRGB、swizzle、border 和正/负 bias 组合。正向累计 **3,235,840 颜色分量、3,112,960 梯度分量**，零差异，最大颜色误差 `1.192092896e-7`。错邻居、错符号及关闭开关均被检出；原有显式梯度、采样/Gather、2D array/Cube/3D/depth、nonuniform 描述符回归和 129 项范围检查通过。隔离/主目录 Mesa unit 通过，原 any-hit 160×96 图像保持 SHA256 `88b724540dc17b23161c638ebcbb71e9acaf73ff098b43764f9edf17cd5bebb0`，证据冻结检查通过。Mesa 本地提交 `8d2ba4a`，LLVM/Spike 源码未改；未重复或声称全套 LLVM 回归全绿。下一项仍是公共隐式导数执行环境的语义选择。

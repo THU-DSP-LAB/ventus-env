@@ -389,6 +389,100 @@ void lod_bias() {
   }
 }
 
+void explicit_quad_derivatives() {
+  Quad q{{{{0,0},{1,2},{3,4},{8,10}}}};
+  auto fine = quad_gradients(q, QuadDerivative::Fine);
+  auto coarse = quad_gradients(q, QuadDerivative::Coarse);
+  const QuadGradients expected{{{{1,2},{3,4}},{{1,2},{7,8}},
+                                 {{5,6},{3,4}},{{5,6},{7,8}}}};
+  for (unsigned lane=0;lane<4;++lane) {
+    expect(fine[lane].dx==expected[lane].dx && fine[lane].dy==expected[lane].dy,
+           "fine row/column signed differences");
+    expect(coarse[lane].dx==std::array<float,2>{1,2} &&
+           coarse[lane].dy==std::array<float,2>{3,4}, "coarse uses slot zero edges");
+  }
+  std::mt19937 rng(1341);
+  auto image=make_image(8,4);
+  // The random scalar oracle does not call quad_gradients or sample_grad.
+  for (unsigned iter=0;iter<1000;++iter) {
+    for (auto &uv:q.uv)for (auto &v:uv)v=(static_cast<int>(rng()%8193)-4096)/1024.f;
+    for (auto mode:{QuadDerivative::Fine,QuadDerivative::Coarse}) {
+      auto actual=quad_gradients(q,mode);
+      Sampling state{AddressMode::Repeat,AddressMode::MirroredRepeat,Filter::Bilinear};
+      auto sampled=sample_quad(image,{0,1},state,q,mode);
+      for (unsigned lane=0;lane<4;++lane) {
+        unsigned a=mode==QuadDerivative::Fine?(lane/2)*2:0;
+        unsigned b=mode==QuadDerivative::Fine?lane%2:0;
+        for(unsigned c=0;c<2;++c) {
+          expect(actual[lane].dx[c]==float(double(q.uv[a+1][c])-q.uv[a][c]),"independent dx oracle");
+          expect(actual[lane].dy[c]==float(double(q.uv[b+2][c])-q.uv[b][c]),"independent dy oracle");
+        }
+        expect_color(sampled[lane].rgba,sample_lod(image,{0,1},state,q.uv[lane][0],q.uv[lane][1],0).rgba,
+                     "single-level quad color cross-check");
+      }
+    }
+  }
+  // Exercise actual mip choice/blending independently of sample_grad, including
+  // nonzero view bases, bias and sampler clamps. Binary32 subtraction/scaling
+  // precedes a long-double magnitude/LOD and independent weighted color oracle.
+  const auto mips=mip_image();
+  for (unsigned iter=0;iter<80;++iter) {
+    for(auto &uv:q.uv)for(auto &v:uv)v=(static_cast<int>(rng()%4097)-2048)/4096.f;
+    for(auto mode:{QuadDerivative::Fine,QuadDerivative::Coarse})
+      for(auto view:{View{0,3},View{1,2}})
+        for(auto mip:{MipFilter::Nearest,MipFilter::Linear})
+          for(double bias:{-0.5,0.,0.75}) {
+            Sampling state{AddressMode::Repeat,AddressMode::ClampToEdge,Filter::Bilinear,mip};
+            state.lod_bias=bias;
+            const LodRange range{0.25,1.75};
+            const auto sampled=sample_quad(mips,view,state,q,mode,range);
+            for(unsigned lane=0;lane<4;++lane) {
+              const unsigned a=mode==QuadDerivative::Fine?(lane/2)*2:0;
+              const unsigned b=mode==QuadDerivative::Fine?lane%2:0;
+              const auto &base=mips.levels[view.base_mip];
+              const float x=float(double(q.uv[a+1][0])-q.uv[a][0])*base.width;
+              const float y=float(double(q.uv[a+1][1])-q.uv[a][1])*base.height;
+              const float z=float(double(q.uv[b+2][0])-q.uv[b][0])*base.width;
+              const float w=float(double(q.uv[b+2][1])-q.uv[b][1])*base.height;
+              const long double rho=std::max(std::hypot((long double)x,(long double)y),
+                                            std::hypot((long double)z,(long double)w));
+              const float lod=rho==0?-std::numeric_limits<float>::max():float(std::log2(rho));
+              const float biased=lod+float(bias);
+              expect_color(sampled[lane].rgba,lod_oracle(mips,view,state,q.uv[lane][0],
+                           q.uv[lane][1],biased,range),"quad independent mip/bias/view oracle",4e-6);
+            }
+          }
+  }
+  // Adjacent floats expose unintended pre-subtraction rounding; negative edges
+  // verify right/bottom lanes preserve the same signed derivative orientation.
+  const float next=std::nextafter(1.f,2.f), step=next-1.f;
+  q.uv={{{next,1},{1,next},{next,1},{1,next}}};
+  fine=quad_gradients(q,QuadDerivative::Fine);
+  for(unsigned lane=0;lane<4;++lane)
+    expect(fine[lane].dx==std::array<float,2>{-step,step} &&
+           fine[lane].dy==std::array<float,2>{0,0},"adjacent-float signed quad edges");
+  auto unsupported=image;
+  unsupported.layer_count=2;
+  rejected([&]{sample_quad(unsupported,{0,1},{},q,QuadDerivative::Fine);},"quad array outside profile");
+  unsupported=image;unsupported.volume=true;
+  rejected([&]{sample_quad(unsupported,{0,1},{},q,QuadDerivative::Fine);},"quad volume outside profile");
+  unsupported=image;unsupported.format=Format::D32_SFLOAT;
+  rejected([&]{sample_quad(unsupported,{0,1},{},q,QuadDerivative::Fine);},"quad depth outside profile");
+  for (unsigned mask=0;mask<16;++mask)if(mask!=15) {
+    q.active_mask=mask;rejected([&]{quad_gradients(q,QuadDerivative::Fine);},"incomplete quad");
+  }
+  q.active_mask=16;rejected([&]{quad_gradients(q,QuadDerivative::Fine);},"extra mask bits");
+  q.active_mask=15;
+  rejected([&]{quad_gradients(q,static_cast<QuadDerivative>(99));},"unknown quad mode");
+  for(float bad:{std::numeric_limits<float>::infinity(),std::numeric_limits<float>::quiet_NaN()}) {
+    q.uv[2][1]=bad;rejected([&]{quad_gradients(q,QuadDerivative::Fine);},"nonfinite quad UV");
+  }
+  q.uv={{{-std::numeric_limits<float>::max(),0},{std::numeric_limits<float>::max(),0},{0,0},{0,0}}};
+  rejected([&]{quad_gradients(q,QuadDerivative::Fine);},"overflowing quad subtraction");
+  q.uv={};
+  expect(quad_gradients(q,QuadDerivative::Fine)[3].dx==std::array<float,2>{0,0},"zero quad gradients");
+}
+
 void explicit_gradients() {
   const auto image=mip_image();
   Sampling state;
@@ -1439,7 +1533,7 @@ void invalid_inputs() {
 } // namespace
 
 int main() {
-  const std::array<std::pair<const char *, void (*)()>, 20> suites{{
+  const std::array<std::pair<const char *, void (*)()>, 21> suites{{
       {"hand-calculated filtering and seams", hand_calculated},
       {"negative UV, boundaries and huge finite UV", negative_and_boundary_coordinates},
       {"all 256 UNORM values in both formats", all_unorm_values},
@@ -1448,6 +1542,7 @@ int main() {
       {"mip-linear/trilinear independent oracle and trace", mip_linear},
       {"sampler LOD bias before clamp/filter/view", lod_bias},
       {"explicit 2D gradients and independent Euclidean oracle", explicit_gradients},
+      {"complete explicit quad fine/coarse signed differences", explicit_quad_derivatives},
       {"constant sample/fetch offsets and independent texel oracle", texel_offsets},
       {"2D image array layer storage/view/selection oracle", image_array_layers},
       {"Cube face/edge/corner independent geometric oracle", cube_sampling},

@@ -1,6 +1,7 @@
 // Numeric Vulkan -> SPIR-V -> Ventus ELF -> Spike regression. The CPU model
 // supplies expectations only; actual floats come from SSBO and buffer-reference stores.
 #include "model.hpp"
+#include "quad_fixture.hpp"
 
 #include <vulkan/vulkan.h>
 
@@ -683,7 +684,16 @@ public:
 
   static bool gradients() { return std::getenv("VENTUS_TEXTURE_GRADIENTS")!=nullptr; }
 
+  static bool quad() { return std::getenv("VENTUS_TEXTURE_EXPLICIT_QUAD") != nullptr; }
+  static QuadDerivative quad_mode() {
+    const char *mode=std::getenv("VENTUS_TEXTURE_EXPLICIT_QUAD");
+    return mode && std::string(mode)=="coarse" ? QuadDerivative::Coarse : QuadDerivative::Fine;
+  }
   static std::array<float,4> gradient_request(unsigned i) {
+    if (quad()) {
+      const auto gradient=quad_gradients(explicit_quad_fixture(i/4),quad_mode())[i%4];
+      return {gradient.dx[0],gradient.dx[1],gradient.dy[0],gradient.dy[1]};
+    }
     if (const char *text=std::getenv("VENTUS_TEXTURE_CONSTANT_GRADIENT")) {
       std::array<float,4> value{};
       for (unsigned c=0;c<4;++c) {
@@ -1008,6 +1018,12 @@ Image mip_fixture(unsigned width, unsigned height, unsigned levels, Format forma
 }
 
 std::vector<std::array<float, 2>> requests() {
+  if (Experiment::quad()) {
+    std::vector<std::array<float,2>> result;
+    for(unsigned group=0;group<16;++group)
+      for(const auto &uv:explicit_quad_fixture(group).uv)result.push_back(uv);
+    return result;
+  }
   std::vector<std::array<float, 2>> result{
       {0, 0}, {1, 1}, {-1, -1}, {2, 2}, {0.5f, 0.5f}, {0.25f, 0.25f},
       {0.75f, 0.25f}, {0.25f, 0.75f}, {0.75f, 0.75f}, {-0.125f, 1.125f},
@@ -1433,7 +1449,7 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   if (sweep) {
     uv.clear();
     for (unsigned i=0;i<256;++i) uv.push_back({(i+0.5f)/256,0.5f});
-  } else if (mips) {
+  } else if (mips && !Experiment::quad()) {
     uv[18] = {std::numeric_limits<float>::max(), -std::numeric_limits<float>::max()};
     uv[19] = {-8388608.f, 16777216.f};
   }
@@ -1457,12 +1473,20 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   for (unsigned i = 0; i < uv.size(); ++i)
     mip_inputs.push_back({uv[i][0], uv[i][1], Experiment::gradients() ? Experiment::gradient_request(i)[0] : sweep ? 0 : lods[i % lods.size()],
                           Experiment::gradients() ? Experiment::gradient_request(i)[1] : Experiment::array_sampling() ? Experiment::layer_request(i) : Experiment::depth_compare() ? Experiment::dref(i) : 0});
-  const auto gradient_inputs=Experiment::gradient_inputs(mip_inputs);
+  auto gradient_inputs=Experiment::gradient_inputs(mip_inputs);
+  if (Experiment::quad()) {
+    if (uv.size()%32) throw std::runtime_error("quad experiment requires full 32-lane warps");
+    // The shader must derive gradients from adjacent lanes, not use host dx/dy.
+    for(unsigned i=0;i<uv.size();++i) {
+      gradient_inputs[2*i][2]=gradient_inputs[2*i][3]=std::numeric_limits<float>::quiet_NaN();
+      gradient_inputs[2*i+1].fill(std::numeric_limits<float>::quiet_NaN());
+    }
+  }
   const unsigned input_stride=Experiment::gradients() ? 32 : mips ? 16 : 8;
   auto inputs = experiment.buffer(uv.size() * input_stride, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   std::memcpy(inputs.map, (Experiment::gradients() || Experiment::cube() || (Experiment::volume() && !fetch_query)) ? static_cast<const void *>(gradient_inputs.data()) :
       mips ? static_cast<const void *>(mip_inputs.data()) : static_cast<const void *>(uv.data()), uv.size() * input_stride);
-  const unsigned output_floats=(fetch_query && Experiment::array_sampling()) || Experiment::volume() ? 12 : 8;
+  const unsigned output_floats=Experiment::quad() ? 16 : (fetch_query && Experiment::array_sampling()) || Experiment::volume() ? 12 : 8;
   auto direct = experiment.buffer(uv.size() * output_floats * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   auto indirect = experiment.buffer(uv.size() * output_floats * 4, VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
   auto output_address = experiment.buffer(8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -1483,6 +1507,14 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
   std::uint64_t samples = 0, components = 0, mismatches = 0, markers_failed = 0, buffer_failed = 0;
   double max_error = 0;
   std::uint64_t query_components = 0, query_failed = 0;
+  std::uint64_t quad_components = 0, quad_failed = 0, quad_lod_failed = 0;
+  std::ofstream quad_csv;
+  if (Experiment::quad()) {
+    quad_csv.open(std::string(csv_path)+".quad.csv");
+    if(!quad_csv)throw std::runtime_error("cannot open quad result CSV");
+    quad_csv << "case,path,warp,quad,lane,component,expected,actual,gpu_footprint_squared,gpu_lod\n";
+    quad_csv << std::setprecision(10);
+  }
   std::array<unsigned,9> mapping_counts{};
   std::array<unsigned,3> border_counts{};
   std::ofstream query_csv;
@@ -1713,6 +1745,26 @@ int run(const char *rgen, const char *rmiss, const char *csv_path, unsigned limi
                 const std::array<float,4> marker{73,123,456,789};
                 if (!std::equal(marker.begin(),marker.end(),values+i*output_floats+4)) ++markers_failed;
               }
+              if (Experiment::quad()) {
+                const auto expected=Experiment::gradient_request(i);
+                const float *observed=values+i*output_floats+8;
+                const auto &level=image.levels[lane_view.base_mip];
+                const float sx=expected[0]*level.width,sy=expected[1]*level.height;
+                const float tx=expected[2]*level.width,ty=expected[3]*level.height;
+                const float q=std::max(float(sx*sx+sy*sy),float(tx*tx+ty*ty));
+                const double lod=.5*std::log2(std::clamp(q,0x1p-32f,0x1p60f));
+                const float actual_q=values[i*output_floats+12],actual_lod=values[i*output_floats+13];
+                if(!std::isfinite(actual_q) || std::abs(double(actual_q)-q)>1e-6*std::max(1.f,q) ||
+                   !std::isfinite(actual_lod) || std::abs(double(actual_lod)-lod)>4e-6 ||
+                   values[i*output_floats+14]!=float(level.width) || values[i*output_floats+15]!=float(level.height)) ++quad_lod_failed;
+                for(unsigned c=0;c<4;++c) {
+                  if(!std::isfinite(observed[c]) || observed[c]!=expected[c]) ++quad_failed;
+                  quad_csv << cases << ',' << (path ? "bda" : "ssbo") << ',' << i/32 << ',' << i/4
+                      << ',' << i%4 << ',' << c << ',' << expected[c] << ',' << observed[c]
+                      << ',' << actual_q << ',' << actual_lod << '\n';
+                  ++quad_components;
+                }
+              }
               for (unsigned c = 0; c < 4; ++c) {
                 const float value = values[i * output_floats + c];
                 const double error = std::abs(static_cast<double>(value) - reference.rgba[c]);
@@ -1779,12 +1831,16 @@ finished:
             << " tolerance=" << tolerance << " injected=" << inject_mismatch << " format_checks=" << format_checks
             << " query_components=" << query_components << " query_failed=" << query_failed
             << " injected_query=" << inject_query_mismatch;
+  if (Experiment::quad())
+    std::cout << " quad_gradient_components=" << quad_components << " quad_gradient_failed=" << quad_failed
+              << " quad_lod_failed=" << quad_lod_failed << " quad_groups=16 full_warps=2 quad_mode="
+              << (Experiment::quad_mode()==QuadDerivative::Fine ? "fine" : "coarse");
   if (view_swizzle)
     for (unsigned m=0;m<mapping_counts.size();++m) std::cout << " mapping" << m << '=' << mapping_counts[m];
   if (border_mode)
     for (unsigned b=0;b<border_counts.size();++b) std::cout << " border" << b << '=' << border_counts[b];
   std::cout << std::endl;
-  return cases && !mismatches && !markers_failed && !buffer_failed && !query_failed ? 0 : 1;
+  return cases && !mismatches && !markers_failed && !buffer_failed && !query_failed && !quad_failed && !quad_lod_failed ? 0 : 1;
 }
 
 // Each resource has its own model/view; shared-image fixtures deliberately

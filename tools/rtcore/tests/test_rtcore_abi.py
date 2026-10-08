@@ -32,7 +32,11 @@ class RtCoreAbiGeneratorTests(unittest.TestCase):
         cls.function = cls.tool.parse_payload_base_function(source_text)
 
     def test_field_major_hit_record_layout(self) -> None:
-        self.assertEqual(self.constants["VT_RT_ABI_VERSION"], 12)
+        self.assertEqual(self.constants["VT_RT_ABI_VERSION"], 13)
+        self.assertEqual(self.constants["VT_RT_SLOT_RESERVED_LO"], 16)
+        self.assertEqual(self.constants["VT_RT_SLOT_RESERVED_HI"], 17)
+        self.assertNotIn("VT_RT_SLOT_PAYLOAD_PTR_LO", self.constants)
+        self.assertNotIn("VT_RT_SLOT_PAYLOAD_PTR_HI", self.constants)
         self.assertEqual(self.constants["VT_RT_LOCAL_CANDIDATE_HIT_RECORD_BASE_BYTES"], 88)
         self.assertEqual(self.constants["VT_RT_LOCAL_CANDIDATE_HIT_RECORD_SIZE_BYTES"], 36)
         self.assertEqual(self.constants["VT_RT_LOCAL_COMMITTED_HIT_RECORD_BASE_BYTES"], 124)

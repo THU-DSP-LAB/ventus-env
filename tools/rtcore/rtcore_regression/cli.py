@@ -421,6 +421,7 @@ def spike_render(case: dict[str, Any], runner: dict[str, Any], workload: Path,
     llvm_objdump = first_existing([llvm_build / "bin/llvm-objdump", install / "bin/llvm-objdump"],
                                   "Ventus llvm-objdump", True)
     crt0 = first_existing([
+        *([Path(os.environ["VENTUS_VK_CRT0"])] if os.environ.get("VENTUS_VK_CRT0") else []),
         install / "lib/crt0.o", ROOT / "llvm/build-rt-libclc/lib/crt0.o",
         ROOT / "llvm/build-libclc/lib/crt0.o",
     ], "Ventus crt0")

@@ -96,6 +96,23 @@ The following environment variables adjust simulation behavior:
 
 ### Vulkan Ray Tracing Baseline
 
+2026-10-08 candidate spill/resume 源码检查点：gpgpu `706b0320c39`、
+driver `85c37b34f1c`、Mesa `9dc115b31b0`、Spike `2248b22b9f3`；
+LLVM 无改动。driver 隐藏 global allocation 为每 SM 提供 256 个
+384B 固定 parent-lane slots（96 KiB），同一 parent 的多次 resume 复用
+地址，无 recycle ring。candidate 写入收到 ACK 后才发布 continuation
+valid，物理 context 释放不 retire parent RT Local/PDS。
+
+提交前 32×16、1-warp intersection 历史对照为无 spill 391,973 cycles、
+有 spill 164,690 cycles；两版 RTL 图像相同且各自与 Spike 零差异，
+但相对 software 仍有已知像素 (20,9) 的蓝色 1 LSB 差异。
+本轮同时修改软件 lowering 和 L2 flush，2.38 倍速度差不是隔离 spill
+收益；跨 warp 软件次生光线重排尚未接入。64×32、1-warp 仍有额外
+RTL/Spike 差异待定位，此检查点不是全面正确性验收。
+运行时 provenance 保留原始未提交指纹，不回写为事后提交哈希。
+本地详细报告：
+`artifacts/rtcore-regression/reports/2026-10-08-candidate-spill-1warp-32x16/报告.md`。
+
 2026-09-18 开发检查点（不是替换下述历史性能基线）：gpgpu `a17af22`、
 Mesa `549471cacd0`。包含 lane 独立栈、固定分组多 IU 派发，以及启动寄存器
 分配修复：按 `max(shader需求, crt0需求)` 再对齐，SGPR 下限32，VGPR

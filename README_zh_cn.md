@@ -87,26 +87,28 @@ instance TLAS、SBT、descriptor 和输出图像，Spike 执行后把 storage im
 PPM。
 
 当前门禁比较同次运行的软件参考与 Spike／Verilator 图片，不再使用旧冻结哈希。
-先准备 `testcases/RTcoreSpikeCase/SaschaWillems_Vulkan` 的上游源码、依赖和 build，
-保留 testcases 中维护的应用／GLSL 覆盖文件，然后执行：
+固定上游与 testcases 中维护的五例覆盖文件统一组合到
+`build/rt-workload/source`，应用构建位于 `build/rt-workload/build`。执行：
 
 ```bash
 python3 tools/rtcore.py abi --check
+git submodule update --init testcases workloads/rt/SaschaWillems_Vulkan
+bash build-ventus.sh --build rt-workload
 bash build-ventus.sh --build rtcore-rtl
 python3 tools/rtcore.py regression --hardware-runner all --width 4 --height 4
 ```
 
-本阶段的实现改动、各构建目标职责、已知构建问题和审阅入口统一记录在
-[`docs/rtcore-spike-p1.md`](docs/rtcore-spike-p1.md)。
+当前构建、门禁和诊断入口记录在
+[`docs/rtcore/validation.md`](docs/rtcore/validation.md)。
 
 全例子的候选用例需要用 `--case` 显式选择并传入 `--include-candidates`，命令见
-英文 README。旧 `workloads/rt/prepare.sh` 只准备 shadows overlay，不是全例子的
-准备入口。运行产生的 ELF、日志和图像留在 `artifacts/`，不加入源码提交。
+英文 README。修改应用或 GLSL 后重新执行 `--build rt-workload`，准备脚本会
+重新生成 SPIR-V。运行产生的 ELF、日志和图像留在 `artifacts/`，不加入源码提交。
 
 实现边界和环境变量见
 [`mesa/src/ventus/README.md`](mesa/src/ventus/README.md)，workload 来源见
 [`workloads/rt/README.md`](workloads/rt/README.md)。这仍是有界功能路径，不等于
-Vulkan RT conformance；当前五例 4×4 RTL 出图验收范围见上述检查文档。
+Vulkan RT conformance；具体通过范围以每次新运行的图像门禁为准。
 
 ### 测试
 

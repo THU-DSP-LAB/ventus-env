@@ -94,133 +94,48 @@ The following environment variables adjust simulation behavior:
 * `NUM_THREAD=32` — Number of threads per warp reported by the POCL device. For `rtlsim`/`cyclesim`, this should match hardware specs; for `spike`, any value is acceptable.
 * `NUM_WARP=8` — Max warps per thread block reported by the POCL device. For `rtlsim`/`cyclesim`, match hardware specs; for `spike`, any value is acceptable.
 
-### Vulkan Ray Tracing Baseline
+### Vulkan Ray Tracing
 
-2026-10-08 candidate spill/resume 源码检查点：gpgpu `cd652c27122`、
-driver `85c37b34f1c`、Mesa `9dc115b31b0`、Spike `2248b22b9f3`；
-LLVM 无改动。driver 隐藏 global allocation 为每 SM 提供 256 个
-384B 固定 parent-lane slots（96 KiB），同一 parent 的多次 resume 复用
-地址，无 recycle ring。candidate 写入收到 ACK 后才发布 continuation
-valid，物理 context 释放不 retire parent RT Local/PDS。
+The maintained RT path uses a Vulkan megakernel compiled by Mesa/LLVM and
+executes through Spike or the cache-enabled Verilator RTcore. The driver
+allocates hidden global-memory candidate spill slots. Hardware batches pending
+sparse subsequent traversals without moving parent RT Local/PDS or changing
+shader lane organization; it does not yet sort rays by coherence key.
 
-32×16、1-warp intersection 历史对照为无 spill 391,973 cycles、
-有 spill 163,789 cycles（detailed，seed 922491232）；两版 RTL 图像相同，
-但相对 software 仍有已知像素 (20,9) 的蓝色 1 LSB 差异。
-同 seed 的 1/2/4/8-warp detailed 周期为
-163,789 / 144,067 / 137,290 / 136,266，RTL 均与 Spike 零差异；
-另两个 1-warp seed 也通过 RTL/Spike 图像比较。DCache flush 启动须等待
-前一 st1 read-hit 排空，避免共享 SRAM 读地址被覆盖。
-本轮同时涉及软件 lowering 和 cache 改动，2.39 倍速度差不是隔离 spill
-收益；跨 warp 软件次生光线重排尚未接入。当前源码尚未验证更大尺寸，
-此检查点不是全面正确性验收。
-运行时 provenance 保留原始未提交指纹，不回写为事后提交哈希。
-本地详细报告：
-`artifacts/rtcore-regression/reports/2026-10-08-candidate-spill-1warp-32x16/报告.md`。
+Prepare the fixed upstream source plus the maintained five-case overlay:
 
-2026-09-18 开发检查点（不是替换下述历史性能基线）：gpgpu `a17af22`、
-Mesa `549471cacd0`。包含 lane 独立栈、固定分组多 IU 派发，以及启动寄存器
-分配修复：按 `max(shader需求, crt0需求)` 再对齐，SGPR 下限32，VGPR
-覆盖v32，避免相邻 warp 覆盖启动临时寄存器。当前源码默认 **1 SM、
-8 LSU MSHR、外存延迟100 cycles**；1-cycle 仅是独立构建时的实验覆盖值。
-
-当前检查点的 shadows 单SM测试覆盖1×1、16×9、32×1/2/4/8/9/16/32，
-以及固定2:1的4×2至32×16曲线。固定比例曲线加1×1的九点中，100-cycle
-basic/detailed 周期及共有RT计数一致，两种延迟下18次detailed图像回归均与
-lavapipe零差异。测试在提交前运行，原始provenance与二进制哈希不回写。
-构建、安装及测试产物不纳入Git；本地报告见
-`artifacts/rtcore-regression/reports/2026-09-18-sm1-固定比例曲线/报告.md` 和
-`artifacts/rtcore-regression/reports/2026-09-18-sm1-外存延迟对照/报告.md`。
-旧的scheduler阻塞分类及按单路扣减的未选中计数尚未完全适配多发，不能用
-其中的零值断言无阻塞。尚未实施无candidate的traverse边界warp切换。
-
-当前 RTCore 性能基线标签：`baseline/rtcore-embree4-2026-09-15`。
-该检查点固定顶层及子模块源码，采用 Embree 3.13.4 建树，保持 VTAS ABI
-和现有 RTL 不变；尚未加入 resident AS cache 或更宽的 Scheduler 发射。
-
-16×9、seed `544222971`、单帧、2 SM、32 lane、单 Verilator 线程、外部读延迟
-100 cycles：shadows 为 **94,299 cycles**，reflections 为 **160,499 cycles**。
-两例 basic/detailed 周期、共有 PMU 计数和 shader ELF 完全一致，图像与
-lavapipe 零差异；另外验证了五个例子的 1×1 图像。off 模式及更大分辨率
-不在本次基线验收范围内，不代表 Vulkan 全面兼容性验证。
-
-复现时应显式选择 `VENTUS_VK_BVH_BUILDER=embree4`，并在 canonical
-`mesa/build-ventus` 启用 `-Dventus_embree=enabled`。可用
-`-Dventus_embree_prefix=/absolute/embree-sdk` 指定 Embree 3 二进制 SDK；
-SDK 不包含在 Git 中。建树策略、栈预算和构建说明见
-[BVH.md](mesa/src/ventus/vulkan/BVH.md)。
-
-验收记录均在 `artifacts/rtcore-regression/runs/`：detailed 为
-`20260915T133151.467205Z-831583`，basic 为
-`20260915T135354.348742Z-1026213`，同二进制 Morton 对照为
-`20260915T133518.072949Z-867553`。测试在提交前执行，provenance 记录了
-当时的未提交源码指纹；未将已有、且测试中禁用的 callback 调试改动纳入提交。
-详细[中文报告](docs/rtcore/baselines/2026-09-15-embree4.md)和原始 artifacts
-按现有忽略策略仅保存在本地，不随 checkout 恢复；本节保留验收摘要。
-
-The pinned ray-tracing submodules can execute a real Vulkan RT vertical slice
-on the Ventus Spike backend or the cache-enabled Verilator RTL backend. The
-verified path runs the SaschaWillems
-`raytracingshadows` application through the Mesa Ventus ICD, compiles its
-SPIR-V shaders through NIR/LLVM into a Ventus RISC-V ELF, builds and uploads
-triangle BLAS plus instance TLAS data, executes the generated raygen kernel on
-Spike, and reads the storage image back as PPM.
-
-The manifest-driven regression is the sole full-application correctness gate.
-It preserves every invocation under
-`artifacts/rtcore-regression/runs/<run-id>/<case>/<geometry>/software|spike|verilator`.
-The command prints the run directory before rendering. Older results in the
-previous `<case>/<geometry>` layout remain untouched:
-
-```bash
-# Functional reference (default) and RTL/PMU execution use the same application.
-python3 tools/rtcore.py regression --hardware-runner spike --width 4 --height 4
-bash build-ventus.sh --build rtcore-rtl
-python3 tools/rtcore.py regression --hardware-runner verilator --width 1 --height 1
-# Capture both backends without overwriting either result.
-python3 tools/rtcore.py regression --hardware-runner all --width 1 --height 1
-# Include the callback, texture, recursion and SBT candidate cases explicitly.
-python3 tools/rtcore.py regression --include-candidates --case raytracingshadows \
-  --case raytracingsbtdata --case raytracingintersection --case raytracingreflections \
-  --case raytracingtextures --hardware-runner all --width 4 --height 4
+```sh
+git submodule update --init testcases workloads/rt/SaschaWillems_Vulkan
+bash build-ventus.sh --build "rt-toolchain;spike;driver-spike;mesa;rt-workload"
 python3 tools/rtcore.py abi --check
+python3 tools/rtcore.py regression --hardware-runner spike --width 1 --height 1
+VENTUS_PMU_MODE=detailed bash build-ventus.sh --build rtcore-rtl
+python3 tools/rtcore.py regression --hardware-runner all --pmu-mode detailed \
+  --include-candidates --case raytracingshadows --case raytracingsbtdata \
+  --case raytracingintersection --case raytracingreflections \
+  --case raytracingtextures --width 4 --height 4
 ```
 
-The Verilator run emits `verilator/perf.json` and its validated
-`verilator/perf-summary.json`; the ordinary `env.sh` default remains Spike.
-Each renderer writes `begin.json` before launch and `render.json` on exit or
-timeout, including the exit status and a bounded error excerpt. An image
-captured before a process crash is retained for comparison but cannot pass
-the regression. Comparisons include differing-pixel counts by row and column,
-their bounding rectangle, and up to 16 RGB samples. With `--hardware-runner
-all`, `comparison.spike-verilator.json` also directly compares the two hardware
-backends. `provenance.json` records source state and runtime-library hashes.
+The shared workload is generated at build/rt-workload/source and built at
+build/rt-workload/build. Repeat --build rt-workload after changing maintained
+application or GLSL sources; ordinary app targets do not regenerate SPIR-V.
+Use --workload-dir and --build-dir for an explicitly prepared alternative.
+All full-app runs use canonical mesa/build-ventus.
 
-For RTL image failures, first map the differing pixels to the scene and inspect
-the corresponding source semantics. Recompute existing ray/AABB inputs and
-turn the smallest failing case into a unit test before rebuilding the full
-model. A new trace should distinguish a concrete pair of hypotheses and have
-a bounded output size. Run normal regressions without detailed traces, and
-advance from 1x1 and 4x4 to multi-warp images only after the smaller gates pass.
+The manifest-driven image runner is the full-application correctness gate.
+Every invocation retains renderer status, fresh images/ELFs, provenance and
+comparisons under artifacts/rtcore-regression/runs/<run-id>. A renderer crash
+cannot pass even if it produced an image. Candidate cases require explicit
+selection. RTL/Spike equality alone is not software-reference equality:
+32×16 intersection measurements retain a known blue-channel 1 LSB difference
+against software. This path is not Vulkan RT conformance.
 
-The implementation changes, build-target responsibilities, known build
-pitfalls, and review entry points are collected in the Chinese
-[`docs/rtcore-spike-p1.md`](docs/rtcore-spike-p1.md).
-
-The all-example runner uses the prepared workload under
-`testcases/RTcoreSpikeCase/SaschaWillems_Vulkan`; its manifest and maintained
-application/shader overrides are versioned in `testcases`. The surrounding
-SaschaWillems source, dependencies and configured build must already exist;
-this is not supplied by the regression runner. `--workload-dir` and
-`--build-dir` select another deliberately prepared tree. The older
-`workloads/rt/prepare.sh` prepares a shadows-only upstream overlay, not this
-all-example suite. Generated ELFs, logs, and images stay in `artifacts/`.
-
-Implementation details and environment variables are documented in
-[`mesa/src/ventus/README.md`](mesa/src/ventus/README.md), and workload
-provenance is documented in
-[`workloads/rt/README.md`](workloads/rt/README.md). This is a bounded functional
-path, not Vulkan RT conformance. The current validated image baseline is
-documented in [`docs/rtcore-spike-p1.md`](docs/rtcore-spike-p1.md).
+See [build and validation](docs/rtcore/validation.md),
+[candidate spill and hardware batching](docs/rtcore/candidate-spill-and-task-batching.md),
+[workload preparation](workloads/rt/README.md), and
+[Mesa implementation](mesa/src/ventus/README.md).
+Detailed historical measurements are local evidence under
+artifacts/rtcore-regression/reports, not source checkout dependencies.
 
 ### Performance Attribution for PTX Backend
 

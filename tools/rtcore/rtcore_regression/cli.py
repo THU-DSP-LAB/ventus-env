@@ -22,8 +22,9 @@ from .reporting import fingerprint, log_excerpt, render_status, source_state, wr
 
 
 ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_WORKLOAD = ROOT / "testcases/RTcoreSpikeCase/SaschaWillems_Vulkan"
-DEFAULT_MANIFEST = DEFAULT_WORKLOAD / "ventus_rtcore_regression_cases.json"
+DEFAULT_WORKLOAD = ROOT / "build/rt-workload/source"
+DEFAULT_MANIFEST = ROOT / "testcases/RTcoreSpikeCase/SaschaWillems_Vulkan/ventus_rtcore_regression_cases.json"
+DEFAULT_BUILD = ROOT / "build/rt-workload/build"
 
 # Keep the RTL backend definition here alongside its implementation.
 # A manifest may still
@@ -42,6 +43,11 @@ BUILTIN_HARDWARE_RUNNERS: dict[str, dict[str, Any]] = {
 
 class RegressionError(RuntimeError):
     pass
+
+
+def workload_build_dir(workload: Path, explicit: Path | None, defaults: dict) -> Path:
+    return (explicit or (DEFAULT_BUILD if workload == DEFAULT_WORKLOAD
+                         else workload / defaults["build_dir"])).resolve()
 
 
 def with_rtlsim_variant(runner: dict[str, Any], pmu_mode: str, variant: str) -> dict[str, Any]:
@@ -642,7 +648,7 @@ def main(argv: list[str] | None = None) -> int:
         require_file(workload / "CMakeLists.txt", "SaschaWillems workload")
         defaults = manifest["defaults"]
         available_runners = hardware_runners(defaults)
-        build_dir = (args.build_dir or workload / defaults["build_dir"]).resolve()
+        build_dir = workload_build_dir(workload, args.build_dir, defaults)
         width = args.width if args.width is not None else defaults["width"]
         height = args.height if args.height is not None else defaults["height"]
         frames = args.benchmark_frames if args.benchmark_frames is not None else defaults["benchmark_frames"]
@@ -677,6 +683,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Run directory: {args.out_dir}", flush=True)
         write_json(args.out_dir / "provenance.json", {
             "sources": source_state(ROOT),
+            "workload": str(workload),
+            "workload_inputs": fingerprint(workload / ".ventus-rt-inputs"),
             "manifest": fingerprint(args.manifest),
             "pmu_mode": args.pmu_mode,
             "runners": {name: config for name, config in runners},

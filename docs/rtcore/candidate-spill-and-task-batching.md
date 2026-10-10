@@ -4,7 +4,7 @@
 
 candidate spill/resume 允许 shader callback 执行期间释放物理遍历资源；硬件任务合批把已经等待的稀疏后续 ray 请求装入同一组 execution lane，提高 traversal 并行度。两者共享同一原则：parent 的 RT Local SRAM 和 PDS 不迁移，执行代理只改变访问索引。
 
-本文对应2026-10-09的实际代码，不是最初的PTE、动态页分配或recycle-ring提案。spill使用固定parent-lane slot；任务合批仍处于traversal边界，不支持运行中插入新lane，也尚未按node或AABB key排序。
+spill使用固定parent-lane slot；任务合批处于traversal边界，不支持运行中插入新lane，也尚未按node或AABB key排序。
 
 硬件合批实现于2026-10-10提交为gpgpu `bd6c0102952539225cb64c4f1d69a7a2fce4eea5`。基线checkpoint为顶层 `ae49769a45025977f04c4e33ac042ecc07b8046c`、gpgpu `2eba19b6c0c463881c1c5add9439febb14ac1f10`。2026-10-09测试时实现尚未提交，对应tracked diff SHA256为 `96083497ac344a3b6d6f3b2826eeea902a735b48d71e6743d34cc46732aa485b`；本次提交内容与该测试指纹完全一致。完整性能数据及更新后的顶层checkpoint见[硬件合批报告](../../artifacts/rtcore-regression/reports/2026-10-09-hardware-task-batching/报告.md)。
 

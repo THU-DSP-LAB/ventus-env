@@ -8,7 +8,13 @@ install-rt/
 install-rtcore-rtl/
 install-pdswarpbase/
 artifacts/
-/docs/
+# Formal documentation is tracked; measurements belong in artifacts/.
+/docs/rtcore/checkpoints/
+/install-*
+/.agents/
+/.codex/
+# Keep maintained RT sources visible even with legacy local info/exclude rules.
+!/tools/rtcore/
 regression-test-logs/
 out/
 nohup.out

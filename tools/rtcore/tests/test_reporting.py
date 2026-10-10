@@ -1,4 +1,4 @@
-"""Run with python3 -m unittest tools.rtcore.rtcore_regression.test_reporting."""
+"""Run with python3 -m unittest tools.rtcore.tests.test_reporting."""
 import json
 import os
 from pathlib import Path
@@ -8,9 +8,9 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from . import cli
-from .cli import RegressionError, compare_images, parse_ppm, run_command
-from .reporting import log_excerpt
+from ..rtcore_regression import cli
+from ..rtcore_regression.cli import RegressionError, compare_images, parse_ppm, run_command
+from ..rtcore_regression.reporting import log_excerpt
 
 
 class ReportingTest(unittest.TestCase):

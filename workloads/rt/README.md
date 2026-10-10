@@ -1,37 +1,30 @@
-# Ventus RT workload
+# Ventus RT 回归输入
 
-本目录保存 Ventus Vulkan RT 全应用验证所需的、可复现的 workload 输入。
+光追回归只使用一套维护输入：
 
-`SaschaWillems_Vulkan/` 直接引用官方
-[`SaschaWillems/Vulkan`](https://github.com/SaschaWillems/Vulkan) 仓库，固定在
-`3b843fbf667a89a1cfcc64405e9fc6f9018e03b4`。不要把它替换成浮动的
-`master`，也不要在子模块内直接保存 Ventus 修改。
+- `workloads/rt/SaschaWillems_Vulkan`：固定官方源码提交 `3b843fbf667a89a1cfcc64405e9fc6f9018e03b4`，不直接修改。
+- `testcases/RTcoreSpikeCase/SaschaWillems_Vulkan`：五例应用、GLSL、场景、截图钩子和 manifest。
+- `build/rt-workload/source`：准备脚本组合出的完整源码与生成的 SPIR-V。
+- `build/rt-workload/build`：应用构建目录，不纳入 Git。
 
-`ventus-overlay/` 只保存 Ventus 自己维护的差异：
-
-- `raytracingshadows.patch`：增加场景选择和 storage image PPM 导出；
-- `vulkanscene_shadow_minimal.gltf`：用于快速 ABI、SBT、payload 与 hit/miss
-  冒烟验证的两三角形场景；
-- `provenance.md`：记录上游版本、资产来源和迁移边界。
-
-首次使用时只初始化 workload 源码子模块：
+从仓库根目录执行：
 
 ```sh
-git submodule update --init workloads/rt/SaschaWillems_Vulkan
-workloads/rt/prepare.sh
-```
-
-`prepare.sh` 会自行初始化固定版本的 GLM，并从公开的
-`SaschaWillems/Vulkan-Assets` 仓库稀疏获取
-`models/vulkanscene_shadow.gltf`，不会递归下载完整资产仓库。它会校验源码提交、
-GLM 提交、资产提交及场景 SHA-256，然后在 `build/rt-workload/source/` 中复制上游
-源码并应用 overlay；官方子模块始终保持干净。
-
-从仓库根目录构建 workload：
-
-```sh
+git submodule update --init testcases workloads/rt/SaschaWillems_Vulkan
 bash build-ventus.sh --build rt-workload
+python3 tools/rtcore.py regression --hardware-runner spike --width 1 --height 1
 ```
 
-完整 Spike RT 构建和逐字节出图验证命令见仓库根目录的
-[`README_zh_cn.md`](../../README_zh_cn.md)。
+准备脚本初始化固定 GLM 提交 `1ad55c5016339b83b7eec98c31007e0aee57d2bf`，
+从 Git 对象导出上游，仅叠加 testcases 中已跟踪的维护输入，再重新编译五例的
+GLSL。本地额外测例、诊断 shader、已有构建产物不会混入生成树。
+上游首次初始化可能需要联网；场景资产直接来自 testcases，无需拉取整个资产库。
+
+重复准备只刷新脚本拥有的生成树。已有旧构建没有 ownership 标记时不会覆盖；
+可用 `RT_WORKLOAD_BUILD_ROOT` 选择新目录，并在回归中显式传入对应的
+`--workload-dir` 和 `--build-dir`。已有个人 workload 也可继续通过这两个选项使用。
+
+每次改动应用或 GLSL 后重新执行 `--build rt-workload`。五例完整运行命令和
+验证边界见 [RT 使用说明](../../docs/rtcore/validation.md)。
+`tests/resource_layout` 是独立的 descriptor/多 geometry 定向测试，应保留；
+它不代替五例图像回归。

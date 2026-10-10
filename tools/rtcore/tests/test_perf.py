@@ -1,10 +1,10 @@
-"""Run with python3 -m unittest tools.rtcore.rtcore_regression.test_perf."""
+"""Run with python3 -m unittest tools.rtcore.tests.test_perf."""
 import json
 from pathlib import Path
 import tempfile
 import unittest
 
-from .perf import COUNTERS, load_snapshot, summarize
+from ..rtcore_regression.perf import COUNTERS, load_snapshot, summarize
 
 
 def snapshot(*sms):

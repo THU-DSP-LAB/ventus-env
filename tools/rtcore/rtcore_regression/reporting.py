@@ -25,7 +25,8 @@ def fingerprint(path: Path) -> dict:
 
 def source_state(root: Path) -> dict:
     result = {}
-    for name in ("gpgpu", "driver", "mesa", "llvm", "spike"):
+    for name in ("gpgpu", "driver", "mesa", "llvm", "spike", "testcases",
+                 "workloads/rt/SaschaWillems_Vulkan"):
         repo = root / name
         revision = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
                                   capture_output=True, text=True)

@@ -283,19 +283,18 @@ build_mesa_ventus() {
 }
 
 build_rt_workload() {
-  # The frozen compatibility image was produced by the sample's headless
-  # platform path.  XCB has a different benchmark/warm-up lifecycle and can
-  # submit an extra frame, so it is not an equivalent functional gate.
+  # Use the same headless application and maintained inputs for both renderers.
   local rt_workload_build_type="${RT_WORKLOAD_BUILD_TYPE:-}"
 
   RT_WORKLOAD_BUILD_ROOT=${RT_WORKLOAD_BUILD_ROOT} \
   RT_WORKLOAD_SOURCE_DIR=${RT_WORKLOAD_SOURCE_DIR} \
-    ${RT_WORKLOAD_DIR}/prepare.sh
+    bash "${RT_WORKLOAD_DIR}/prepare.sh"
 
   cmake -G Ninja -B ${RT_WORKLOAD_BUILD_DIR} -S ${RT_WORKLOAD_SOURCE_DIR} \
     -DCMAKE_BUILD_TYPE="${rt_workload_build_type}" \
     -DUSE_HEADLESS=ON
-  ninja -C ${RT_WORKLOAD_BUILD_DIR} raytracingshadows
+  ninja -C ${RT_WORKLOAD_BUILD_DIR} raytracingshadows raytracingsbtdata \
+    raytracingintersection raytracingreflections raytracingtextures
 }
 
 # Build sbtsim (SBT translator) and install via CMake rules to ${VENTUS_INSTALL_PREFIX}

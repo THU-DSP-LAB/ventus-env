@@ -90,7 +90,7 @@ The following environment variables adjust simulation behavior:
 * `VENTUS_TIMING_DDR=0` — Disable DDR timing in `cyclesim` (enabled by default). Current RTL simulation does not support DDR timing.
 * `VENTUS_RTL_EXTMEM_LATENCY=100` — Fixed non-LDS memory response latency used when generating the cache-enabled Verilator RTL; default is 100 cycles.
 * `VENTUS_RTLSIM_PERF_JSON=path` — Write the final cache-enabled Verilator PMU snapshot, including RTcore boundary counters, as JSON when the device closes.
-* `VENTUS_SPIKE_LOG=1` - Enable `spike` simulator to output instruction-granularity log into file. (disabled by default)
+* `VENTUS_SPIKE_LOG=1` — Enable Spike instruction-level file logs. `env.sh` sets this to `0`; keep it explicitly disabled for large runs.
 * `NUM_THREAD=32` — Number of threads per warp reported by the POCL device. For `rtlsim`/`cyclesim`, this should match hardware specs; for `spike`, any value is acceptable.
 * `NUM_WARP=8` — Max warps per thread block reported by the POCL device. For `rtlsim`/`cyclesim`, match hardware specs; for `spike`, any value is acceptable.
 
@@ -108,13 +108,16 @@ Prepare the fixed upstream source plus the maintained five-case overlay:
 git submodule update --init testcases workloads/rt/SaschaWillems_Vulkan
 bash build-ventus.sh --build "rt-toolchain;spike;driver-spike;mesa;rt-workload"
 python3 tools/rtcore.py abi --check
-python3 tools/rtcore.py regression --hardware-runner spike --width 1 --height 1
+python3 tools/rtcore.py regression
 VENTUS_PMU_MODE=detailed bash build-ventus.sh --build rtcore-rtl
-python3 tools/rtcore.py regression --hardware-runner all --pmu-mode detailed \
-  --include-candidates --case raytracingshadows --case raytracingsbtdata \
-  --case raytracingintersection --case raytracingreflections \
-  --case raytracingtextures --width 4 --height 4
+python3 tools/rtcore.py regression --backend all --pmu-mode detailed
 ```
+
+The default runs all five examples at 16×9 with software-reference/Spike image
+comparison. Use `--backend software|spike|rtl|all` to select renderers;
+software-only captures images without a hardware comparison. Select a different
+size with `--width WIDTH --height HEIGHT`, or one example with
+`--case raytracingintersection` (repeat `--case` for several).
 
 The shared workload is generated at build/rt-workload/source and built at
 build/rt-workload/build. Repeat --build rt-workload after changing maintained
@@ -125,15 +128,13 @@ All full-app runs use canonical mesa/build-ventus.
 The manifest-driven image runner is the full-application correctness gate.
 Every invocation retains renderer status, fresh images/ELFs, provenance and
 comparisons under artifacts/rtcore-regression/runs/<run-id>. A renderer crash
-cannot pass even if it produced an image. Candidate cases require explicit
-selection. RTL/Spike equality alone is not software-reference equality:
-32×16 intersection measurements retain a known blue-channel 1 LSB difference
-against software. This path is not Vulkan RT conformance.
+cannot pass even if it produced an image. Hardware images are checked against
+the software reference using the manifest's per-case pixel thresholds.
+This regression is not Vulkan RT conformance.
 
 See [build and validation](docs/rtcore/validation.md),
 [candidate spill and hardware batching](docs/rtcore/candidate-spill-and-task-batching.md),
-[workload preparation](workloads/rt/README.md), and
-[Mesa implementation](mesa/src/ventus/README.md).
+[workload preparation](workloads/rt/README.md).
 Detailed historical measurements are local evidence under
 artifacts/rtcore-regression/reports, not source checkout dependencies.
 
@@ -272,21 +273,8 @@ python3 run_test_parallel.py --json test_list_new.json --max-workers 20
 **Notes**
 
 * OpenCL-CTS is large for simulators and runs take a long time. We run CTS on `spike` only to verify software-stack correctness.
-* The `spike` simulator produces instruction-level logs by default. Running CTS can generate *huge* logs. Before large CTS runs, consider disabling logs in `build-ventus.sh` by removing `--enable-commitlog`:
-
-```diff
---- a/build-ventus.sh
-+++ b/build-ventus.sh
-@@ -183,7 +183,7 @@ build_spike() {
-   # rm -rf ${SPIKE_BUILD_DIR} || true
-   mkdir -p ${SPIKE_BUILD_DIR}
-   cd ${SPIKE_BUILD_DIR}
--  ../configure --prefix=${VENTUS_INSTALL_PREFIX} --enable-commitlog
-+  ../configure --prefix=${VENTUS_INSTALL_PREFIX}
-   make -j${BUILD_PARALLEL}
-   make install
- }
-```
+* Keep `VENTUS_SPIKE_LOG=0` for large runs to avoid huge instruction logs.
+  `source env.sh` already sets this; no simulator rebuild is needed.
 
 ## Developer Setup
 

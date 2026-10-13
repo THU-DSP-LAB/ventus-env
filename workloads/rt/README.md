@@ -12,7 +12,7 @@
 ```sh
 git submodule update --init testcases workloads/rt/SaschaWillems_Vulkan
 bash build-ventus.sh --build rt-workload
-python3 tools/rtcore.py regression --hardware-runner spike --width 1 --height 1
+python3 tools/rtcore.py regression
 ```
 
 准备脚本初始化固定 GLM 提交 `1ad55c5016339b83b7eec98c31007e0aee57d2bf`，

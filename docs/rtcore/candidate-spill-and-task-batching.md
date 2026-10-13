@@ -6,8 +6,6 @@ candidate spill/resume 允许 shader callback 执行期间释放物理遍历资�
 
 spill使用固定parent-lane slot；任务合批处于traversal边界，不支持运行中插入新lane，也尚未按node或AABB key排序。
 
-硬件合批实现于2026-10-10提交为gpgpu `bd6c0102952539225cb64c4f1d69a7a2fce4eea5`。基线checkpoint为顶层 `ae49769a45025977f04c4e33ac042ecc07b8046c`、gpgpu `2eba19b6c0c463881c1c5add9439febb14ac1f10`。2026-10-09测试时实现尚未提交，对应tracked diff SHA256为 `96083497ac344a3b6d6f3b2826eeea902a735b48d71e6743d34cc46732aa485b`；本次提交内容与该测试指纹完全一致。完整性能数据及更新后的顶层checkpoint见[硬件合批报告](../../artifacts/rtcore-regression/reports/2026-10-09-hardware-task-batching/报告.md)。
-
 ## Parent 与 execution lane
 
 parent 是 shader 的原始物理warp行和lane；它拥有ray header、candidate/committed hit records、callback decision及PDS。execution lane 是当前RTcore session中的遍历位置，拥有本轮临时ray context、stack与IU状态。一个parent可以先后使用不同execution lane，但持久数据仍在同一parent位置。
@@ -66,6 +64,8 @@ pool不属于PDS，不作为shader可用的allocation发布。driver首次按cor
 | +0x100 Page2 | 128B | 32个overflow nodeRef |
 
 Page1的word0/1/2/3/4依次为base tags、overflow tags、stack depth、valid、Instance nodeRef。无Instance时用InvalidNodeRef。总可编码stack depth最多64；base部分32项，overflow部分32项。
+
+物理session只有四份共享overflow stack，并非每个execution lane都有独立overflow。需要overflow的lane在资源可用时推进；global slot的Page2固定预留不增加物理overflow并行容量。
 
 每次spill写全部三页，每页请求都等待对应LSU response后再继续。普通base-only恢复只读Page0/1；depth>32时再读Page2。TERMINATE不读取任何stack page。LSU地址要求128B对齐；当前共享页buffer不另外复制第二份完整image。
 
@@ -202,9 +202,9 @@ waitResult阶段持有scheduler已有的completion，不额外复制32-lane状�
 6. 每个原请求返回一次completion；请求lane数等于回包lane数及物理命令histogram的加权lane数。
 7. pool epoch不能在同RTcore并发复用；不同descriptor不合批，但这不提供并发epoch的隔离能力。
 
-现有验证包括slot编码、fixed bindings、parent SRAM访问、spill全页ack、base-only与TERMINATE读取规则、object恢复、candidate/committed生命周期、独立parent额度、bank容量不足不拆请求、请求与回包backpressure、新ray历史和warp row复用。全量Scala测试74/74、完整detailed RTL编译、1×1三个例子6/6 strict smoke通过。
+定向测试覆盖slot编码、fixed bindings、parent SRAM访问、spill全页ack、base-only与TERMINATE读取规则、object恢复、candidate/committed生命周期、独立parent额度、bank容量不足不拆请求、请求与回包backpressure、新ray历史和warp row复用。
 
-32×16四种配置的12项RTL/Spike比较零差异；shadows/reflections与software一致，intersection保留既有单像素1LSB差异。图像矩阵尚未额外构造会实际跨parent合批的完整candidate callback压力场景。
+构建和图像回归入口见[验证说明](validation.md)。具体提交、运行库哈希、图像差异和性能测量保存在 `artifacts/rtcore-regression/`，不作为本设计文档的固定通过结论。
 
 ## 代码入口与后续演进
 

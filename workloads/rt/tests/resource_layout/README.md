@@ -4,13 +4,17 @@ Run from the repository root:
 
 ```sh
 python3 workloads/rt/tests/resource_layout/run.py
-python3 workloads/rt/tests/resource_layout/run.py --backend rtl --rtl-variant basic-sm1-curve
+python3 workloads/rt/tests/resource_layout/run.py --backend rtl --rtl-variant basic-YOUR_VARIANT
 ```
 
 The first command compiles one set of SPIR-V files and runs the same program
 against lavapipe and canonical `mesa/build-ventus` with Spike. The RTL command
 uses an **existing** isolated runtime and its matching driver/crt0; it does not
-rebuild hardware or change `install/`. `--variant` may be repeated to select
+rebuild hardware or change `install/`. Replace `basic-YOUR_VARIANT` with the
+suffix of your existing `install-rtcore-rtl-<suffix>` and matching
+`driver/build-rtcore-rtl-<suffix>` directories. This probe's RTL path requires
+a basic-PMU build; it is separate from the five-case image runner.
+`--variant` may be repeated to select
 `single`, `rebind`, `aabb`, `aabb-rebind`, or the diagnostic `aabb-onegeometry`.
 The default four variants exclude the diagnostic control.
 
@@ -58,5 +62,6 @@ layout/binding flags are rejected. Runtime-sized descriptor arrays,
 update-after-bind, nonuniform indexing, separate image/sampler descriptors,
 and arbitrary image formats/dimensions are not covered by this probe.
 
-This work does not implement Ray Query, change model partitioning, or add
-hardware traversal spill storage.
+This probe does not cover Ray Query or rewrite application BLAS/TLAS
+partitioning. Dated validation results are retained under
+`artifacts/rtcore-regression/reports/`, not in the test source directory.

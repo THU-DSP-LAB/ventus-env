@@ -12,8 +12,8 @@
 	branch = develop
 [submodule "pocl"]
 	path = pocl
-	url = https://github.com/THU-DSP-LAB/pocl.git
-	branch = develop
+	url = https://github.com/shiliuww/pocl.git
+	branch = feature/ray-tracing
 [submodule "ocl-icd"]
 	path = ocl-icd
 	url = https://github.com/OCL-dev/ocl-icd.git

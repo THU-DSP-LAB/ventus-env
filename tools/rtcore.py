@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Maintain the RT ABI and run software/Spike/Verilator image regressions.
 
-Background: keep the two maintained RT tools behind one portable entry point.
+Background: keep RT validation and analysis behind one portable entry point.
 Flow: dispatch ABI generation/checking, the image gate or offline PMU reporting.
 Usage: python3 tools/rtcore.py abi --check
-       python3 tools/rtcore.py regression --hardware-runner all --width 4 --height 4
+       python3 tools/rtcore.py regression --backend all --width 16 --height 9
        python3 tools/rtcore.py report --run LABEL=RUN_DIR --output REPORT_DIR
        python3 tools/rtcore.py coherence --log RENDER_LOG --output REPORT_DIR
 Maintenance: implementation and tests live in tools/rtcore; no PYTHONPATH setup

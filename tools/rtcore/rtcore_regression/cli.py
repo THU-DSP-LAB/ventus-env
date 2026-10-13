@@ -1,4 +1,4 @@
-"""Manifest-driven dual-renderer Vulkan RT image regression."""
+"""Five-case Vulkan RT image regression (default: 16x9, software versus Spike)."""
 from __future__ import annotations
 
 import argparse
@@ -339,19 +339,14 @@ def hardware_runners(defaults: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return result
 
 
-def select_cases(manifest: dict[str, Any], wanted: list[str], include_candidates: bool) -> list[dict[str, Any]]:
+def select_cases(manifest: dict[str, Any], wanted: list[str]) -> list[dict[str, Any]]:
     cases = {case["id"]: case for case in manifest["cases"]}
-    ids = wanted or [case["id"] for case in manifest["cases"] if case["status"] == "verified"]
+    ids = wanted or list(cases)
     selected: list[dict[str, Any]] = []
     for case_id in ids:
         case = cases.get(case_id)
         if not case:
             raise RegressionError(f"unknown case '{case_id}'")
-        if case["status"] != "verified" and not include_candidates:
-            raise RegressionError(
-                f"{case_id} is {case['status']}: {case['reason']} "
-                "(pass --include-candidates to run it explicitly)"
-            )
         selected.append(case)
     return selected
 
@@ -378,7 +373,7 @@ def software_render(case: dict[str, Any], defaults: dict[str, Any], workload: Pa
                     timeout_seconds: int) -> Path:
     capture_name = case.get("software_capture_env")
     if not capture_name:
-        raise RegressionError(f"{case['id']} has no software capture hook: {case['reason']}")
+        raise RegressionError(f"{case['id']} has no software capture hook")
     icd = Path(defaults["software_icd"])
     require_file(icd, "Lavapipe ICD")
     if not shutil.which("xvfb-run"):
@@ -584,9 +579,9 @@ def record_case(case: dict[str, Any], runner_name: str, workload: Path, app: Pat
         for path in sorted(render_dir.rglob("*.riscv"))
     ]
     metadata = {
-        "case": case["id"], "runner": runner_name, "case_status": case["status"],
+        "case": case["id"], "runner": runner_name,
         "status": "passed" if result["passed"] else "failed",
-        "reason": case["reason"],
+        "description": case.get("description", ""),
         "timestamp_unix": time.time(), "workload": str(workload),
         "workload_git_revision": git_revision(workload), "app": str(app),
         "app_sha256": sha256(app), "manifest": str(manifest_path.resolve()),
@@ -620,16 +615,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--build-dir", type=Path)
     parser.add_argument("--out-dir", type=Path, default=ROOT / "artifacts/rtcore-regression",
                         help="artifact root; each invocation creates runs/<unique-id> below it")
-    parser.add_argument("--case", action="append", default=[])
-    parser.add_argument("--include-candidates", action="store_true")
-    parser.add_argument("--hardware-runner", default="spike",
-                        help="spike, verilator, or all (default: spike)")
+    parser.add_argument("--case", action="append", default=[],
+                        help="run only this example; repeat to select several (default: all five)")
+    backends = parser.add_mutually_exclusive_group()
+    backends.add_argument("--backend", choices=("software", "spike", "rtl", "all"),
+                          help="renderer to run (default: spike); hardware includes software comparison")
+    backends.add_argument("--hardware-runner", choices=("spike", "verilator", "all"),
+                          help=argparse.SUPPRESS)
     parser.add_argument("--pmu-mode", choices=("off", "basic", "detailed"), default="off",
                         help="Verilator PMU elaboration mode; must match build-ventus.sh rtcore-rtl")
     parser.add_argument("--rtlsim-variant", default="",
                         help="use isolated install-rtcore-rtl-<pmu>-<variant> and matching driver build")
-    parser.add_argument("--width", type=int)
-    parser.add_argument("--height", type=int)
+    parser.add_argument("--width", type=int, help="image width (default: 16)")
+    parser.add_argument("--height", type=int, help="image height (default: 9)")
     parser.add_argument("--benchmark-frames", type=int)
     parser.add_argument("--timeout-seconds", type=int,
                         help="per-renderer timeout; timed-out cases are reported and skipped")
@@ -641,13 +639,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="require vt.rt.release in fresh ELF and bounded Spike control trace")
     parser.add_argument("--no-build", action="store_true")
     args = parser.parse_args(argv)
+    args.backend = args.backend or {"verilator": "rtl"}.get(args.hardware_runner,
+                                                           args.hardware_runner) or "spike"
     try:
         manifest = load_manifest(args.manifest)
         workload = args.workload_dir.resolve()
         args.out_dir = args.out_dir.resolve()
         require_file(workload / "CMakeLists.txt", "SaschaWillems workload")
         defaults = manifest["defaults"]
-        available_runners = hardware_runners(defaults)
+        available_runners = hardware_runners(defaults) if args.backend != "software" else {}
         build_dir = workload_build_dir(workload, args.build_dir, defaults)
         width = args.width if args.width is not None else defaults["width"]
         height = args.height if args.height is not None else defaults["height"]
@@ -656,8 +656,8 @@ def main(argv: list[str] | None = None) -> int:
                 (args.timeout_seconds is not None and args.timeout_seconds <= 0) or
                 (args.max_abs_error is not None and args.max_abs_error < 0)):
             raise RegressionError("image dimensions, frame count, and error limit must be non-negative")
-        runner_names = (sorted(available_runners)
-                        if args.hardware_runner == "all" else [args.hardware_runner])
+        runner_names = {"software": [], "spike": ["spike"],
+                        "rtl": ["verilator"], "all": ["spike", "verilator"]}[args.backend]
         if args.spike_commit_log and "spike" not in runner_names:
             raise RegressionError("--spike-commit-log requires the spike runner")
         if args.require_rt_release and "spike" not in runner_names:
@@ -673,10 +673,10 @@ def main(argv: list[str] | None = None) -> int:
                 runners.append((runner_name, runner))
         if len(runners) != len(runner_names):
             available = ", ".join(sorted(available_runners))
-            raise RegressionError(f"unknown hardware runner '{args.hardware_runner}' (available: {available})")
+            raise RegressionError(f"missing backend '{args.backend}' (available runners: {available})")
         for runner_name, runner in runners:
             preflight_runner(runner_name, runner, args.pmu_mode)
-        selected = select_cases(manifest, args.case, args.include_candidates)
+        selected = select_cases(manifest, args.case)
         args.out_dir = args.out_dir / "runs" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
                                                 + f"-{os.getpid()}")
         args.out_dir.mkdir(parents=True, exist_ok=False)
@@ -687,6 +687,7 @@ def main(argv: list[str] | None = None) -> int:
             "workload_inputs": fingerprint(workload / ".ventus-rt-inputs"),
             "manifest": fingerprint(args.manifest),
             "pmu_mode": args.pmu_mode,
+            "backend": args.backend,
             "runners": {name: config for name, config in runners},
             "runtime_libraries": [fingerprint(ROOT / config["runtime_library_dir"].format(
                 pmu_mode=args.pmu_mode) /
@@ -706,6 +707,17 @@ def main(argv: list[str] | None = None) -> int:
                                  not args.no_build)
                 software = software_render(case, defaults, workload, app, width, height, frames,
                                            case_dir, args.timeout_seconds or 60)
+                if not runners:
+                    status = json.loads((case_dir / "software/render.json").read_text())
+                    image_width, image_height, _ = parse_ppm(software)
+                    passed = status["process_succeeded"] and (image_width, image_height) == (width, height)
+                    result = {"case": case["id"], "runner": "software", "passed": passed,
+                              "detail": "image captured (no hardware comparison)" if passed
+                              else f"software capture failed: {status['status']} exit={status['exit_status']}; "
+                                   f"image={image_width}x{image_height}, expected={width}x{height}",
+                              "directory": str(case_dir), "render_status": [status]}
+                    write_json(case_dir / "run.software.json", result)
+                    summary.append(result)
                 for runner_name, runner in runners:
                     try:
                         result = run_hardware_case(case, runner_name, runner, workload, app,
@@ -722,7 +734,7 @@ def main(argv: list[str] | None = None) -> int:
                     write_json(case_dir / "comparison.spike-verilator.json",
                                compare_images(spike_image, rtl_image, 0))
             except RegressionError as error:
-                failure = {"case": case["id"], "runner": args.hardware_runner, "passed": False,
+                failure = {"case": case["id"], "runner": args.backend, "passed": False,
                            "detail": str(error), "directory": str(case_dir)}
                 summary.append(failure)
                 write_json(case_dir / "run.failure.json", failure)

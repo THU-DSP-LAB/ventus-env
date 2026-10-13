@@ -1,4 +1,4 @@
-"""The installed checkout needs no path injection to invoke either tool."""
+"""All RT commands work without path injection from outside the checkout."""
 from pathlib import Path
 import subprocess
 import sys

@@ -40,25 +40,28 @@ VENTUS_PMU_MODE=detailed bash build-ventus.sh --build rtcore-rtl
 
 ## 图像门禁
 
-先运行小图，再增加尺寸和 warp 数：
+默认运行全部五例，尺寸 16×9，软件参考与 Spike 对比：
 
 ```sh
-python3 tools/rtcore.py regression --hardware-runner spike --width 1 --height 1
-python3 tools/rtcore.py regression --hardware-runner all --pmu-mode detailed \
-  --include-candidates --case raytracingshadows --case raytracingsbtdata \
-  --case raytracingintersection --case raytracingreflections \
-  --case raytracingtextures --width 4 --height 4
+python3 tools/rtcore.py regression
+python3 tools/rtcore.py regression --backend software
+python3 tools/rtcore.py regression --backend rtl --pmu-mode detailed
+python3 tools/rtcore.py regression --backend all --pmu-mode detailed
+python3 tools/rtcore.py regression --case raytracingintersection
 ```
 
---include-candidates 只允许选择候选例子，不自动选中它们。
+--backend 可选 software、spike、rtl、all；Spike/RTL 自动与软件参考比较。
+software 只检查渲染正常退出、图片有效和尺寸正确，不代表硬件通过。
+--case 可重复指定，省略时全部五例均纳入回归。
+尺寸通过 --width WIDTH --height HEIGHT 指定。
+RTL 的 --pmu-mode 和 --rtlsim-variant 必须与已经构建的运行库匹配。
 基本例子没有 software 截图钩子，不纳入通过集合。
 textures 对软件允许 RGB8 单通道误差 1；其他例子按 manifest 要求比较。
-32×16 intersection 的历史测量存在已知软件/硬件蓝色 1 LSB 差异，
-不能把 RTL/Spike 一致说成软件严格通过。
+RTL/Spike 一致不能代替与软件参考按 manifest 阈值比较。
 
 每次调用保存到 artifacts/rtcore-regression/runs/<run-id>：
 renderer 正常退出、图片存在且满足像素阈值才通过，崩溃前截图不能通过。
-provenance 保留源码状态与运行库哈希，--hardware-runner all 还直接比较
+provenance 保留源码状态与运行库哈希，--backend all 还直接比较
 Spike/Verilator。basic/detailed 构建应有相同周期和公共计数，
 不可把仪表行为差异当作硬件收益。
 

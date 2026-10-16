@@ -15,8 +15,19 @@ apt-get install \
     mold ccache ninja-build cmake clang clangd clang-format gdb \
     help2man perl perl-doc flex bison libfl2 libfl-dev zlib1g zlib1g-dev libgoogle-perftools-dev numactl \
     libfmt-dev libspdlog-dev libelf-dev libyaml-cpp-dev nlohmann-json3-dev \
-    device-tree-compiler bsdmainutils ruby default-jdk python3-tqdm
+    device-tree-compiler bsdmainutils ruby default-jdk python3-tqdm \
+    libvulkan-dev glslang-tools python3-venv python3-pip
 ```
+
+Mesa 子模块要求 Meson 1.4 或更新版本。Ubuntu 24.04 自带版本偏旧，可以在仓库内
+创建独立环境：
+
+```bash
+python3 -m venv build/meson-venv
+build/meson-venv/bin/pip install 'meson>=1.4,<2'
+```
+
+`build-ventus.sh` 会自动发现这个环境。
 
 我们也提供了包含所有依赖的Dockerfile，见下
 
@@ -66,6 +77,43 @@ VENTUS_BACKEND=ptx      ./run # PTX 后端（SBT ELF->PTX + CUDA Driver API）
 * `VENTUS_TIMING_DDR=0`关闭cyclesim仿真DDR延迟功能（默认开启）。当前RTL仿真不支持DDR时序仿真
 * `NUM_THREAD=32`告知POCL设备端单个线程束（warp）支持多少线程。对于rtlsim和cyclesim应当与硬件规格对齐，对于spike可以任意调整数值
 * `NUM_WARP=8`告知POCL设备端单个线程块最多有多少线程束（warp）。对于rtlsim和cyclesim应当与硬件规格对齐，对于spike可以任意调整数值
+
+### Vulkan 光线追踪
+
+当前光追路径由 Mesa/LLVM 编译 Vulkan megakernel，通过 Spike 或带缓存的
+Verilator RTcore 执行。driver 分配隐藏的 global-memory candidate spill slot；
+硬件合批稀疏的后续遍历，不搬移 parent RT Local/PDS，也不改变 shader lane 组织。
+当前不按相干性 key 排序光线。
+
+回归比较同次运行的软件参考与 Spike／Verilator 图片。
+固定上游与 testcases 中维护的五例覆盖文件统一组合到
+`build/rt-workload/source`，应用构建位于 `build/rt-workload/build`。执行：
+
+```bash
+git submodule update --init testcases workloads/rt/SaschaWillems_Vulkan
+bash build-ventus.sh --build "rt-toolchain;spike;driver-spike;mesa;rt-workload"
+python3 tools/rtcore.py abi --check
+python3 tools/rtcore.py regression
+VENTUS_PMU_MODE=detailed bash build-ventus.sh --build rtcore-rtl
+python3 tools/rtcore.py regression --backend all --pmu-mode detailed
+```
+
+当前构建、门禁和诊断入口记录在
+[`docs/rtcore/validation.md`](docs/rtcore/validation.md)。
+
+默认运行全部五例，尺寸 16×9，与软件参考比较 Spike 图像。
+通过 `--backend software|spike|rtl|all` 选择后端；software 只生成并检查图片，
+不代表硬件通过。通过 `--width WIDTH --height HEIGHT` 改尺寸，
+`--case raytracingintersection` 选择例子（可重复指定）。
+修改应用或 GLSL 后重新执行 `--build rt-workload`，准备脚本会重新生成 SPIR-V。
+所有 full-app 测试使用 canonical `mesa/build-ventus`。
+运行产生的 ELF、日志、图像和 provenance 留在
+`artifacts/rtcore-regression/runs/<run-id>`，不加入源码提交。
+
+实现边界和诊断入口见
+[`docs/rtcore/validation.md`](docs/rtcore/validation.md)，workload 来源见
+[`workloads/rt/README.md`](workloads/rt/README.md)。这仍是有界功能路径，不等于
+Vulkan RT conformance；具体通过范围以每次新运行的图像门禁为准。
 
 ### 测试
 
@@ -125,20 +173,8 @@ python3 run_test_parallel.py --json test_list_new.json --max-workers 20
 
 Note:   
 * OpenCL-CTS对于仿真来说规模偏大，运行时间较长，我们仅在spike仿真器上运行以检验软件栈的正确性
-* spike仿真器默认会导出指令粒度的日志，运行CTS可能会产生极大量的日志文件。推荐大规模运行CTS测试前先修改build-ventus.sh中的spike编译选项，关闭日志输出：
-```diff
---- a/build-ventus.sh
-+++ b/build-ventus.sh
-@@ -183,7 +183,7 @@ build_spike() {
-   # rm -rf ${SPIKE_BUILD_DIR} || true
-   mkdir -p ${SPIKE_BUILD_DIR}
-   cd ${SPIKE_BUILD_DIR}
--  ../configure --prefix=${VENTUS_INSTALL_PREFIX} --enable-commitlog
-+  ../configure --prefix=${VENTUS_INSTALL_PREFIX}
-   make -j${BUILD_PARALLEL}
-   make install
- }
-```
+* 大规模测试保持 `VENTUS_SPIKE_LOG=0`，避免产生巨量指令日志。
+  `source env.sh` 已设置此值，无需重新编译仿真器。
 
 ### 开发环境
 

@@ -16,8 +16,19 @@ apt-get install \
     mold ccache ninja-build cmake clang clangd clang-format gdb \
     help2man perl perl-doc flex bison libfl2 libfl-dev zlib1g zlib1g-dev libgoogle-perftools-dev numactl \
     libfmt-dev libspdlog-dev libelf-dev libyaml-cpp-dev nlohmann-json3-dev \
-    device-tree-compiler bsdmainutils ruby default-jdk python3-tqdm
+    device-tree-compiler bsdmainutils ruby default-jdk python3-tqdm \
+    libvulkan-dev glslang-tools python3-venv python3-pip
 ```
+
+The Mesa submodule requires Meson 1.4 or newer. Ubuntu 24.04 ships an older
+version; a repository-local environment can be prepared with:
+
+```bash
+python3 -m venv build/meson-venv
+build/meson-venv/bin/pip install 'meson>=1.4,<2'
+```
+
+`build-ventus.sh` detects this environment automatically.
 
 A Dockerfile that bundles all dependencies is provided below.
 
@@ -77,9 +88,55 @@ The following environment variables adjust simulation behavior:
 * `VENTUS_WAVEFORM_BEGIN` / `VENTUS_WAVEFORM_END` — Dump only a selected simulation interval for `rtlsim` (speeds up simulation). Not supported by `cyclesim`.
 * `VENTUS_DUMP_RESULT=filename.json` — Save all device→host copies from OpenCL programs and their device addresses to a JSON file (useful for debugging).
 * `VENTUS_TIMING_DDR=0` — Disable DDR timing in `cyclesim` (enabled by default). Current RTL simulation does not support DDR timing.
-* `VENTUS_SPIKE_LOG=1` - Enable `spike` simulator to output instruction-granularity log into file. (disabled by default)
+* `VENTUS_RTL_EXTMEM_LATENCY=100` — Fixed non-LDS memory response latency used when generating the cache-enabled Verilator RTL; default is 100 cycles.
+* `VENTUS_RTLSIM_PERF_JSON=path` — Write the final cache-enabled Verilator PMU snapshot, including RTcore boundary counters, as JSON when the device closes.
+* `VENTUS_SPIKE_LOG=1` — Enable Spike instruction-level file logs. `env.sh` sets this to `0`; keep it explicitly disabled for large runs.
 * `NUM_THREAD=32` — Number of threads per warp reported by the POCL device. For `rtlsim`/`cyclesim`, this should match hardware specs; for `spike`, any value is acceptable.
 * `NUM_WARP=8` — Max warps per thread block reported by the POCL device. For `rtlsim`/`cyclesim`, match hardware specs; for `spike`, any value is acceptable.
+
+### Vulkan Ray Tracing
+
+The maintained RT path uses a Vulkan megakernel compiled by Mesa/LLVM and
+executes through Spike or the cache-enabled Verilator RTcore. The driver
+allocates hidden global-memory candidate spill slots. Hardware batches pending
+sparse subsequent traversals without moving parent RT Local/PDS or changing
+shader lane organization; it does not yet sort rays by coherence key.
+
+Prepare the fixed upstream source plus the maintained five-case overlay:
+
+```sh
+git submodule update --init testcases workloads/rt/SaschaWillems_Vulkan
+bash build-ventus.sh --build "rt-toolchain;spike;driver-spike;mesa;rt-workload"
+python3 tools/rtcore.py abi --check
+python3 tools/rtcore.py regression
+VENTUS_PMU_MODE=detailed bash build-ventus.sh --build rtcore-rtl
+python3 tools/rtcore.py regression --backend all --pmu-mode detailed
+```
+
+The default runs all five examples at 16×9 with software-reference/Spike image
+comparison. Use `--backend software|spike|rtl|all` to select renderers;
+software-only captures images without a hardware comparison. Select a different
+size with `--width WIDTH --height HEIGHT`, or one example with
+`--case raytracingintersection` (repeat `--case` for several).
+
+The shared workload is generated at build/rt-workload/source and built at
+build/rt-workload/build. Repeat --build rt-workload after changing maintained
+application or GLSL sources; ordinary app targets do not regenerate SPIR-V.
+Use --workload-dir and --build-dir for an explicitly prepared alternative.
+All full-app runs use canonical mesa/build-ventus.
+
+The manifest-driven image runner is the full-application correctness gate.
+Every invocation retains renderer status, fresh images/ELFs, provenance and
+comparisons under artifacts/rtcore-regression/runs/<run-id>. A renderer crash
+cannot pass even if it produced an image. Hardware images are checked against
+the software reference using the manifest's per-case pixel thresholds.
+This regression is not Vulkan RT conformance.
+
+See [build and validation](docs/rtcore/validation.md),
+[candidate spill and hardware batching](docs/rtcore/candidate-spill-and-task-batching.md),
+[workload preparation](workloads/rt/README.md).
+Detailed historical measurements are local evidence under
+artifacts/rtcore-regression/reports, not source checkout dependencies.
 
 ### Performance Attribution for PTX Backend
 
@@ -216,21 +273,8 @@ python3 run_test_parallel.py --json test_list_new.json --max-workers 20
 **Notes**
 
 * OpenCL-CTS is large for simulators and runs take a long time. We run CTS on `spike` only to verify software-stack correctness.
-* The `spike` simulator produces instruction-level logs by default. Running CTS can generate *huge* logs. Before large CTS runs, consider disabling logs in `build-ventus.sh` by removing `--enable-commitlog`:
-
-```diff
---- a/build-ventus.sh
-+++ b/build-ventus.sh
-@@ -183,7 +183,7 @@ build_spike() {
-   # rm -rf ${SPIKE_BUILD_DIR} || true
-   mkdir -p ${SPIKE_BUILD_DIR}
-   cd ${SPIKE_BUILD_DIR}
--  ../configure --prefix=${VENTUS_INSTALL_PREFIX} --enable-commitlog
-+  ../configure --prefix=${VENTUS_INSTALL_PREFIX}
-   make -j${BUILD_PARALLEL}
-   make install
- }
-```
+* Keep `VENTUS_SPIKE_LOG=0` for large runs to avoid huge instruction logs.
+  `source env.sh` already sets this; no simulator rebuild is needed.
 
 ## Developer Setup
 

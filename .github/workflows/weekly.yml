@@ -1,21 +1,12 @@
-name: Weekly CI
+name: Hotspot PR diagnostic
 
 on:
-  schedule:
-    # Run at 00:00 on Sunday
-    - cron: '0 0 * * 0'
-  push:
-    # branches: [ "main", "develop", "dev/ci" ]
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
-  collect-pr-hotspot-diagnostic:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/hotspot-probe-20261027'
+  hotspot-solo:
     runs-on: self-hosted
-    timeout-minutes: 15
+    timeout-minutes: 45
     permissions:
       contents: read
     container:
@@ -25,232 +16,125 @@ jobs:
         --security-opt seccomp=/ci/ventus-env/seccomp-numa.json
       volumes:
         - /ci/ventus-env/artifacts:/artifacts:ro
-        - /ci/ventus-env/logs:/logs:ro
     steps:
-    # This manual-only branch reads the completed PR build and preserves the
-    # current runner workspace. It neither checks out sources nor rebuilds.
-    - name: Collect exact PR models and bounded timeout logs
+    - uses: actions/checkout@v4
+      with:
+        ref: 5639a4a4061ebfba13aa2705b29c1e58f7f7d505
+        submodules: false
+        path: hotspot-pr-source
+
+    - name: Restore exact PR build and workload
       shell: bash
       run: |
         set -euo pipefail
-        probe_dir="${RUNNER_TEMP}/ventus-hotspot-${GITHUB_RUN_ID}"
-        payload="${probe_dir}/payload"
+        probe_root="${RUNNER_TEMP}/hotspot-solo-${GITHUB_RUN_ID}"
+        payload="$probe_root/payload"
+        source_root="$GITHUB_WORKSPACE/hotspot-pr-source"
         mkdir -p "$payload"
+        echo "HOTSPOT_PROBE_ROOT=$probe_root" >> "$GITHUB_ENV"
         echo "HOTSPOT_PROBE_PAYLOAD=$payload" >> "$GITHUB_ENV"
+        echo "HOTSPOT_SOURCE_ROOT=$source_root" >> "$GITHUB_ENV"
         archive_dir=/artifacts/e63b8cef595710721b1193f700f5fa06a9480c46
         test -f "$archive_dir/.ventus-ci-artifact-complete"
+        zstd -dc "$archive_dir/install.tar.zst" | tar -xf - -C "$probe_root"
         cp "$archive_dir/.ventus-ci-artifact-complete" "$payload/build-marker.txt"
+        git -C "$source_root" submodule update --init --filter=blob:none rodinia
+        make -C "$source_root" rodinia_data
+        export VENTUS_INSTALL_PREFIX="$probe_root/install"
+        source "$source_root/env.sh"
         {
           date -u
           uname -a
-          nproc
           lscpu
-          grep -E 'Cpus_allowed_list|Mems_allowed_list' /proc/self/status
-          for item in cpu.max cpu.stat cpuset.cpus.effective memory.max; do
+          cat /proc/meminfo /proc/loadavg /proc/stat
+          for item in cpu.max cpu.stat memory.max memory.events cpuset.cpus.effective; do
             if [ -f "/sys/fs/cgroup/$item" ]; then
               echo "=== cgroup $item ==="
               cat "/sys/fs/cgroup/$item"
             fi
           done
-        } > "$payload/runner-resources.txt"
-        tar --zstd -xf "$archive_dir/install.tar.zst" -C "$probe_dir" \
-          install/lib/libVentusRTL-withcache.so \
-          install/lib/libVentusRTL-nocache.so \
-          install/lib/libVentusGVM-withcache.so \
-          install/lib/libVentusGVM-nocache.so \
-          install/lib/libgvmref.so \
-          install/lib/libLLVMRISCVCodeGen.so.16git \
-          install/lib/libLLVMRISCVDesc.so.16git \
-          install/lib/crt0.o install/lib/riscv32clc.o
-        sha256sum "$probe_dir"/install/lib/* > "$payload/build-fingerprints.txt"
-        workspace_revision=$(git -c safe.directory="$PWD" rev-parse HEAD 2>/dev/null || true)
-        echo "$workspace_revision" > "$payload/workspace-revision.txt"
-        case "$workspace_revision" in
-          e63b8cef595710721b1193f700f5fa06a9480c46|5639a4a4061ebfba13aa2705b29c1e58f7f7d505)
-            if [ -d regression-test-logs ]; then
-              while IFS= read -r -d '' logfile; do
-                label=$(basename "$(dirname "$logfile")")-$(basename "$logfile")
-                {
-                  head -n 100 "$logfile"
-                  echo '=== bounded final log lines ==='
-                  tail -n 400 "$logfile"
-                } > "$payload/$label"
-              done < <(find regression-test-logs -maxdepth 2 -type f \
-                -name '*hotspot3D_512x2_i1*.log' -print0)
-            fi
-            if [ -d rodinia/opencl ]; then
-              while IFS= read -r -d '' elf; do
-                label=$(basename "$(dirname "$elf")")
-                cp "$elf" "$payload/$label.riscv"
-              done < <(find rodinia/opencl -maxdepth 3 -type f \
-                -path '*/.rep_hotspot3D_*/object0.riscv' -print0)
-            fi
-            ;;
-          *) echo 'Workspace is no longer the failed PR revision; workspace logs not collected.' ;;
-        esac
-        find /logs/CI -maxdepth 3 -path '*40262870302*' \
-          -printf '%p %s bytes\n' > "$payload/persistent-log-index.txt" || true
-        cat "$payload/runner-resources.txt"
-        cat "$payload/build-fingerprints.txt"
-    - name: Collect bounded hotspot logs from the persisted failed run
+        } > "$payload/resources-before.txt"
+        sha256sum "$VENTUS_INSTALL_PREFIX/lib/libVentusRTL-withcache.so" \
+          "$VENTUS_INSTALL_PREFIX/lib/libLLVMRISCVCodeGen.so.16git" \
+          "$VENTUS_INSTALL_PREFIX/lib/crt0.o" \
+          "$source_root/rodinia/data/hotspot3D/power_512x2" \
+          "$source_root/rodinia/data/hotspot3D/temp_512x2" > "$payload/input-fingerprints.txt"
+        make -C "$source_root/rodinia/opencl/hotspot3D" -j2
+        cd "$source_root/rodinia/opencl/hotspot3D"
+        export VENTUS_BACKEND=spike VENTUS_SPIKE_LOG=0
+        export POCL_CACHE_DIR="$probe_root/pocl-spike"
+        timeout 300 ./hotspot3D.out -n 512 -l 2 -i 1 \
+          -f ../../data/hotspot3D/power_512x2 ../../data/hotspot3D/temp_512x2 output.txt -p 0 -d 0 \
+          > "$payload/spike.log" 2>&1
+        cp object0.riscv "$payload/spike-kernel.riscv"
+        cp object0.cl "$payload/kernel.cl"
+        tail -n 12 "$payload/spike.log"
+
+    - name: Upload prepared input
+      uses: actions/upload-artifact@v4
+      with:
+        name: pr-hotspot-solo-input
+        path: ${{ env.HOTSPOT_PROBE_PAYLOAD }}
+        retention-days: 3
+
+    - name: Run one cached RTL instance with the original failed seed
       shell: bash
       run: |
         set -euo pipefail
-        python3 - <<'PY'
-        import os
-        from pathlib import Path
-        import subprocess
-        import tarfile
+        export VENTUS_INSTALL_PREFIX="$HOTSPOT_PROBE_ROOT/install"
+        source "$HOTSPOT_SOURCE_ROOT/env.sh"
+        export VENTUS_BACKEND=rtlsim-with-cache VENTUS_SPIKE_LOG=0
+        export VENTUS_VERILATOR_SEED=423000892
+        export POCL_CACHE_DIR="$HOTSPOT_PROBE_ROOT/pocl-rtl"
+        cd "$HOTSPOT_SOURCE_ROOT/rodinia/opencl/hotspot3D"
+        cpus=$(awk '/Cpus_allowed_list:/ {print $2}' /proc/self/status)
+        /usr/bin/time -v -o "$HOTSPOT_PROBE_PAYLOAD/time.txt" \
+          numactl -m0 -C "$cpus" -- timeout --kill-after=10 1800 \
+          ./hotspot3D.out -n 512 -l 2 -i 1 \
+          -f ../../data/hotspot3D/power_512x2 ../../data/hotspot3D/temp_512x2 output.txt -p 0 -d 0 \
+          > "$HOTSPOT_PROBE_PAYLOAD/rtl.log" 2>&1 &
+        probe_pid=$!
+        while kill -0 "$probe_pid" 2>/dev/null; do
+          {
+            date -u
+            cat /proc/loadavg /proc/stat
+            for item in /proc/pressure/cpu /proc/pressure/memory /sys/fs/cgroup/cpu.stat; do
+              if [ -f "$item" ]; then echo "=== $item ==="; cat "$item"; fi
+            done
+            targets="$probe_pid"
+            parents="$probe_pid"
+            for depth in 1 2; do
+              children=""
+              for pid in $parents; do
+                if [ -r "/proc/$pid/task/$pid/children" ]; then
+                  children="$children $(cat "/proc/$pid/task/$pid/children")"
+                fi
+              done
+              targets="$targets $children"
+              parents="$children"
+            done
+            list=$(echo "$targets" | xargs | tr ' ' ',')
+            ps -o pid,ppid,psr,pcpu,pmem,stat,time -p "$list" || true
+          } >> "$HOTSPOT_PROBE_PAYLOAD/progress.txt"
+          sleep 60
+        done
+        set +e
+        wait "$probe_pid"
+        probe_rc=$?
+        set -e
+        if [ -f object0.riscv ]; then cp object0.riscv "$HOTSPOT_PROBE_PAYLOAD/rtl-kernel.riscv"; fi
+        tail -n 100 "$HOTSPOT_PROBE_PAYLOAD/rtl.log"
+        cat "$HOTSPOT_PROBE_PAYLOAD/time.txt"
+        if [ "$probe_rc" -eq 0 ]; then
+          if ! grep -q 'CPU reference check:.*PASS' "$HOTSPOT_PROBE_PAYLOAD/rtl.log"; then probe_rc=1; fi
+        fi
+        echo "$probe_rc" > "$HOTSPOT_PROBE_PAYLOAD/exit-code.txt"
+        exit "$probe_rc"
 
-        payload = Path(os.environ['HOTSPOT_PROBE_PAYLOAD'])
-        prior = Path('/logs/CI/40262870302-1-e63b8cef595710721b1193f700f5fa06a9480c46')
-        for job in ['test-main', 'test-gvm']:
-            archive = prior / job / 'ci-logs.tar.zst'
-            if not archive.is_file():
-                print(f'Missing persisted archive: {archive}')
-                continue
-            process = subprocess.Popen(['zstd', '-dc', str(archive)], stdout=subprocess.PIPE)
-            try:
-                with tarfile.open(fileobj=process.stdout, mode='r|') as tar:
-                    for member in tar:
-                        if not member.isfile() or not member.name.endswith('.log'):
-                            continue
-                        if 'hotspot3D_512x2_i1' not in member.name:
-                            continue
-                        stream = tar.extractfile(member)
-                        head, tail = b'', b''
-                        while True:
-                            chunk = stream.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            if len(head) < 65536:
-                                head += chunk[:65536 - len(head)]
-                            tail = (tail + chunk)[-262144:]
-                        label = job + '-' + member.name.replace('/', '_')
-                        data = tail if member.size <= 262144 else head + b'\n=== bounded tail ===\n' + tail
-                        (payload / label).write_bytes(data)
-                        print(f'Collected {member.name}: original {member.size} bytes, saved {len(data)}')
-                process.stdout.close()
-                if process.wait() != 0:
-                    raise RuntimeError(f'Failed to decompress {archive}')
-            finally:
-                if process.poll() is None:
-                    process.terminate()
-                    process.wait()
-        PY
-    - name: Upload diagnostic payload
+    - name: Upload solo result
       if: always() && env.HOTSPOT_PROBE_PAYLOAD != ''
       uses: actions/upload-artifact@v4
       with:
-        name: pr-hotspot-timeout-logs
+        name: pr-hotspot-solo-result
         path: ${{ env.HOTSPOT_PROBE_PAYLOAD }}
         retention-days: 3
-        compression-level: 1
-
-  weekly-test:
-    if: github.ref != 'refs/heads/ci/hotspot-probe-20261027'
-    runs-on: self-hosted
-    container:
-      image: humber186/ventus:base-20251010
-      options: --add-host=host.docker.internal:host-gateway
-      volumes:
-        - /ci/ventus-env/ccache:/ccache
-        - /ci/ventus-env/artifacts:/artifacts
-        - /ci/ventus-env/logs:/logs
-    
-    steps:
-    - name: Clean workspace before checkout
-      shell: bash
-      run: |
-        set -euo pipefail
-
-        workspace="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is not set}"
-        echo "Cleaning workspace before checkout: ${workspace}"
-
-        if [ -d "$workspace" ]; then
-          find "$workspace" -mindepth 1 -maxdepth 1 -printf 'Removing %p\n'
-          find "$workspace" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-        else
-          mkdir -p "$workspace"
-        fi
-
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
-
-    - name: Setup and Build
-      id: build
-      uses: ./.github/actions/build-ventus
-
-    - name: Run OpenCL application cases
-      if: steps.build.outcome == 'success'
-      run: |
-        set +e
-        VENTUS_SPIKE_LOG=0 python3 testcases/_get_case/run_ventus_tests.py --cases cases.csv --ref=results_nv --backends spike,cycle,rtl-nocache,rtl-withcache --rtol 1e-2 --atol 1e-2 --jobs 4 --timeout 7200
-        EXIT_CODE=$?
-        
-        echo "=== Test Summary ==="
-        if [ -f testcases/_get_case/results/summary.csv ]; then
-          cat testcases/_get_case/results/summary.csv
-        fi
-        
-        exit $EXIT_CODE
-
-    - name: Save CI logs
-      if: always()
-      run: |
-        set -euo pipefail
-
-        workflow_slug="$(printf '%s' "$GITHUB_WORKFLOW" | tr -cs 'A-Za-z0-9._-' '_' | sed 's/^_//;s/_$//')"
-        if [ -z "$workflow_slug" ]; then
-          workflow_slug="workflow"
-        fi
-
-        dest="/logs/${workflow_slug}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA}"
-        mkdir -p "$dest"
-
-        log_sources=()
-        if [ -d regression-test-logs ]; then
-          log_sources+=(regression-test-logs)
-        fi
-        if [ -d testcases/_get_case/results ]; then
-          log_sources+=(testcases/_get_case/results)
-        fi
-        if [ "${#log_sources[@]}" -eq 0 ]; then
-          echo "No log directories found."
-          echo "No log directories found for this run." > "$dest/no-logs.txt"
-          log_sources+=("$dest/no-logs.txt")
-        fi
-
-        if command -v zstd >/dev/null 2>&1; then
-          archive="$dest/ci-logs.tar.zst"
-          tar -cf - "${log_sources[@]}" | zstd -T0 -10 --long=27 > "$archive"
-        else
-          archive="$dest/ci-logs.tar.xz"
-          tar -cf - "${log_sources[@]}" | xz -T0 -6e > "$archive"
-        fi
-
-        {
-          echo "workflow=${GITHUB_WORKFLOW}"
-          echo "run_id=${GITHUB_RUN_ID}"
-          echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
-          echo "run_url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          echo "repository=${GITHUB_REPOSITORY}"
-          echo "sha=${GITHUB_SHA}"
-          echo "ref=${GITHUB_REF}"
-          echo "event=${GITHUB_EVENT_NAME}"
-          echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        } > "$dest/metadata.txt"
-
-        du -h "$archive" || true
-        echo "Saved CI logs archive: $archive"
-        echo "Saved CI logs metadata: $dest/metadata.txt"
-
-    - name: Cleanup old local regression test logs
-      if: always()
-      run: |
-        if [ -d /logs ]; then
-          find /logs -mindepth 2 -maxdepth 2 -type d -mtime +14 -print -exec rm -rf {} +
-          find /logs -mindepth 1 -maxdepth 1 -type d -empty -delete
-        fi

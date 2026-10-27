@@ -1,0 +1,20 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+layout(set=2,binding=41) uniform accelerationStructureEXT scene;
+layout(set=1,binding=73,rgba8) uniform image2D images[2];
+layout(set=3,binding=125) uniform Params { uvec4 data; } params[2];
+layout(set=0,binding=91) buffer Results { uint data[]; } results[2];
+layout(push_constant) uniform Choice { uint target; } choice;
+layout(location=0) rayPayloadEXT uvec4 hit;
+void main() {
+    uint x=gl_LaunchIDEXT.x, y=gl_LaunchIDEXT.y;
+    traceRayEXT(scene, gl_RayFlagsOpaqueEXT, 255, 0, 0, 0,
+                vec3(float(x)*2.0-3.0,float(y)*4.0,-1.0), 0.01,
+                vec3(0,0,1),10.0,0);
+    uint bias=params[0].data.x+params[1].data.x;
+    ivec2 extent=imageSize(images[choice.target]);
+    uvec4 color=uvec4(hit.x*40,hit.y*50,hit.z+bias,255);
+    if (extent!=ivec2(6,3)) color=uvec4(255,0,255,255);
+    imageStore(images[choice.target],ivec2(x,y),vec4(color)/255.0);
+    results[choice.target].data[y*4+x]=hit.x*1000+hit.y*100+hit.z+bias;
+}

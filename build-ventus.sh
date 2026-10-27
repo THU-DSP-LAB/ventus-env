@@ -14,7 +14,7 @@ BUILD_PARALLEL=$(( $(nproc) * 2 / 3 ))
 help() {
   cat <<END
 
-Build [systemc llvm, pocl, ocl-icd, libclc, driver, spike, rtlsim|gpgpu, cyclesim|simulator, gvm, sbt|sbtsim|ptx|ptxsim] programs.
+  Build [systemc, llvm, rt-toolchain, pocl, ocl-icd, libclc, driver, driver-spike, spike, rtlsim|gpgpu, rtcore-rtl, cyclesim|simulator, gvm, sbt|sbtsim|ptx|ptxsim, mesa, rt-workload] programs.
 Run the rodinia and test-pocl test suites.
 Read ${DIR}/llvm/README.md to get started.
 
@@ -24,7 +24,7 @@ Usage: ${DIR}/$(basename ${0})
 
 Options:
   --build <build programs>
-    Chosen programs to build : [${PROGRAMS_TOBUILD}]
+    Chosen programs to build : [${PROGRAMS_TOBUILD[*]}]
     Option format : "llvm;pocl", string are separated by semicolon.
     ( Note that quotation marks are necessary, or bash will parse the semicolon as command ending )
     Default : "llvm;ocl-icd;libclc;spike;rtlsim;cyclesim;sbtsim;driver;pocl;rodinia;test-pocl"
@@ -112,6 +112,7 @@ check_if_program_exits $LLVM_DIR "ventus-llvm"
 LIBCLC_DIR=${LLVM_DIR}/libclc
 LLVM_BUILD_DIR=${LLVM_DIR}/build
 LIBCLC_BUILD_DIR=${LLVM_DIR}/build-libclc
+RT_LIBCLC_BUILD_DIR=${RT_LIBCLC_BUILD_DIR:-${LLVM_DIR}/build-rt-libclc}
 
 # Need to get the cpp-cycle-level-simulator folder from enviroment variables
 CYCLESIM_DIR=${CYCLESIM_DIR:-${DIR}/cyclesim}
@@ -156,6 +157,18 @@ OPENCL_CTS_BUILD_DIR=${OPENCL_CTS_DIR}/build
 RODINIA_DIR=${RODINIA_DIR:-${DIR}/rodinia}
 check_if_program_exits ${RODINIA_DIR} "gpu-rodinia"
 
+# Optional Vulkan RT vertical-slice sources. These targets are not part of the
+# default OpenCL build and are built only when explicitly requested.
+MESA_DIR=${MESA_DIR:-${DIR}/mesa}
+check_if_program_exits ${MESA_DIR} "Mesa Ventus Vulkan driver"
+MESA_BUILD_DIR=${MESA_BUILD_DIR:-${MESA_DIR}/build-ventus}
+
+RT_WORKLOAD_DIR=${RT_WORKLOAD_DIR:-${DIR}/workloads/rt}
+check_if_program_exits ${RT_WORKLOAD_DIR} "Ventus RT workload"
+RT_WORKLOAD_BUILD_ROOT=${RT_WORKLOAD_BUILD_ROOT:-${DIR}/build/rt-workload}
+RT_WORKLOAD_SOURCE_DIR=${RT_WORKLOAD_SOURCE_DIR:-${RT_WORKLOAD_BUILD_ROOT}/source}
+RT_WORKLOAD_BUILD_DIR=${RT_WORKLOAD_BUILD_DIR:-${RT_WORKLOAD_BUILD_ROOT}/build}
+
 # Build library systemc: depended by cyclesim
 build_systemc() {
   cd ${SYSTEMC_DIR}
@@ -177,12 +190,15 @@ build_llvm() {
   fi
   mkdir -p ${LLVM_BUILD_DIR}
   cd ${LLVM_BUILD_DIR}
+  # libclc is configured separately below. Enabling it here makes LLVM's
+  # external project take ownership of build-libclc and build every GPU
+  # target, which is both unnecessary and incompatible with this tree.
   cmake -G Ninja -B ${LLVM_BUILD_DIR} -S ${LLVM_DIR}/llvm \
     -DLLVM_CCACHE_BUILD=ON \
     -DLLVM_OPTIMIZED_TABLEGEN=ON \
     -DLLVM_PARALLEL_LINK_JOBS=12 \
     -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
-    -DLLVM_ENABLE_PROJECTS="clang;lld;libclc" \
+    -DLLVM_ENABLE_PROJECTS="clang;lld" \
     -DLLVM_TARGETS_TO_BUILD="AMDGPU;X86;RISCV" \
     -DLLVM_TARGET_ARCH=riscv32 \
     -DBUILD_SHARED_LIBS=ON \
@@ -215,6 +231,70 @@ build_driver() {
     # -DCMAKE_CXX_COMPILER=clang++ \
   ninja -C ${DRIVER_BUILD_DIR}
   ninja -C ${DRIVER_BUILD_DIR} install
+}
+
+# Minimal driver build used by the Spike-only Vulkan RT functional path. It
+# intentionally avoids requiring RTL, cycle-simulator, GVM, PTX or auto-select
+# backend artifacts.
+build_spike_driver() {
+  mkdir -p ${DRIVER_BUILD_DIR}
+  cd ${DRIVER_DIR}
+  cmake -G Ninja -B ${DRIVER_BUILD_DIR} -S ${DRIVER_DIR} \
+    -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
+    -DCMAKE_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX} \
+    -DVENTUS_INSTALL_PREFIX=${VENTUS_INSTALL_PREFIX} \
+    -DSPIKE_SRC_DIR=${SPIKE_DIR} \
+    -DDRIVER_ENABLE_AUTOSELECT=OFF \
+    -DDRIVER_ENABLE_RTLSIM=OFF \
+    -DDRIVER_ENABLE_CYCLESIM=OFF \
+    -DDRIVER_ENABLE_GVM=OFF \
+    -DDRIVER_ENABLE_PTX=OFF
+  ninja -C ${DRIVER_BUILD_DIR}
+  ninja -C ${DRIVER_BUILD_DIR} install
+}
+
+build_mesa_ventus() {
+  local setup_args=(setup)
+  local meson_bin="${MESON:-meson}"
+  if [ -z "${MESON:-}" ] && [ -x "${DIR}/build/meson-venv/bin/meson" ]; then
+    meson_bin="${DIR}/build/meson-venv/bin/meson"
+  fi
+  if [ -f "${MESA_BUILD_DIR}/meson-private/coredata.dat" ]; then
+    setup_args+=(--reconfigure)
+  fi
+
+  PATH="$(dirname "${meson_bin}"):${PATH}" \
+    "${meson_bin}" "${setup_args[@]}" ${MESA_BUILD_DIR} ${MESA_DIR} \
+    -Dbuildtype=debugoptimized \
+    -Dvulkan-drivers=ventus \
+    -Dgallium-drivers= \
+    -Dllvm=enabled \
+    -Dplatforms=x11 \
+    -Dglx=disabled \
+    -Degl=disabled \
+    -Dgles1=disabled \
+    -Dgles2=disabled \
+    -Dopengl=false \
+    -Dbuild-tests=false \
+    -Dvulkan-layers= \
+    -Dtools= \
+    -Dventus_rt_resident_warps=8
+  ninja -C ${MESA_BUILD_DIR}
+}
+
+build_rt_workload() {
+  # Use the same headless application and maintained inputs for both renderers.
+  local rt_workload_build_type="${RT_WORKLOAD_BUILD_TYPE:-}"
+
+  RT_WORKLOAD_BUILD_ROOT=${RT_WORKLOAD_BUILD_ROOT} \
+  RT_WORKLOAD_SOURCE_DIR=${RT_WORKLOAD_SOURCE_DIR} \
+    bash "${RT_WORKLOAD_DIR}/prepare.sh"
+
+  cmake -G Ninja -B ${RT_WORKLOAD_BUILD_DIR} -S ${RT_WORKLOAD_SOURCE_DIR} \
+    -DCMAKE_BUILD_TYPE="${rt_workload_build_type}" \
+    -DUSE_HEADLESS=ON
+  ninja -C ${RT_WORKLOAD_BUILD_DIR} raytracingshadows raytracingsbtdata \
+    raytracingintersection raytracingreflections raytracingtextures
 }
 
 # Build sbtsim (SBT translator) and install via CMake rules to ${VENTUS_INSTALL_PREFIX}
@@ -258,6 +338,62 @@ build_gpgpu_rtlsim() {
   make -j${BUILD_PARALLEL} install RELEASE=1 PREFIX=${VENTUS_INSTALL_PREFIX}
 }
 
+# Build an RTL-only Vulkan RT backend without overwriting the normal install/
+# tree.  The regression runner loads this dedicated driver and runtime library
+# explicitly, so an uncommitted Chisel change can never be confused with a
+# previously installed generic Ventus backend.
+build_rtcore_rtlsim() {
+  local pmu_mode="${VENTUS_PMU_MODE:-off}"
+  case "${pmu_mode}" in
+    off|basic|detailed) ;;
+    *) echo "VENTUS_PMU_MODE must be off, basic, or detailed (got '${pmu_mode}')" >&2; return 2 ;;
+  esac
+  local rtcore_prefix="${RTCORE_RTLSIM_INSTALL_PREFIX:-${DIR}/install-rtcore-rtl-${pmu_mode}}"
+  local rtcore_driver_build="${RTCORE_RTLSIM_DRIVER_BUILD_DIR:-${DRIVER_DIR}/build-rtcore-rtl-${pmu_mode}}"
+
+  echo "Building RTcore Verilator backend (PMU=${pmu_mode}) in ${rtcore_prefix}"
+  cd "${GPGPU_DIR}/sim-verilator"
+  # Verilator 5.041 can ICE in V3TSP for this large RTcore top with its
+  # multi-threaded model scheduler.  Keep C++ compilation parallel, but use a
+  # deterministic single generated-model thread unless explicitly overridden.
+  make -f verilate.mk -j"${BUILD_PARALLEL}" install RELEASE=1 PREFIX="${rtcore_prefix}" \
+    VLIB_NPROC_DUT="${RTCORE_VERILATOR_THREADS:-1}" VLIB_PMU_MODE="${pmu_mode}" \
+    VLIB_TRACE="${RTCORE_VERILATOR_TRACE:-0}" \
+    VLIB_RTCORE_TRACE="${RTCORE_RTCORE_TRACE:-0}" \
+    VLIB_RTCORE_DEEP_TRACE="${RTCORE_RTCORE_DEEP_TRACE:-0}" \
+    VLIB_RTCORE_RECORD_TRACE="${RTCORE_RTCORE_RECORD_TRACE:-0}" \
+    VLIB_SFU_TRACE="${RTCORE_SFU_TRACE:-0}" \
+    VLIB_FPU_TRACE="${RTCORE_FPU_TRACE:-0}"
+
+  # The RT-only regression links this prefix's CRT0.  Build it beside the
+  # freshly elaborated model so the V32 private-memory bootstrap cannot come
+  # from an unrelated normal install/ build.
+  mkdir -p "${rtcore_prefix}/lib"
+  "${LLVM_BUILD_DIR}/bin/clang" \
+    -target riscv32 -mcpu=ventus-gpgpu \
+    -x assembler-with-cpp -nostdinc \
+    -I"${LIBCLC_DIR}/riscv32/lib" \
+    -c "${LIBCLC_DIR}/riscv32/lib/crt0.S" \
+    -o "${rtcore_prefix}/lib/crt0.o"
+  if [ "${RTCORE_RTLSIM_BUILD_NOCACHE:-0}" = "1" ]; then
+    cd "${GPGPU_DIR}/sim-verilator-nocache"
+    make -j"${BUILD_PARALLEL}" install RELEASE=1 PREFIX="${rtcore_prefix}" \
+      VLIB_NPROC_DUT="${RTCORE_VERILATOR_THREADS:-1}" VLIB_PMU_MODE="${pmu_mode}"
+  fi
+
+  cmake -G Ninja -B "${rtcore_driver_build}" -S "${DRIVER_DIR}" \
+    -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
+    -DCMAKE_INSTALL_PREFIX="${rtcore_prefix}" \
+    -DVENTUS_INSTALL_PREFIX="${rtcore_prefix}" \
+    -DSPIKE_SRC_DIR="${SPIKE_DIR}" \
+    -DDRIVER_ENABLE_AUTOSELECT=OFF \
+    -DDRIVER_ENABLE_RTLSIM=ON \
+    -DDRIVER_ENABLE_CYCLESIM=OFF \
+    -DDRIVER_ENABLE_GVM=OFF \
+    -DDRIVER_ENABLE_PTX=OFF
+  ninja -C "${rtcore_driver_build}" rtlsim_driver
+}
+
 build_gvm() {
   cd ${GPGPU_DIR}/sim-verilator
   make -f gvm.mk -j${BUILD_PARALLEL} RELEASE=1 GVM_TRACE=1 GVM_REF_DIR=${VENTUS_INSTALL_PREFIX}/lib
@@ -298,18 +434,13 @@ build_pocl() {
   ninja -C ${POCL_BUILD_DIR} install
 }
 
-# Build libclc for pocl
-build_libclc() {
-  if [ -e "${LLVM_DIR}/prebuilt" ]; then
-    echo "Using prebuilt llvm libclc, skip building"
-    cp --reflink=auto -a ${LLVM_DIR}/install ${VENTUS_INSTALL_PREFIX}
-    return 0
-  fi
-  if [ ! -d "${LIBCLC_BUILD_DIR}" ]; then
-    mkdir ${LIBCLC_BUILD_DIR}
-  fi
-  cd ${LIBCLC_BUILD_DIR}
-  cmake -G Ninja -B ${LIBCLC_BUILD_DIR} -S ${LLVM_DIR}/libclc \
+# Configure the standalone libclc tree shared by the OpenCL and Vulkan RT
+# paths. The ordinary CMake install includes crt0.o, which is all the Vulkan
+# RT linker needs from this tree.
+configure_libclc() {
+  local libclc_build_dir="${1:-${LIBCLC_BUILD_DIR}}"
+  mkdir -p ${libclc_build_dir}
+  cmake -G Ninja -B ${libclc_build_dir} -S ${LLVM_DIR}/libclc \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DCMAKE_CLC_COMPILER=clang \
     -DCMAKE_LLAsm_COMPILER_WORKS=ON \
@@ -323,8 +454,18 @@ build_libclc() {
     -DCMAKE_BUILD_TYPE=${BUILD_TYPE}
     # -DCMAKE_C_COMPILER=clang \
     # -DCMAKE_CXX_COMPILER=clang++ \
-  ninja
-  ninja install
+}
+
+# Build libclc for pocl.
+build_libclc() {
+  if [ -e "${LLVM_DIR}/prebuilt" ]; then
+    echo "Using prebuilt llvm libclc, skip building"
+    cp --reflink=auto -a ${LLVM_DIR}/install ${VENTUS_INSTALL_PREFIX}
+    return 0
+  fi
+  configure_libclc ${LIBCLC_BUILD_DIR}
+  ninja -C ${LIBCLC_BUILD_DIR}
+  ninja -C ${LIBCLC_BUILD_DIR} install
   # TODO: There are bugs in linking all libclc object files now
   echo "************* Building riscv32 libclc object file ************"
   bash ${LLVM_DIR}/libclc/build_riscv32clc.sh ${LLVM_DIR}/libclc ${LIBCLC_BUILD_DIR} ${VENTUS_INSTALL_PREFIX}
@@ -332,6 +473,25 @@ build_libclc() {
   DstDir=${VENTUS_INSTALL_PREFIX}/share/pocl
   if [ ! -d "${DstDir}" ]; then
     mkdir -p ${DstDir}
+  fi
+}
+
+# Install only the libclc products required by Vulkan RT. In particular, do
+# not run build_riscv32clc.sh: that aggregate OpenCL object is unrelated to the
+# RT path and currently exercises a known backend verifier failure.
+build_rt_libclc() {
+  if [ -e "${LLVM_DIR}/prebuilt" ]; then
+    echo "Using prebuilt llvm libclc, skip building"
+    cp --reflink=auto -a ${LLVM_DIR}/install ${VENTUS_INSTALL_PREFIX}
+  else
+    configure_libclc ${RT_LIBCLC_BUILD_DIR}
+    ninja -C ${RT_LIBCLC_BUILD_DIR}
+    ninja -C ${RT_LIBCLC_BUILD_DIR} install
+  fi
+
+  if [ ! -f "${VENTUS_INSTALL_PREFIX}/lib/crt0.o" ]; then
+    echo "Vulkan RT toolchain build did not install ${VENTUS_INSTALL_PREFIX}/lib/crt0.o"
+    exit 1
   fi
 }
 
@@ -504,6 +664,13 @@ do
   elif [ "${program}" == "llvm" ];then
     build_llvm
     export_elements
+  elif [ "${program}" == "rt-toolchain" ];then
+    build_llvm
+    export_elements
+    build_rt_libclc
+  elif [ "${program}" == "rt-libclc" ];then
+    check_if_ventus_llvm_built
+    build_rt_libclc
   elif [ "${program}" == "ocl-icd" ];then
     build_icd_loader
   elif [ "${program}" == "libclc" ];then
@@ -520,6 +687,8 @@ do
     else
       build_gpgpu_rtlsim
     fi
+  elif [ "${program}" == "rtcore-rtl" ]; then
+    build_rtcore_rtlsim
   elif [ "${program}" == "cyclesim" ] || [ "${program}" == "simulator" ]; then
     check_if_systemc_built
     build_gpgpu_cyclesim
@@ -548,6 +717,13 @@ do
       check_if_sbtsim_built
     fi
     build_driver
+  elif [ "${program}" == "driver-spike" ] || [ "${program}" == "rt-driver" ]; then
+    check_if_spike_built
+    build_spike_driver
+  elif [ "${program}" == "mesa" ] || [ "${program}" == "mesa-ventus" ]; then
+    build_mesa_ventus
+  elif [ "${program}" == "rt-workload" ]; then
+    build_rt_workload
   elif [ "${program}" == "pocl" ]; then
     check_if_ventus_llvm_built
     check_if_ocl_icd_built

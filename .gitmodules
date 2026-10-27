@@ -12,8 +12,8 @@
 	branch = develop
 [submodule "pocl"]
 	path = pocl
-	url = https://github.com/THU-DSP-LAB/pocl.git
-	branch = develop
+	url = https://github.com/shiliuww/pocl.git
+	branch = feature/ray-tracing
 [submodule "ocl-icd"]
 	path = ocl-icd
 	url = https://github.com/OCL-dev/ocl-icd.git
@@ -40,3 +40,11 @@
 	path = sbtsim
 	url = https://github.com/THU-DSP-LAB/ventus-gpgpu-sbt-simulator.git
 	branch = develop
+[submodule "mesa"]
+	path = mesa
+	url = https://github.com/shiliuww/mesa3d-ventus.git
+	branch = feature/ray-tracing
+[submodule "workloads/rt/SaschaWillems_Vulkan"]
+	path = workloads/rt/SaschaWillems_Vulkan
+	url = https://github.com/SaschaWillems/Vulkan.git
+	shallow = true

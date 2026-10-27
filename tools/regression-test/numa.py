@@ -33,7 +33,7 @@ class NumaBinding:
 
 
 class NumaAllocator:
-    """Capacity-aware NUMA binding selector.
+    """Reserve disjoint CPU subsets within each NUMA node.
 
     A heavy testcase is bound only when one NUMA node still has enough reserved
     capacity for its worker-thread weight. When no node can fit it, callers can
@@ -42,7 +42,7 @@ class NumaAllocator:
 
     def __init__(self, bindings: list[NumaBinding]):
         self._bindings = sorted(bindings, key=_binding_sort_key)
-        self._used_by_node = {binding.node: 0 for binding in self._bindings}
+        self._free_by_node = {binding.node: set(binding.cpus) for binding in self._bindings}
 
     @property
     def enabled(self) -> bool:
@@ -58,8 +58,9 @@ class NumaAllocator:
         binding = self._select_binding(worker_threads)
         if binding is None:
             return None
-        self._used_by_node[binding.node] += worker_threads
-        return binding
+        cpus = tuple(sorted(self._free_by_node[binding.node])[:worker_threads])
+        self._free_by_node[binding.node].difference_update(cpus)
+        return NumaBinding(node=binding.node, cpus=cpus)
 
     def has_capacity(self, worker_threads: int) -> bool:
         if not self._bindings:
@@ -69,20 +70,22 @@ class NumaAllocator:
     def release(self, binding: NumaBinding | None, worker_threads: int) -> None:
         if binding is None:
             return
-        used = self._used_by_node.get(binding.node)
-        if used is None:
+        free = self._free_by_node.get(binding.node)
+        if free is None:
             raise NumaBindingError(f"unknown NUMA node released: {binding.node}")
-        self._used_by_node[binding.node] = max(0, used - worker_threads)
+        free.update(binding.cpus)
 
     def _select_binding(self, worker_threads: int) -> NumaBinding | None:
         candidates = [
             binding
             for binding in self._bindings
-            if len(binding.cpus) - self._used_by_node[binding.node] >= worker_threads
+            if len(self._free_by_node[binding.node]) >= worker_threads
         ]
         if not candidates:
             return None
-        return min(candidates, key=lambda binding: (self._used_by_node[binding.node], binding.node))
+        return min(candidates, key=lambda binding: (
+            len(binding.cpus) - len(self._free_by_node[binding.node]), binding.node,
+        ))
 
 
 def create_allocator(policy: str, min_cpus_per_node: int) -> tuple[NumaAllocator, str | None]:

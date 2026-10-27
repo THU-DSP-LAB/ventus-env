@@ -136,6 +136,35 @@ class NumaTests(unittest.TestCase):
 
         self.assertEqual(allocator.allocate(4), node0)
 
+    def test_allocator_reserves_disjoint_cpu_subsets_on_single_node(self):
+        numa = load_module("numa")
+        allocator = numa.NumaAllocator([numa.NumaBinding(node=0, cpus=tuple(range(28)))])
+
+        bindings = [allocator.allocate(8) for _ in range(3)]
+
+        self.assertEqual([binding.cpus for binding in bindings], [
+            tuple(range(8)), tuple(range(8, 16)), tuple(range(16, 24)),
+        ])
+        self.assertFalse(allocator.has_capacity(8))
+        self.assertIsNone(allocator.allocate(8))
+        allocator.release(bindings[1], 8)
+        self.assertEqual(allocator.allocate(8), bindings[1])
+        self.assertEqual(allocator.allocate(4).cpus, tuple(range(24, 28)))
+
+    def test_allocator_release_does_not_free_another_active_subset(self):
+        numa = load_module("numa")
+        allocator = numa.NumaAllocator([numa.NumaBinding(node=0, cpus=tuple(range(12)))])
+        first = allocator.allocate(4)
+        second = allocator.allocate(4)
+        third = allocator.allocate(4)
+
+        allocator.release(first, 4)
+        allocator.release(third, 4)
+        combined = allocator.allocate(8)
+
+        self.assertEqual(combined.cpus, (0, 1, 2, 3, 8, 9, 10, 11))
+        self.assertTrue(set(combined.cpus).isdisjoint(second.cpus))
+
     def test_allocator_reports_capacity_without_reserving_it(self):
         numa = load_module("numa")
         node0 = numa.NumaBinding(node=0, cpus=(0, 1, 2, 3))
@@ -215,8 +244,8 @@ class NumaTests(unittest.TestCase):
             [job.backend.env_backend for job in pool.submitted],
             ["rtlsim-with-cache", "gvm-no-cache", "rtlsim-no-cache"],
         )
-        self.assertEqual(pool.submitted[0].numa_binding, node0)
-        self.assertEqual(pool.submitted[1].numa_binding, node1)
+        self.assertEqual(pool.submitted[0].numa_binding, numa.NumaBinding(node=0, cpus=node0.cpus[:8]))
+        self.assertEqual(pool.submitted[1].numa_binding, numa.NumaBinding(node=1, cpus=node1.cpus[:8]))
         self.assertIsNone(pool.submitted[2].numa_binding)
 
     def test_scheduler_requires_numa_capacity_before_submitting_heavy_job(self):
@@ -253,7 +282,7 @@ class NumaTests(unittest.TestCase):
             [job.backend.env_backend for job in pool.submitted],
             ["rtlsim-with-cache", "gvm-no-cache", "rtlsim-no-cache"],
         )
-        self.assertEqual(pool.submitted[2].numa_binding, node0)
+        self.assertEqual(pool.submitted[2].numa_binding, numa.NumaBinding(node=0, cpus=node0.cpus[:8]))
 
     def test_collect_plan_results_passes_numactl_policy_to_scheduler(self):
         runner = load_module("runner")

@@ -63,8 +63,6 @@ jobs:
           install/lib/libLLVMRISCVDesc.so.16git \
           install/lib/crt0.o install/lib/riscv32clc.o
         sha256sum "$probe_dir"/install/lib/* > "$payload/build-fingerprints.txt"
-        cp "$probe_dir"/install/lib/libVentus*.so "$payload/"
-        cp "$probe_dir"/install/lib/libgvmref.so "$payload/"
         workspace_revision=$(git -c safe.directory="$PWD" rev-parse HEAD 2>/dev/null || true)
         echo "$workspace_revision" > "$payload/workspace-revision.txt"
         case "$workspace_revision" in
@@ -94,11 +92,57 @@ jobs:
           -printf '%p %s bytes\n' > "$payload/persistent-log-index.txt" || true
         cat "$payload/runner-resources.txt"
         cat "$payload/build-fingerprints.txt"
+    - name: Collect bounded hotspot logs from the persisted failed run
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 - <<'PY'
+        import os
+        from pathlib import Path
+        import subprocess
+        import tarfile
+
+        payload = Path(os.environ['HOTSPOT_PROBE_PAYLOAD'])
+        prior = Path('/logs/CI/40262870302-1-e63b8cef595710721b1193f700f5fa06a9480c46')
+        for job in ['test-main', 'test-gvm']:
+            archive = prior / job / 'ci-logs.tar.zst'
+            if not archive.is_file():
+                print(f'Missing persisted archive: {archive}')
+                continue
+            process = subprocess.Popen(['zstd', '-dc', str(archive)], stdout=subprocess.PIPE)
+            try:
+                with tarfile.open(fileobj=process.stdout, mode='r|') as tar:
+                    for member in tar:
+                        if not member.isfile() or not member.name.endswith('.log'):
+                            continue
+                        if 'hotspot3D_512x2_i1' not in member.name:
+                            continue
+                        stream = tar.extractfile(member)
+                        head, tail = b'', b''
+                        while True:
+                            chunk = stream.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            if len(head) < 65536:
+                                head += chunk[:65536 - len(head)]
+                            tail = (tail + chunk)[-262144:]
+                        label = job + '-' + member.name.replace('/', '_')
+                        data = tail if member.size <= 262144 else head + b'\n=== bounded tail ===\n' + tail
+                        (payload / label).write_bytes(data)
+                        print(f'Collected {member.name}: original {member.size} bytes, saved {len(data)}')
+                process.stdout.close()
+                if process.wait() != 0:
+                    raise RuntimeError(f'Failed to decompress {archive}')
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait()
+        PY
     - name: Upload diagnostic payload
       if: always() && env.HOTSPOT_PROBE_PAYLOAD != ''
       uses: actions/upload-artifact@v4
       with:
-        name: pr-hotspot-exact-models
+        name: pr-hotspot-timeout-logs
         path: ${{ env.HOTSPOT_PROBE_PAYLOAD }}
         retention-days: 3
         compression-level: 1

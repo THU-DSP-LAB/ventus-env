@@ -6,7 +6,7 @@ on:
 jobs:
   hotspot-solo:
     runs-on: self-hosted
-    timeout-minutes: 45
+    timeout-minutes: 110
     permissions:
       contents: read
     container:
@@ -73,68 +73,71 @@ jobs:
     - name: Upload prepared input
       uses: actions/upload-artifact@v4
       with:
-        name: pr-hotspot-solo-input
+        name: pr-hotspot-disjoint-input
         path: ${{ env.HOTSPOT_PROBE_PAYLOAD }}
         retention-days: 3
 
-    - name: Run one cached RTL instance with the original failed seed
+    - name: Run three cached RTL instances on disjoint CPU sets
       shell: bash
       run: |
         set -euo pipefail
         export VENTUS_INSTALL_PREFIX="$HOTSPOT_PROBE_ROOT/install"
         source "$HOTSPOT_SOURCE_ROOT/env.sh"
         export VENTUS_BACKEND=rtlsim-with-cache VENTUS_SPIKE_LOG=0
-        export VENTUS_VERILATOR_SEED=423000892
-        export POCL_CACHE_DIR="$HOTSPOT_PROBE_ROOT/pocl-rtl"
-        cd "$HOTSPOT_SOURCE_ROOT/rodinia/opencl/hotspot3D"
-        cpus=$(awk '/Cpus_allowed_list:/ {print $2}' /proc/self/status)
-        /usr/bin/time -v -o "$HOTSPOT_PROBE_PAYLOAD/time.txt" \
-          numactl -m0 -C "$cpus" -- timeout --kill-after=10 1800 \
-          ./hotspot3D.out -n 512 -l 2 -i 1 \
-          -f ../../data/hotspot3D/power_512x2 ../../data/hotspot3D/temp_512x2 output.txt -p 0 -d 0 \
-          > "$HOTSPOT_PROBE_PAYLOAD/rtl.log" 2>&1 &
-        probe_pid=$!
-        while kill -0 "$probe_pid" 2>/dev/null; do
-          {
-            date -u
-            cat /proc/loadavg /proc/stat
-            for item in /proc/pressure/cpu /proc/pressure/memory /sys/fs/cgroup/cpu.stat; do
-              if [ -f "$item" ]; then echo "=== $item ==="; cat "$item"; fi
-            done
-            targets="$probe_pid"
-            parents="$probe_pid"
-            for depth in 1 2; do
-              children=""
-              for pid in $parents; do
-                if [ -r "/proc/$pid/task/$pid/children" ]; then
-                  children="$children $(cat "/proc/$pid/task/$pid/children")"
-                fi
-              done
-              targets="$targets $children"
-              parents="$children"
-            done
-            list=$(echo "$targets" | xargs | tr ' ' ',')
-            ps -o pid,ppid,psr,pcpu,pmem,stat,time -p "$list" || true
-          } >> "$HOTSPOT_PROBE_PAYLOAD/progress.txt"
-          sleep 60
-        done
-        set +e
-        wait "$probe_pid"
-        probe_rc=$?
-        set -e
-        if [ -f object0.riscv ]; then cp object0.riscv "$HOTSPOT_PROBE_PAYLOAD/rtl-kernel.riscv"; fi
-        tail -n 100 "$HOTSPOT_PROBE_PAYLOAD/rtl.log"
-        cat "$HOTSPOT_PROBE_PAYLOAD/time.txt"
-        if [ "$probe_rc" -eq 0 ]; then
-          if ! grep -q 'CPU reference check:.*PASS' "$HOTSPOT_PROBE_PAYLOAD/rtl.log"; then probe_rc=1; fi
-        fi
-        echo "$probe_rc" > "$HOTSPOT_PROBE_PAYLOAD/exit-code.txt"
-        exit "$probe_rc"
+        python3 - <<'PYPROBE'
+        import concurrent.futures
+        import json
+        import os
+        import pathlib
+        import shutil
+        import subprocess
+        import time
 
-    - name: Upload solo result
+        root = pathlib.Path(os.environ["HOTSPOT_PROBE_ROOT"])
+        payload = pathlib.Path(os.environ["HOTSPOT_PROBE_PAYLOAD"])
+        source = pathlib.Path(os.environ["HOTSPOT_SOURCE_ROOT"]) / "rodinia/opencl/hotspot3D"
+        cpus = sorted(os.sched_getaffinity(0))
+        assert len(cpus) >= 24, cpus
+        seeds = [423000892, 706384697, 440990362]
+        def run_one(index):
+            seed = seeds[index]
+            assigned = cpus[index * 8:(index + 1) * 8]
+            work = source.parent / (".hotspot-disjoint-" + str(seed))
+            shutil.copytree(source, work)
+            env = os.environ.copy()
+            env["VENTUS_VERILATOR_SEED"] = str(seed)
+            env["POCL_CACHE_DIR"] = str(root / ("pocl-" + str(seed)))
+            log = payload / (str(seed) + ".log")
+            timing = payload / (str(seed) + "-time.txt")
+            command = ["/usr/bin/time", "-v", "-o", str(timing),
+                       "numactl", "-m0", "-C", ",".join(map(str, assigned)), "--",
+                       "timeout", "--kill-after=10", "6000", "./hotspot3D.out",
+                       "-n", "512", "-l", "2", "-i", "1", "-f",
+                       "../../data/hotspot3D/power_512x2", "../../data/hotspot3D/temp_512x2",
+                       "output.txt", "-p", "0", "-d", "0"]
+            start = time.monotonic()
+            with log.open("w") as output:
+                result = subprocess.run(command, cwd=work, env=env, stdout=output, stderr=subprocess.STDOUT)
+            passed = result.returncode == 0 and "CPU reference check:" in log.read_text() and "PASS" in log.read_text()
+            elf = work / "object0.riscv"
+            if elf.exists():
+                shutil.copy2(elf, payload / (str(seed) + ".riscv"))
+            return {"seed": seed, "cpus": assigned, "return_code": result.returncode,
+                    "reference_pass": passed, "wall_seconds": time.monotonic() - start}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(run_one, index) for index in range(3)]
+            results = []
+            for future in concurrent.futures.as_completed(futures):
+                results.append(future.result())
+                (payload / "disjoint-results.json").write_text(json.dumps(results, indent=2) + "\n")
+                print(json.dumps(results[-1]), flush=True)
+        raise SystemExit(0 if all(item["reference_pass"] for item in results) else 1)
+        PYPROBE
+
+    - name: Upload disjoint result
       if: always() && env.HOTSPOT_PROBE_PAYLOAD != ''
       uses: actions/upload-artifact@v4
       with:
-        name: pr-hotspot-solo-result
+        name: pr-hotspot-disjoint-result
         path: ${{ env.HOTSPOT_PROBE_PAYLOAD }}
         retention-days: 3

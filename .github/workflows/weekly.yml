@@ -12,7 +12,99 @@ on:
   workflow_dispatch:
 
 jobs:
+  collect-pr-hotspot-diagnostic:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/hotspot-probe-20261027'
+    runs-on: self-hosted
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    container:
+      image: humber186/ventus:base-latest
+      options: >-
+        --add-host=host.docker.internal:host-gateway
+        --security-opt seccomp=/ci/ventus-env/seccomp-numa.json
+      volumes:
+        - /ci/ventus-env/artifacts:/artifacts:ro
+        - /ci/ventus-env/logs:/logs:ro
+    steps:
+    # This manual-only branch reads the completed PR build and preserves the
+    # current runner workspace. It neither checks out sources nor rebuilds.
+    - name: Collect exact PR models and bounded timeout logs
+      shell: bash
+      run: |
+        set -euo pipefail
+        probe_dir="${RUNNER_TEMP}/ventus-hotspot-${GITHUB_RUN_ID}"
+        payload="${probe_dir}/payload"
+        mkdir -p "$payload"
+        echo "HOTSPOT_PROBE_PAYLOAD=$payload" >> "$GITHUB_ENV"
+        archive_dir=/artifacts/e63b8cef595710721b1193f700f5fa06a9480c46
+        test -f "$archive_dir/.ventus-ci-artifact-complete"
+        cp "$archive_dir/.ventus-ci-artifact-complete" "$payload/build-marker.txt"
+        {
+          date -u
+          uname -a
+          nproc
+          lscpu
+          grep -E 'Cpus_allowed_list|Mems_allowed_list' /proc/self/status
+          for item in cpu.max cpu.stat cpuset.cpus.effective memory.max; do
+            if [ -f "/sys/fs/cgroup/$item" ]; then
+              echo "=== cgroup $item ==="
+              cat "/sys/fs/cgroup/$item"
+            fi
+          done
+        } > "$payload/runner-resources.txt"
+        tar --zstd -xf "$archive_dir/install.tar.zst" -C "$probe_dir" \
+          install/lib/libVentusRTL-withcache.so \
+          install/lib/libVentusRTL-nocache.so \
+          install/lib/libVentusGVM-withcache.so \
+          install/lib/libVentusGVM-nocache.so \
+          install/lib/libgvmref.so \
+          install/lib/libLLVMRISCVCodeGen.so.16git \
+          install/lib/libLLVMRISCVDesc.so.16git \
+          install/lib/crt0.o install/lib/riscv32clc.o
+        sha256sum "$probe_dir"/install/lib/* > "$payload/build-fingerprints.txt"
+        cp "$probe_dir"/install/lib/libVentus*.so "$payload/"
+        cp "$probe_dir"/install/lib/libgvmref.so "$payload/"
+        workspace_revision=$(git -c safe.directory="$PWD" rev-parse HEAD 2>/dev/null || true)
+        echo "$workspace_revision" > "$payload/workspace-revision.txt"
+        case "$workspace_revision" in
+          e63b8cef595710721b1193f700f5fa06a9480c46|5639a4a4061ebfba13aa2705b29c1e58f7f7d505)
+            if [ -d regression-test-logs ]; then
+              while IFS= read -r -d '' logfile; do
+                label=$(basename "$(dirname "$logfile")")-$(basename "$logfile")
+                {
+                  head -n 100 "$logfile"
+                  echo '=== bounded final log lines ==='
+                  tail -n 400 "$logfile"
+                } > "$payload/$label"
+              done < <(find regression-test-logs -maxdepth 2 -type f \
+                -name '*hotspot3D_512x2_i1*.log' -print0)
+            fi
+            if [ -d rodinia/opencl ]; then
+              while IFS= read -r -d '' elf; do
+                label=$(basename "$(dirname "$elf")")
+                cp "$elf" "$payload/$label.riscv"
+              done < <(find rodinia/opencl -maxdepth 3 -type f \
+                -path '*/.rep_hotspot3D_*/object0.riscv' -print0)
+            fi
+            ;;
+          *) echo 'Workspace is no longer the failed PR revision; workspace logs not collected.' ;;
+        esac
+        find /logs/CI -maxdepth 3 -path '*40262870302*' \
+          -printf '%p %s bytes\n' > "$payload/persistent-log-index.txt" || true
+        cat "$payload/runner-resources.txt"
+        cat "$payload/build-fingerprints.txt"
+    - name: Upload diagnostic payload
+      if: always() && env.HOTSPOT_PROBE_PAYLOAD != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: pr-hotspot-exact-models
+        path: ${{ env.HOTSPOT_PROBE_PAYLOAD }}
+        retention-days: 3
+        compression-level: 1
+
   weekly-test:
+    if: github.ref != 'refs/heads/ci/hotspot-probe-20261027'
     runs-on: self-hosted
     container:
       image: humber186/ventus:base-20251010

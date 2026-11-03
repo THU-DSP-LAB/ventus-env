@@ -102,7 +102,7 @@ def build(args):
                      '-DLLVM_ENABLE_ASSERTIONS=OFF', '-DLLVM_PARALLEL_LINK_JOBS=2',
                      '-DLLVM_CCACHE_BUILD=OFF'])
             execute(['ninja', '-C', ROOT / 'llvm/build', '-j', jobs,
-                     'clang', 'llc', 'ld.lld', 'llvm-nm', 'llvm-objdump'])
+                     'clang', 'llc', 'lld', 'llvm-nm', 'llvm-objdump'])
         elif component == 'runtime':
             target = ROOT / 'llvm/build-rt-libclc/lib/crt0.o'
             target.parent.mkdir(parents=True, exist_ok=True)

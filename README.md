@@ -2,6 +2,10 @@
 
 [中文版](README_zh_cn.md)
 
+For the pinned texture functional model and Vulkan-to-Spike software sampling,
+see [texture reproduction](docs/texture-reproduction.md). It provides a focused
+build and numerical/image acceptance workflow without the RTL/OpenCL build.
+
 ## System Requirements
 
 * **Memory:** 32 GiB RAM or higher recommended

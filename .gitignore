@@ -5,6 +5,7 @@
 build/
 install/
 install-rt/
+install-texture/
 artifacts/
 regression-test-logs/
 rodinia_data.tar.xz

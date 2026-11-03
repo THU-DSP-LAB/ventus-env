@@ -1,0 +1,1000 @@
+{
+  "baseline": "b0025ebf794b3c68a261800c33b118234f0657c7",
+  "quad_origin": "2026-10-08 complete quad acceptance; both former groups now use the pinned main Mesa build",
+  "quick": [
+    {
+      "name": "quick-positive",
+      "args": [
+        "gpu-min-mag",
+        "--quad",
+        "fine",
+        "--case-limit",
+        "1"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "quick-negative",
+      "args": [
+        "gpu-min-mag",
+        "--quad",
+        "coarse",
+        "--case-limit",
+        "1",
+        "--inject-quad-neighbor-mismatch"
+      ],
+      "expected_returncode": 1
+    },
+    {
+      "name": "quick-ranges",
+      "args": [
+        "gpu-checks"
+      ],
+      "expected_returncode": 0
+    }
+  ],
+  "features": [
+    {
+      "name": "lod0",
+      "args": [
+        "gpu",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "mip-view",
+      "args": [
+        "gpu-mips",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "mip-linear",
+      "args": [
+        "gpu-mip-linear-check",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "multi",
+      "args": [
+        "gpu-multi",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "min-mag",
+      "args": [
+        "gpu-min-mag",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "srgb",
+      "args": [
+        "gpu-srgb",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "fetch",
+      "args": [
+        "gpu-fetch-query",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "swizzle",
+      "args": [
+        "gpu-swizzle",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "border",
+      "args": [
+        "gpu-border",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "separate",
+      "args": [
+        "gpu-separate",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "descriptor-array",
+      "args": [
+        "gpu-multi-array",
+        "--array-length",
+        "4",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "uniform",
+      "args": [
+        "gpu-multi-uniform",
+        "--array-length",
+        "4",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "nonuniform",
+      "args": [
+        "gpu-multi-nonuniform",
+        "--array-length",
+        "4",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "bias",
+      "args": [
+        "gpu-min-mag",
+        "--lod-bias",
+        "0.75",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "grad",
+      "args": [
+        "gpu-min-mag",
+        "--gradients",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "offset",
+      "args": [
+        "gpu-min-mag",
+        "--offset",
+        "-8",
+        "7",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "image-array",
+      "args": [
+        "gpu-min-mag",
+        "--image-layers",
+        "4",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "cube",
+      "args": [
+        "gpu-min-mag",
+        "--cube",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "volume",
+      "args": [
+        "gpu-min-mag",
+        "--volume",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "depth",
+      "args": [
+        "gpu-min-mag",
+        "--depth",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "gather",
+      "args": [
+        "gpu-min-mag",
+        "--gather",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    },
+    {
+      "name": "comparison-gather",
+      "args": [
+        "gpu-min-mag",
+        "--gather",
+        "--depth",
+        "--case-limit",
+        "64"
+      ],
+      "expected_returncode": 0
+    }
+  ],
+  "quad": [
+    {
+      "name": "quad-isolated-fine",
+      "args": [
+        "gpu-min-mag",
+        "--quad",
+        "fine"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "1440",
+        "samples": "184320",
+        "components": "737280",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "0",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0",
+        "quad_gradient_components": "737280",
+        "quad_gradient_failed": "0",
+        "quad_lod_failed": "0",
+        "quad_groups": "16",
+        "full_warps": "2",
+        "quad_mode": "fine"
+      }
+    },
+    {
+      "name": "quad-isolated-coarse",
+      "args": [
+        "gpu-min-mag",
+        "--quad",
+        "coarse"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "1440",
+        "samples": "184320",
+        "components": "737280",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "0",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0",
+        "quad_gradient_components": "737280",
+        "quad_gradient_failed": "0",
+        "quad_lod_failed": "0",
+        "quad_groups": "16",
+        "full_warps": "2",
+        "quad_mode": "coarse"
+      }
+    },
+    {
+      "name": "quad-isolated-fine-srgb",
+      "args": [
+        "gpu-srgb",
+        "--quad",
+        "fine",
+        "--case-limit",
+        "80"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "80",
+        "samples": "10240",
+        "components": "40960",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "18",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0",
+        "quad_gradient_components": "40960",
+        "quad_gradient_failed": "0",
+        "quad_lod_failed": "0",
+        "quad_groups": "16",
+        "full_warps": "2",
+        "quad_mode": "fine"
+      }
+    },
+    {
+      "name": "quad-isolated-coarse-swizzle",
+      "args": [
+        "gpu-swizzle",
+        "--quad",
+        "coarse",
+        "--case-limit",
+        "80"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "80",
+        "samples": "10240",
+        "components": "40960",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "18",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0",
+        "quad_gradient_components": "40960",
+        "quad_gradient_failed": "0",
+        "quad_lod_failed": "0",
+        "quad_groups": "16",
+        "full_warps": "2",
+        "quad_mode": "coarse",
+        "mapping0": "9",
+        "mapping1": "9",
+        "mapping2": "9",
+        "mapping3": "9",
+        "mapping4": "9",
+        "mapping5": "9",
+        "mapping6": "9",
+        "mapping7": "9",
+        "mapping8": "8"
+      }
+    },
+    {
+      "name": "quad-isolated-fine-border-bias",
+      "args": [
+        "gpu-border",
+        "--quad",
+        "fine",
+        "--lod-bias",
+        "0.75",
+        "--case-limit",
+        "80"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "80",
+        "samples": "10240",
+        "components": "40960",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "18",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0",
+        "quad_gradient_components": "40960",
+        "quad_gradient_failed": "0",
+        "quad_lod_failed": "0",
+        "quad_groups": "16",
+        "full_warps": "2",
+        "quad_mode": "fine",
+        "mapping0": "18",
+        "mapping1": "19",
+        "mapping2": "6",
+        "mapping3": "6",
+        "mapping4": "7",
+        "mapping5": "6",
+        "mapping6": "6",
+        "mapping7": "7",
+        "mapping8": "5",
+        "border0": "32",
+        "border1": "24",
+        "border2": "24"
+      }
+    },
+    {
+      "name": "quad-isolated-coarse-negative-bias",
+      "args": [
+        "gpu-min-mag",
+        "--quad",
+        "coarse",
+        "--lod-bias",
+        "-0.5",
+        "--case-limit",
+        "80"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "80",
+        "samples": "10240",
+        "components": "40960",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "0",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0",
+        "quad_gradient_components": "40960",
+        "quad_gradient_failed": "0",
+        "quad_lod_failed": "0",
+        "quad_groups": "16",
+        "full_warps": "2",
+        "quad_mode": "coarse"
+      }
+    },
+    {
+      "name": "quad-isolated-fine-wrong-neighbor",
+      "args": [
+        "gpu-min-mag",
+        "--quad",
+        "fine",
+        "--case-limit",
+        "8",
+        "--inject-quad-neighbor-mismatch"
+      ],
+      "expected_returncode": 1,
+      "expected_summary": {
+        "cases": "8",
+        "samples": "1024",
+        "components": "4096",
+        "mismatches": "480",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "0",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0",
+        "quad_gradient_components": "4096",
+        "quad_gradient_failed": "1920",
+        "quad_lod_failed": "480",
+        "quad_groups": "16",
+        "full_warps": "2",
+        "quad_mode": "fine"
+      }
+    },
+    {
+      "name": "quad-isolated-fine-wrong-sign",
+      "args": [
+        "gpu-min-mag",
+        "--quad",
+        "fine",
+        "--case-limit",
+        "8",
+        "--inject-quad-sign-mismatch"
+      ],
+      "expected_returncode": 1,
+      "expected_summary": {
+        "cases": "8",
+        "samples": "1024",
+        "components": "4096",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "0",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0",
+        "quad_gradient_components": "4096",
+        "quad_gradient_failed": "960",
+        "quad_lod_failed": "0",
+        "quad_groups": "16",
+        "full_warps": "2",
+        "quad_mode": "fine"
+      }
+    },
+    {
+      "name": "quad-isolated-coarse-wrong-neighbor",
+      "args": [
+        "gpu-min-mag",
+        "--quad",
+        "coarse",
+        "--case-limit",
+        "8",
+        "--inject-quad-neighbor-mismatch"
+      ],
+      "expected_returncode": 1,
+      "expected_summary": {
+        "cases": "8",
+        "samples": "1024",
+        "components": "4096",
+        "mismatches": "640",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "0",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0",
+        "quad_gradient_components": "4096",
+        "quad_gradient_failed": "1920",
+        "quad_lod_failed": "960",
+        "quad_groups": "16",
+        "full_warps": "2",
+        "quad_mode": "coarse"
+      }
+    },
+    {
+      "name": "quad-isolated-coarse-wrong-sign",
+      "args": [
+        "gpu-min-mag",
+        "--quad",
+        "coarse",
+        "--case-limit",
+        "8",
+        "--inject-quad-sign-mismatch"
+      ],
+      "expected_returncode": 1,
+      "expected_summary": {
+        "cases": "8",
+        "samples": "1024",
+        "components": "4096",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "0",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0",
+        "quad_gradient_components": "4096",
+        "quad_gradient_failed": "1920",
+        "quad_lod_failed": "0",
+        "quad_groups": "16",
+        "full_warps": "2",
+        "quad_mode": "coarse"
+      }
+    },
+    {
+      "name": "quad-isolated-no-opt-in",
+      "args": [
+        "gpu-min-mag",
+        "--quad",
+        "fine",
+        "--case-limit",
+        "1",
+        "--quad-without-opt-in"
+      ],
+      "expected_returncode": 1,
+      "expected_summary": {}
+    },
+    {
+      "name": "quad-regressions-old-grad",
+      "args": [
+        "gpu-min-mag",
+        "--gradients",
+        "--case-limit",
+        "80"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "80",
+        "samples": "10240",
+        "components": "40960",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "0",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0"
+      }
+    },
+    {
+      "name": "quad-regressions-old-sample",
+      "args": [
+        "gpu-min-mag",
+        "--case-limit",
+        "80"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "80",
+        "samples": "10240",
+        "components": "40960",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "0",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0"
+      }
+    },
+    {
+      "name": "quad-regressions-old-gather",
+      "args": [
+        "gpu-min-mag",
+        "--gather",
+        "--case-limit",
+        "8"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "8",
+        "samples": "1024",
+        "components": "4096",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "0",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0"
+      }
+    },
+    {
+      "name": "quad-regressions-old-gather-depth",
+      "args": [
+        "gpu-min-mag",
+        "--gather",
+        "--depth",
+        "--case-limit",
+        "8"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "8",
+        "samples": "1024",
+        "components": "4096",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "8",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0"
+      }
+    },
+    {
+      "name": "quad-regressions-old-array",
+      "args": [
+        "gpu-min-mag",
+        "--image-layers",
+        "4",
+        "--case-limit",
+        "8"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "8",
+        "samples": "1024",
+        "components": "4096",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "0",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0"
+      }
+    },
+    {
+      "name": "quad-regressions-old-cube",
+      "args": [
+        "gpu-min-mag",
+        "--cube",
+        "--case-limit",
+        "8"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "8",
+        "samples": "1024",
+        "components": "4096",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "18",
+        "query_components": "3072",
+        "query_failed": "0",
+        "injected_query": "0"
+      }
+    },
+    {
+      "name": "quad-regressions-old-volume",
+      "args": [
+        "gpu-min-mag",
+        "--volume",
+        "--case-limit",
+        "8"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "8",
+        "samples": "1024",
+        "components": "4096",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "18",
+        "query_components": "4096",
+        "query_failed": "0",
+        "injected_query": "0"
+      }
+    },
+    {
+      "name": "quad-regressions-old-depth",
+      "args": [
+        "gpu-min-mag",
+        "--depth",
+        "--case-limit",
+        "8"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "8",
+        "samples": "1024",
+        "components": "4096",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "8",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0"
+      }
+    },
+    {
+      "name": "quad-regressions-old-nonuniform",
+      "args": [
+        "gpu-multi-nonuniform",
+        "--case-limit",
+        "8"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "8",
+        "samples": "2048",
+        "mixed_results": "1024",
+        "components": "12288",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "18",
+        "phase0": "1",
+        "phase1": "1",
+        "phase2": "1",
+        "phase3": "1",
+        "phase4": "1",
+        "phase5": "1",
+        "phase6": "1",
+        "phase7": "1",
+        "pair0": "8",
+        "pair1": "0",
+        "pair2": "0"
+      }
+    },
+    {
+      "name": "quad-regressions-old-ranges",
+      "args": [
+        "gpu-checks"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "samplers": "25",
+        "shaders": "14",
+        "images": "35",
+        "views": "41",
+        "copies": "9",
+        "limits": "5",
+        "baseline": "pass",
+        "errors": "0"
+      }
+    },
+    {
+      "name": "quad-main-fine",
+      "args": [
+        "gpu-min-mag",
+        "--quad",
+        "fine"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "1440",
+        "samples": "184320",
+        "components": "737280",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "0",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0",
+        "quad_gradient_components": "737280",
+        "quad_gradient_failed": "0",
+        "quad_lod_failed": "0",
+        "quad_groups": "16",
+        "full_warps": "2",
+        "quad_mode": "fine"
+      }
+    },
+    {
+      "name": "quad-main-coarse",
+      "args": [
+        "gpu-min-mag",
+        "--quad",
+        "coarse"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "1440",
+        "samples": "184320",
+        "components": "737280",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "0",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0",
+        "quad_gradient_components": "737280",
+        "quad_gradient_failed": "0",
+        "quad_lod_failed": "0",
+        "quad_groups": "16",
+        "full_warps": "2",
+        "quad_mode": "coarse"
+      }
+    },
+    {
+      "name": "quad-main-old-gather",
+      "args": [
+        "gpu-min-mag",
+        "--gather",
+        "--case-limit",
+        "8"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "cases": "8",
+        "samples": "1024",
+        "components": "4096",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "0",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0"
+      }
+    },
+    {
+      "name": "quad-main-old-ranges",
+      "args": [
+        "gpu-checks"
+      ],
+      "expected_returncode": 0,
+      "expected_summary": {
+        "samplers": "25",
+        "shaders": "14",
+        "images": "35",
+        "views": "41",
+        "copies": "9",
+        "limits": "5",
+        "baseline": "pass",
+        "errors": "0"
+      }
+    },
+    {
+      "name": "quad-main-fine-wrong-sign",
+      "args": [
+        "gpu-min-mag",
+        "--quad",
+        "fine",
+        "--case-limit",
+        "8",
+        "--inject-quad-sign-mismatch"
+      ],
+      "expected_returncode": 1,
+      "expected_summary": {
+        "cases": "8",
+        "samples": "1024",
+        "components": "4096",
+        "mismatches": "0",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "0",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0",
+        "quad_gradient_components": "4096",
+        "quad_gradient_failed": "960",
+        "quad_lod_failed": "0",
+        "quad_groups": "16",
+        "full_warps": "2",
+        "quad_mode": "fine"
+      }
+    },
+    {
+      "name": "quad-main-coarse-wrong-neighbor",
+      "args": [
+        "gpu-min-mag",
+        "--quad",
+        "coarse",
+        "--case-limit",
+        "8",
+        "--inject-quad-neighbor-mismatch"
+      ],
+      "expected_returncode": 1,
+      "expected_summary": {
+        "cases": "8",
+        "samples": "1024",
+        "components": "4096",
+        "mismatches": "640",
+        "markers_failed": "0",
+        "buffer_failed": "0",
+        "injected": "0",
+        "format_checks": "0",
+        "query_components": "0",
+        "query_failed": "0",
+        "injected_query": "0",
+        "quad_gradient_components": "4096",
+        "quad_gradient_failed": "1920",
+        "quad_lod_failed": "960",
+        "quad_groups": "16",
+        "full_warps": "2",
+        "quad_mode": "coarse"
+      }
+    },
+    {
+      "name": "quad-main-no-opt-in",
+      "args": [
+        "gpu-min-mag",
+        "--quad",
+        "fine",
+        "--case-limit",
+        "1",
+        "--quad-without-opt-in"
+      ],
+      "expected_returncode": 1,
+      "expected_summary": {}
+    }
+  ]
+}

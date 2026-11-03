@@ -144,3 +144,37 @@ Quad 是完整、统一执行的逻辑四槽位实验，当前由 RT raygen 驱�
 数值入口共完成 52 条检查命令，另执行图像门禁。完整精简对照见 [机器可读验收结果](texture-reproduction-results.json)：包含源码版本、主机工具和 Python 包版本、逐条参数、返回码、数值汇总及图像哈希。之后复现时，对照这些计数与误差条件，无需保存或下载原始大日志。
 
 全新构建期间修复了两处复现入口问题：LLVM Ninja 应构建 `lld` 目标，由该目标生成 `ld.lld`；Mesa 的代码生成 Python 必须来自包含固定 Mako 依赖的工具 venv。两处修复均已进入上述测试提交，没有修改 ISA 或纹理算法。
+
+## 补充：原有光追功能矩阵
+
+在上述工具链、Mesa 和公开 workload 准备完成后，可补跑维护中的 15 项 MegaKernel 光追回归。先构建所需 headless 应用：
+
+```bash
+ninja -C build/rt-workload/build -j 4 \
+  raytracingbasic raytracingcallable raytracingreflections raytracingshadows \
+  raytracingintersection raytracingsbtdata raytracingtextures
+```
+
+再用与纹理验收相同的隔离环境运行已有入口。入口会清理指定的输出目录，下面预先检查目录不存在，避免覆盖历史结果：
+
+```python
+from pathlib import Path
+import subprocess
+from tools.texture_repro.workflow import environment
+
+output = Path('artifacts/rtcore-spike/replay-full-matrix').resolve()
+if output.exists():
+    raise SystemExit('请换一个尚不存在的输出目录')
+env = environment()
+env.update(OUT_DIR=str(output), MESA_SHADER_CACHE_DISABLE='true', CCACHE_DISABLE='1')
+with Path('rt-matrix-replay.log').open('x') as log:
+    subprocess.run(['bash', 'tools/rtcore/verify_megakernel_feature_matrix.sh'],
+                   env=env, stdout=log, stderr=subprocess.STDOUT,
+                   timeout=3300, check=True)
+```
+
+从仓库根目录用 `python3` 执行这段代码。预期入口退出 0，日志包含 `PASS megakernel-feature-matrix gates=15`，`matrix.tsv` 有 15 条 PASS 记录。矩阵包括 Callable、嵌套 Callable、SBT 数据、实例索引与变换、迭代反射、Miss 内二次射线、多 descriptor set、程序化 AABB、剔除标志、透明纹理 any-hit 和三角形顶点位置获取。
+
+其中 `callable_shader_restrictions` 是源码保护检查，确认两层有界 Callable 的实现与拒绝诊断存在；它不动态触发超深嵌套或 Callable 内 traceRay 的拒绝。其余 14 项包含真实 Spike 渲染并按各自脚本检查图像哈希、像素语义、运行日志或反汇编。不能将该矩阵等同于全部 Vulkan RT 扩展、其他执行 profile 或 RTL 验收。
+
+2026-11-03 已在与纹理验收相同的独立构建环境中完成上述矩阵，15/15 项通过，耗时约 9 分 17 秒。其中 14 项运行检查共产生 33 张图像，逐一核对真实 Spike 执行与 completion frontier 通过；另一项为上述源码保护检查。没有修改测试预期、纹理实现或光追实现。逐项结果、脚本哈希、图像哈希和运行配置见 [光追回归结果](rt-regression-results.json)。

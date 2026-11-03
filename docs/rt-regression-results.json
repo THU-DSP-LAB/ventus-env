@@ -1,0 +1,383 @@
+{
+  "status": "PASS",
+  "date": "2026-11-03",
+  "profile": "megakernel",
+  "sources": {
+    "env": "5773217ae52b88f9ab1f613758758457743223ed",
+    "submodules": {
+      "llvm": "88d9b6874ef051f9d626045e389aa59632997333",
+      "spike": "4b34446ada05775dfd0da98cd6e978ec37ae8497",
+      "driver": "0881c396a81fd081d454b8991d113f3fd3ed0bc5",
+      "mesa": "8d2ba4ac6d92963494d225e8e66f9a6e70346194",
+      "driver/dependencies/membox": "fdccb9a64675465e682136979d9dc394afc89b88"
+    }
+  },
+  "started_at": "2026-11-03T09:53:05.673096+00:00",
+  "finished_at": "2026-11-03T10:02:22.537780+00:00",
+  "host_configuration": "texture-reproduction-results.json",
+  "build_command": [
+    "ninja",
+    "-C",
+    "build/rt-workload/build",
+    "-j",
+    "4",
+    "raytracingbasic",
+    "raytracingcallable",
+    "raytracingreflections",
+    "raytracingshadows",
+    "raytracingintersection",
+    "raytracingsbtdata",
+    "raytracingtextures"
+  ],
+  "command": [
+    "bash",
+    "tools/rtcore/verify_megakernel_feature_matrix.sh"
+  ],
+  "environment": {
+    "PATH": "/usr/bin:/bin",
+    "MESA_SHADER_CACHE_DISABLE": "true",
+    "CCACHE_DISABLE": "1"
+  },
+  "gate_count": 15,
+  "runtime_gates": 14,
+  "source_guard_gates": 1,
+  "gates": [
+    {
+      "name": "callable_shader_image",
+      "status": "PASS",
+      "kind": "runtime-image",
+      "script_sha256": "3e2779d3cd18bd28c6731265a07c670d7d35b61ee8727c1eb49a61d669f2f81b",
+      "images": [
+        {
+          "file": "160x96/raytracingcallable_spike.ppm",
+          "sha256": "d7bdabc9540254754933b8be074b54b6dc98ee48d326d2055a0b5b20a9c4f29c",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "nested_callable_shader_image",
+      "status": "PASS",
+      "kind": "runtime-image",
+      "script_sha256": "26e5fe75ed4757ada10d560f20b646d52df1a7b79d07726fa9bb679fdb5ebad6",
+      "images": [
+        {
+          "file": "160x96/raytracingcallable_spike.ppm",
+          "sha256": "159a95d4b177fd7d985abd7abbdcceefd8af18ab43a9bdec88476c657478bbc6",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "callable_shader_record_data",
+      "status": "PASS",
+      "kind": "runtime-image",
+      "script_sha256": "b3d85d4d0a7ea88e5364225e8f0e9bb6a4874da76b88fdf73c55635a34faa3bc",
+      "images": [
+        {
+          "file": "160x96/raytracingcallable_spike.ppm",
+          "sha256": "1ff8532e2ba5dc7d39bb89720a66a9ccb355e8d5d30196b848dbb0ff1f54dd05",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "callable_shader_restrictions",
+      "status": "PASS",
+      "kind": "source-guard-inspection",
+      "script_sha256": "5b953953436e9843afb5ed1f35befbb1cb88da1ffd505690064e86f9d2c7ba32",
+      "images": []
+    },
+    {
+      "name": "instance_custom_index_image",
+      "status": "PASS",
+      "kind": "runtime-image",
+      "script_sha256": "8815b6bfcf942c57588174fa59fdbd53cc6cd56612171cccde3e196a73cde2c7",
+      "images": [
+        {
+          "file": "baseline/16x16/raytracingbasic_spike.ppm",
+          "sha256": "dd5b8d1bdad0ba7dc955f1eff2814327470d8755e5220c583491c44a55da191b",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "custom/16x16/raytracingbasic_spike.ppm",
+          "sha256": "3d09862daeb6749e184b2b15c85e4e8e8d578912db65574f91fbe6b589e39415",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "instance_transform_builtins",
+      "status": "PASS",
+      "kind": "runtime-image",
+      "script_sha256": "29dd14b5e3b92737fe63afd2f978f88b2e145dfa7f5f9f62bddc444d58208f6d",
+      "images": [
+        {
+          "file": "baseline/16x16/raytracingbasic_spike.ppm",
+          "sha256": "dd5b8d1bdad0ba7dc955f1eff2814327470d8755e5220c583491c44a55da191b",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "transformed/16x16/raytracingbasic_spike.ppm",
+          "sha256": "3736117892f05da592607666a2c0d6e5a23ee2618aad93f3ab9b527d208c5fdc",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "iterative_reflections_image",
+      "status": "PASS",
+      "kind": "runtime-image",
+      "script_sha256": "185997148fbb6edfa798a42d1f1a60663ed530d1b3ea7eab4912291486518998",
+      "images": [
+        {
+          "file": "160x96/raytracingreflections_spike.ppm",
+          "sha256": "65480e26a328cd5bb1205d33fc6114837f7cae71cea0754eec9c4b31e5334703",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "miss_secondary_ray_image",
+      "status": "PASS",
+      "kind": "runtime-image",
+      "script_sha256": "da9c6ddb21ad4810aa02fa5dfa0be221b0bbe7bdf7435c7300ee074cb1fb2b9a",
+      "images": [
+        {
+          "file": "16x16/raytracingshadows_spike.ppm",
+          "sha256": "87d66fa972ec6af0d9cdab37bd3b1dd096b0b4f5ac731e23cfd94f05ee3cbcc0",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "multiset_rt_image",
+      "status": "PASS",
+      "kind": "runtime-image",
+      "script_sha256": "1d62f7eea8fd5cee108444dd553d5c4258edd00543ea501448a36f20ee7bf80d",
+      "images": [
+        {
+          "file": "160x96/raytracingbasic_spike.ppm",
+          "sha256": "1d8261975e5d53e8832a2c7acfa8606ff60b2c5705fca61bf7ad2002bd666bfe",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "procedural_aabb_image",
+      "status": "PASS",
+      "kind": "runtime-image",
+      "script_sha256": "bf08312d1e9edb8fa3d5843fbdb4b276bedb5922030c35ddd4f7541c9bdbb1b0",
+      "images": [
+        {
+          "file": "160x96/raytracingintersection_spike.ppm",
+          "sha256": "bdb06f654a712e58968c20823c54c44fb51d9ed37e4259720e0c1272dd448a17",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "ray_culling_flags",
+      "status": "PASS",
+      "kind": "runtime-image",
+      "script_sha256": "f9171befbc811afd75263f617747038328e474f37198ebcfba6c1fd02aa29fdc",
+      "images": [
+        {
+          "file": "baseline/16x16/raytracingbasic_spike.ppm",
+          "sha256": "dd5b8d1bdad0ba7dc955f1eff2814327470d8755e5220c583491c44a55da191b",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "cull_back_no_flip/16x16/raytracingbasic_spike.ppm",
+          "sha256": "0605389515009d833fe91e7dcb359d185545d2716f7f7e619794886f91c151cb",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "cull_back_with_flip/16x16/raytracingbasic_spike.ppm",
+          "sha256": "dd5b8d1bdad0ba7dc955f1eff2814327470d8755e5220c583491c44a55da191b",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "cull_both/16x16/raytracingbasic_spike.ppm",
+          "sha256": "0605389515009d833fe91e7dcb359d185545d2716f7f7e619794886f91c151cb",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "cull_disabled/16x16/raytracingbasic_spike.ppm",
+          "sha256": "dd5b8d1bdad0ba7dc955f1eff2814327470d8755e5220c583491c44a55da191b",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "cull_front_no_flip/16x16/raytracingbasic_spike.ppm",
+          "sha256": "dd5b8d1bdad0ba7dc955f1eff2814327470d8755e5220c583491c44a55da191b",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "cull_front_with_flip/16x16/raytracingbasic_spike.ppm",
+          "sha256": "0605389515009d833fe91e7dcb359d185545d2716f7f7e619794886f91c151cb",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "cull_nonopaque_plain/16x16/raytracingbasic_spike.ppm",
+          "sha256": "dd5b8d1bdad0ba7dc955f1eff2814327470d8755e5220c583491c44a55da191b",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "cull_opaque/16x16/raytracingbasic_spike.ppm",
+          "sha256": "0605389515009d833fe91e7dcb359d185545d2716f7f7e619794886f91c151cb",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "instance_force_nonopaque/16x16/raytracingbasic_spike.ppm",
+          "sha256": "0605389515009d833fe91e7dcb359d185545d2716f7f7e619794886f91c151cb",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "ray_nonopaque_override/16x16/raytracingbasic_spike.ppm",
+          "sha256": "0605389515009d833fe91e7dcb359d185545d2716f7f7e619794886f91c151cb",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "ray_opaque_override/16x16/raytracingbasic_spike.ppm",
+          "sha256": "0605389515009d833fe91e7dcb359d185545d2716f7f7e619794886f91c151cb",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "ray_primitive_culling",
+      "status": "PASS",
+      "kind": "runtime-image",
+      "script_sha256": "1ff93878d9013e904a72bfb766a570eb77596de9e854a869dfb71ed34848151b",
+      "images": [
+        {
+          "file": "basic_baseline/16x16/raytracingbasic_spike.ppm",
+          "sha256": "dd5b8d1bdad0ba7dc955f1eff2814327470d8755e5220c583491c44a55da191b",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "basic_skip_aabbs/16x16/raytracingbasic_spike.ppm",
+          "sha256": "dd5b8d1bdad0ba7dc955f1eff2814327470d8755e5220c583491c44a55da191b",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "basic_skip_triangles/16x16/raytracingbasic_spike.ppm",
+          "sha256": "0605389515009d833fe91e7dcb359d185545d2716f7f7e619794886f91c151cb",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "procedural_baseline/16x16/raytracingintersection_spike.ppm",
+          "sha256": "5ae97d4ddc214879360bea239931f49c6f81dfd98b3849f23dd527a072515b38",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "procedural_skip_aabbs/16x16/raytracingintersection_spike.ppm",
+          "sha256": "0605389515009d833fe91e7dcb359d185545d2716f7f7e619794886f91c151cb",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "procedural_skip_triangles/16x16/raytracingintersection_spike.ppm",
+          "sha256": "5ae97d4ddc214879360bea239931f49c6f81dfd98b3849f23dd527a072515b38",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "sbt_record_data_image",
+      "status": "PASS",
+      "kind": "runtime-image",
+      "script_sha256": "720e3e74a5b83a68c883c21eaff6c78421826666a14c16a092fd9e765f561799",
+      "images": [
+        {
+          "file": "160x96/raytracingsbtdata_spike.ppm",
+          "sha256": "7d585343b55a01b8fb48ad2ca776de8b43b5766ab6fa51fff9783d52cd139e26",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "textured_any_hit_image",
+      "status": "PASS",
+      "kind": "runtime-image",
+      "script_sha256": "7c952ab0424de0b076c5f6bd213699c26e86bff8f60bdbb4509f760e07f84690",
+      "images": [
+        {
+          "file": "160x96/raytracingtextures_spike.ppm",
+          "sha256": "88b724540dc17b23161c638ebcbb71e9acaf73ff098b43764f9edf17cd5bebb0",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "triangle_position_fetch",
+      "status": "PASS",
+      "kind": "runtime-image",
+      "script_sha256": "021965de56bc1bc651e8ca9e37aba8c9cf50ee6ed1df7b26d2ff58ab96e274f7",
+      "images": [
+        {
+          "file": "baseline/16x16/raytracingbasic_spike.ppm",
+          "sha256": "dd5b8d1bdad0ba7dc955f1eff2814327470d8755e5220c583491c44a55da191b",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        },
+        {
+          "file": "position-fetch/16x16/raytracingbasic_spike.ppm",
+          "sha256": "84d76993b1316852dd9a2e3064d7557c65b7766e6d8311032dce01e8046290c5",
+          "spike_execution_confirmed": true,
+          "completion_frontier": "PASS"
+        }
+      ]
+    }
+  ],
+  "scope": "Maintained MegaKernel feature matrix on the independently built Spike software baseline; not exhaustive Vulkan RT or RTL acceptance.",
+  "rendered_images": 33,
+  "pass_summaries": [
+    "PASS callable-shader dimensions=160x96 sbt_indices=0,1,2 sha256=d7bdabc9540254754933b8be074b54b6dc98ee48d326d2055a0b5b20a9c4f29c",
+    "PASS nested-callable-shader depth=2 sha256=159a95d4b177fd7d985abd7abbdcceefd8af18ab43a9bdec88476c657478bbc6 elf=/home/liuql/projects/ventus-texture-repro-20261103/artifacts/rtcore-spike/publication-full-matrix-20261103/nested_callable_shader_image/160x96/elf/ventus_vk_rt_eZmVxU.riscv",
+    "PASS callable-shader-record-data dimensions=160x96 record_colors=red,blue,yellow sha256=1ff8532e2ba5dc7d39bb89720a66a9ccb355e8d5d30196b848dbb0ff1f54dd05",
+    "PASS callable-shader-restrictions profile=megakernel nested=depth2-bounded traceRay=frontend-unrepresentable-and-compiler-guarded",
+    "PASS instance-custom-index-image dimensions=16x16 custom_index=0x5a changed_hit_pixels=72 baseline_sha256=dd5b8d1bdad0ba7dc955f1eff2814327470d8755e5220c583491c44a55da191b custom_sha256=3d09862daeb6749e184b2b15c85e4e8e8d578912db65574f91fbe6b589e39415",
+    "PASS instance-transform-builtins dimensions=16x16 verified_hit_pixels=30 baseline_sha256=dd5b8d1bdad0ba7dc955f1eff2814327470d8755e5220c583491c44a55da191b transformed_sha256=3736117892f05da592607666a2c0d6e5a23ee2618aad93f3ab9b527d208c5fdc",
+    "PASS iterative-reflections-image profile=megakernel dimensions=160x96 colors=260 black=4116 red=91 green=199 blue=219 gold=216 sky=10519 sha256=65480e26a328cd5bb1205d33fc6114837f7cae71cea0754eec9c4b31e5334703",
+    "PASS miss-secondary-ray traverse=6 release=3 sha256=87d66fa972ec6af0d9cdab37bd3b1dd096b0b4f5ac731e23cfd94f05ee3cbcc0",
+    "PASS multiset-indirect-as-indirect2-rt-image dimensions=160x96 sha256=1d8261975e5d53e8832a2c7acfa8606ff60b2c5705fca61bf7ad2002bd666bfe slots=0,32,33",
+    "PASS procedural-aabb-image dimensions=160x96 colors=2689 non_background=4489 center=(48, 39, 12) sha256=bdb06f654a712e58968c20823c54c44fb51d9ed37e4259720e0c1272dd448a17",
+    "PASS ray-culling-flags baseline=dd5b8d1bdad0ba7dc955f1eff2814327470d8755e5220c583491c44a55da191b culled=0605389515009d833fe91e7dcb359d185545d2716f7f7e619794886f91c151cb cases=12",
+    "PASS ray-primitive-culling basic=dd5b8d1bdad0ba7dc955f1eff2814327470d8755e5220c583491c44a55da191b procedural=5ae97d4ddc214879360bea239931f49c6f81dfd98b3849f23dd527a072515b38 miss=0605389515009d833fe91e7dcb359d185545d2716f7f7e619794886f91c151cb cases=6",
+    "PASS sbt-record-data-image dimensions=160x96 colors={(0, 0, 0): 7359, (255, 255, 255): 2946, (127, 127, 127): 4000, (255, 0, 0): 1055} sha256=7d585343b55a01b8fb48ad2ca776de8b43b5766ab6fa51fff9783d52cd139e26",
+    "PASS textured-any-hit-image profile=megakernel dimensions=160x96 colors=2914 background=10104 black=0 gray=3561 sha256=88b724540dc17b23161c638ebcbb71e9acaf73ff098b43764f9edf17cd5bebb0",
+    "PASS triangle-position-fetch dimensions=16x16 verified_hit_pixels=72 baseline_sha256=dd5b8d1bdad0ba7dc955f1eff2814327470d8755e5220c583491c44a55da191b position_fetch_sha256=84d76993b1316852dd9a2e3064d7557c65b7766e6d8311032dce01e8046290c5",
+    "PASS megakernel-feature-matrix gates=15 manifest=/home/liuql/projects/ventus-texture-repro-20261103/artifacts/rtcore-spike/publication-full-matrix-20261103/matrix.tsv"
+  ]
+}

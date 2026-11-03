@@ -16,7 +16,7 @@
 
 ## Linux 主机依赖
 
-以 Ubuntu 24.04、Python 3.12、GCC 13 为复现环境。需要可提供 LLVM 20 的软件源；配置方法见 [LLVM 官方软件源](https://apt.llvm.org/)。Mesa 链接的是主机 LLVM 20，Ventus ELF 则由本仓库编译的 LLVM 16 定制后端生成，二者不能互换。
+以 Ubuntu 24.04、Python 3.12、GCC 13 为复现环境。本机 LLVM 20.1.2 来自 Ubuntu noble-updates/noble-security 的 universe；其他发行版可参考 [LLVM 官方软件源](https://apt.llvm.org/)，安装明确版本。Mesa 链接的是主机 LLVM 20，Ventus ELF 则由本仓库编译的 LLVM 16 定制后端生成，二者不能互换。
 
 ```bash
 sudo apt-get install build-essential cmake ninja-build git python3 python3-venv \
@@ -49,7 +49,7 @@ git_safe -C driver submodule update --init --depth 1 --jobs 1 dependencies/membo
 
 python3 -m venv build/texture-tools
 build/texture-tools/bin/pip install 'meson==1.11.1' 'Mako==1.3.10' \
-    'PyYAML==6.0.3' 'packaging==25.0'
+    'MarkupSafe==3.0.4' 'PyYAML==6.0.3' 'packaging==25.0'
 python3 tools/texture_repro.py check
 ```
 

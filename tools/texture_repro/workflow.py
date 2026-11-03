@@ -127,6 +127,9 @@ def build(args):
             meson = ROOT / 'build/texture-tools/bin/meson'
             if not meson.is_file():
                 raise RuntimeError('prepare build/texture-tools as documented (Meson 1.11.1)')
+            # Mesa searches versioned Python executables for its code generators.
+            # They must see the same venv's Mako, not an unrelated host Python.
+            env['PATH'] = str(meson.parent) + os.pathsep + env['PATH']
             llvm_config = Path(args.host_llvm_config).resolve()
             version = subprocess.check_output([llvm_config, '--version'], text=True).strip()
             if not version.startswith('20.'):
@@ -240,7 +243,7 @@ def verify(args):
                 raise RuntimeError('textured any-hit image gate failed')
             report['image_sha256'] = digest(ppm)
         report['status'] = 'PASS'
-    except (RuntimeError, subprocess.SubprocessError, OSError) as error:
+    except (RuntimeError, subprocess.SubprocessError, OSError, ValueError) as error:
         report['status'] = 'FAIL'
         report['error'] = str(error)
         raise
@@ -273,7 +276,7 @@ def main():
             build(args)
         else:
             verify(args)
-    except (RuntimeError, subprocess.SubprocessError, OSError) as error:
+    except (RuntimeError, subprocess.SubprocessError, OSError, ValueError) as error:
         print(f'error: {error}', file=sys.stderr)
         return 1
     return 0
